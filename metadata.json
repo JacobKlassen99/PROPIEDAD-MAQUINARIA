@@ -1,0 +1,6 @@
+{
+  "name": "MAQUINARIAS Y PROPIEDAD",
+  "description": "Sistema integral de gestión agrícola para maquinarias, trabajos en propiedad y terceros, lotes, campañas y reportes financieros.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
