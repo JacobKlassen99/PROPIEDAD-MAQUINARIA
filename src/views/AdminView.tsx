@@ -13,6 +13,10 @@ import {
   AlertCircle,
   LandPlot,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  Sparkles,
+  Wrench,
   ArrowLeft,
   BarChart3,
   Tag,
@@ -27,6 +31,7 @@ import {
 import {
   Campaign,
   Machine,
+  MachineJobType,
   Lot,
   ItemConfig,
   Asset,
@@ -47,6 +52,10 @@ import {
   createMachine,
   updateMachine,
   deleteMachine,
+  saveMachineJobType,
+  deleteMachineJobType,
+  seedNewHollandJobs,
+  NEW_HOLLAND_DEFAULT_JOBS,
   saveExchangeRateConfig,
   getLocalDateString,
   createAsset,
@@ -60,15 +69,20 @@ import {
   hasAdminAuthorization,
   getAdminToken,
   isAdminAuthorizationVerifiedInSession,
+  changeSystemPassword,
 } from '../services/backend';
 import { AppsScriptModal } from '../components/AppsScriptModal';
 import { ReportsView } from './ReportsView';
+import { VisualIcon } from '../components/VisualIcon';
+import { IconBottomSheet } from '../components/IconBottomSheet';
+import { getIconDefinition } from '../services/iconCatalog';
 
 interface Props {
   session: UserSession | null;
   campaigns: Campaign[];
   activeCampaign: Campaign | null;
   machines: Machine[];
+  machineJobTypes?: MachineJobType[];
   lots: Lot[];
   jobs: MachineryJob[];
   expenses: Expense[];
@@ -85,6 +99,7 @@ type AdminScreen =
   | 'main'
   | 'reports'
   | 'settings'
+  | 'passwords'
   | 'campanas'
   | 'lotes'
   | 'maquinarias'
@@ -97,6 +112,7 @@ export const AdminView: React.FC<Props> = ({
   campaigns = [],
   activeCampaign,
   machines = [],
+  machineJobTypes = [],
   lots = [],
   jobs = [],
   expenses = [],
@@ -298,6 +314,139 @@ export const AdminView: React.FC<Props> = ({
   // Machine Deletion Modal State (Top-level hooks)
   const [deletingMachine, setDeletingMachine] = useState<Machine | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Machine Job Types Management State (Top-level hooks)
+  const [expandedAdminMachineId, setExpandedAdminMachineId] = useState<string | null>(null);
+  const [showJobTypeModal, setShowJobTypeModal] = useState(false);
+  const [editingJobTypeId, setEditingJobTypeId] = useState<string | null>(null);
+  const [jtMaquinaId, setJtMaquinaId] = useState('');
+  const [jtNombre, setJtNombre] = useState('');
+  const [jtTarifa, setJtTarifa] = useState('30');
+  const [jtUnidad, setJtUnidad] = useState<'ha' | 'hora'>('ha');
+  const [jtMoneda, setJtMoneda] = useState<Currency>('USD');
+  const [jtActivo, setJtActivo] = useState(true);
+  const [isSavingJobType, setIsSavingJobType] = useState(false);
+  const [seedingMachineId, setSeedingMachineId] = useState<string | null>(null);
+
+  // Password Management State
+  const [pwdTargetRole, setPwdTargetRole] = useState<'admin' | 'usuario'>('admin');
+  const [pwdCurrentAdmin, setPwdCurrentAdmin] = useState('');
+  const [pwdNew, setPwdNew] = useState('');
+  const [pwdConfirm, setPwdConfirm] = useState('');
+  const [showPwdCurrent, setShowPwdCurrent] = useState(false);
+  const [showPwdNew, setShowPwdNew] = useState(false);
+  const [showPwdConfirm, setShowPwdConfirm] = useState(false);
+  const [isSavingPwd, setIsSavingPwd] = useState(false);
+  const [showConfirmPwdModal, setShowConfirmPwdModal] = useState(false);
+  const [pwdSuccessMsg, setPwdSuccessMsg] = useState<string | null>(null);
+  const [pwdErrorMsg, setPwdErrorMsg] = useState<string | null>(null);
+
+  const getJobsForMachine = (mId: string): MachineJobType[] => {
+    if (!mId) return [];
+    const m = machines.find((item) => item.id === mId);
+    let list = (machineJobTypes || []).filter((j) => String(j.maquinaId) === String(mId));
+    if (list.length === 0 && m?.trabajos && m.trabajos.length > 0) {
+      list = m.trabajos;
+    }
+    if (
+      list.length === 0 &&
+      m &&
+      (m.nombre.toLowerCase().includes('new holland') ||
+        m.nombre.toLowerCase().includes('ts115') ||
+        m.nombre.toLowerCase().includes('ts 115'))
+    ) {
+      list = NEW_HOLLAND_DEFAULT_JOBS.map((j, idx) => ({
+        ...j,
+        id: `nh_default_${idx + 1}`,
+        maquinaId: m.id,
+        activo: true,
+      }));
+    }
+    return list;
+  };
+
+  const handleOpenAddJobType = (mId: string) => {
+    setJtMaquinaId(mId);
+    setEditingJobTypeId(null);
+    setJtNombre('');
+    setJtTarifa('30');
+    setJtUnidad('ha');
+    setJtMoneda('USD');
+    setJtActivo(true);
+    setShowJobTypeModal(true);
+  };
+
+  const handleOpenEditJobType = (jt: MachineJobType) => {
+    setJtMaquinaId(jt.maquinaId);
+    setEditingJobTypeId(jt.id);
+    setJtNombre(jt.nombre);
+    setJtTarifa(String(jt.tarifa));
+    const rawU = String(jt.unidad || 'ha').toLowerCase();
+    setJtUnidad(rawU.includes('hora') || rawU === 'h' ? 'hora' : 'ha');
+    setJtMoneda(jt.moneda);
+    setJtActivo(jt.activo !== false);
+    setShowJobTypeModal(true);
+  };
+
+  const handleSaveJobType = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!jtNombre.trim()) {
+      setErrorMsg('El nombre del trabajo es obligatorio.');
+      return;
+    }
+    setIsSavingJobType(true);
+    setErrorMsg(null);
+    try {
+      await saveMachineJobType({
+        ...(editingJobTypeId ? { id: editingJobTypeId } : {}),
+        maquinaId: jtMaquinaId,
+        nombre: jtNombre.trim(),
+        tarifa: parseDecimalNumber(jtTarifa),
+        unidad: jtUnidad,
+        moneda: jtMoneda,
+        activo: jtActivo,
+      });
+      setSuccessMsg(
+        editingJobTypeId
+          ? 'Trabajo y tarifa actualizados. Se aplicará a los próximos servicios sin alterar registros pasados.'
+          : 'Nuevo trabajo registrado exitosamente para la máquina.'
+      );
+      setShowJobTypeModal(false);
+      onRefreshData();
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Error al guardar el trabajo');
+    } finally {
+      setIsSavingJobType(false);
+    }
+  };
+
+  const handleDeleteJobTypeConfirm = async (jt: MachineJobType) => {
+    const confirmed = window.confirm(
+      `¿Desea eliminar la labor "${jt.nombre}" de esta máquina? Los servicios ya registrados en el historial no serán afectados.`
+    );
+    if (!confirmed) return;
+    try {
+      await deleteMachineJobType(jt.id);
+      setSuccessMsg('Labor eliminada de la máquina.');
+      onRefreshData();
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar labor');
+    }
+  };
+
+  const handleSeedJobs = async (mId: string) => {
+    setSeedingMachineId(mId);
+    setErrorMsg(null);
+    try {
+      await seedNewHollandJobs(mId);
+      setSuccessMsg('Se cargaron exitosamente los 10 trabajos oficiales con sus tarifas para New Holland TS115.');
+      onRefreshData();
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Error al cargar los trabajos oficiales');
+    } finally {
+      setSeedingMachineId(null);
+    }
+  };
 
   if (verifyingAuth) {
     return (
@@ -823,6 +972,7 @@ export const AdminView: React.FC<Props> = ({
           campaigns={campaigns}
           activeCampaign={activeCampaign}
           machines={machines}
+          machineJobTypes={machineJobTypes}
           lots={lots}
           jobs={jobs}
           expenses={expenses}
@@ -925,9 +1075,334 @@ export const AdminView: React.FC<Props> = ({
             </div>
             <ChevronRight className="h-5 w-5 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
           </button>
+
+          {/* Option 3: Cambiar contraseñas (Solo Administrador) */}
+          <button
+            type="button"
+            onClick={() => {
+              setPwdErrorMsg(null);
+              setPwdSuccessMsg(null);
+              setPwdCurrentAdmin('');
+              setPwdNew('');
+              setPwdConfirm('');
+              navigateTo('passwords');
+            }}
+            className="w-full flex items-center justify-between p-4 sm:p-5 hover:bg-stone-50 transition cursor-pointer text-left group min-h-[64px]"
+          >
+            <div className="flex items-center gap-3.5 min-w-0">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-800 group-hover:bg-amber-600 group-hover:text-white transition">
+                <KeyRound className="h-5 w-5" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-stone-900 group-hover:text-emerald-800 transition">
+                  Cambiar contraseñas
+                </h3>
+                <p className="text-xs text-stone-500 truncate">
+                  Administrador y Usuario
+                </p>
+              </div>
+            </div>
+            <ChevronRight className="h-5 w-5 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
+          </button>
         </div>
 
         <AppsScriptModal isOpen={showScriptModal} onClose={() => setShowScriptModal(false)} />
+      </div>
+    );
+  }
+
+  // RENDER LEVEL 2: Cambiar Contraseñas Screen
+  if (screen === 'passwords') {
+    const handleInitiatePasswordChange = (e: React.FormEvent) => {
+      e.preventDefault();
+      setPwdErrorMsg(null);
+      setPwdSuccessMsg(null);
+
+      if (!pwdCurrentAdmin.trim()) {
+        setPwdErrorMsg('Ingresa la contraseña actual de Administrador.');
+        return;
+      }
+
+      if (!pwdNew.trim()) {
+        setPwdErrorMsg('Ingresa la nueva contraseña.');
+        return;
+      }
+
+      if (pwdNew.trim().length < 8) {
+        setPwdErrorMsg('La nueva contraseña debe tener al menos 8 caracteres.');
+        return;
+      }
+
+      if (pwdNew !== pwdConfirm) {
+        setPwdErrorMsg('Las contraseñas nuevas no coinciden.');
+        return;
+      }
+
+      setShowConfirmPwdModal(true);
+    };
+
+    const handleExecutePasswordChange = async () => {
+      setShowConfirmPwdModal(false);
+      setIsSavingPwd(true);
+      setPwdErrorMsg(null);
+      setPwdSuccessMsg(null);
+
+      try {
+        await changeSystemPassword(pwdTargetRole, pwdCurrentAdmin, pwdNew);
+        if (pwdTargetRole === 'admin') {
+          setPwdSuccessMsg(
+            'Contraseña de Administrador actualizada exitosamente. Redirigiendo...'
+          );
+          setPwdCurrentAdmin('');
+          setPwdNew('');
+          setPwdConfirm('');
+          setTimeout(() => {
+            if (onRevokeAuthorization) {
+              onRevokeAuthorization();
+            } else {
+              window.location.reload();
+            }
+          }, 1800);
+        } else {
+          setPwdSuccessMsg(
+            'Contraseña de Usuario actualizada exitosamente.'
+          );
+          setPwdCurrentAdmin('');
+          setPwdNew('');
+          setPwdConfirm('');
+        }
+      } catch (err: unknown) {
+        setPwdErrorMsg(err instanceof Error ? err.message : 'Error al cambiar la contraseña');
+      } finally {
+        setIsSavingPwd(false);
+      }
+    };
+
+    return (
+      <div className="space-y-4 max-w-md mx-auto w-full">
+        {/* Navigation Bar */}
+        <div className="flex items-center justify-between pb-2 border-b border-stone-200/80">
+          <button
+            type="button"
+            onClick={handleGoBack}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-stone-200 text-xs font-semibold text-stone-700 hover:bg-stone-50 transition cursor-pointer shrink-0 min-h-[38px]"
+          >
+            <ArrowLeft className="h-4 w-4 text-emerald-700" />
+            <span>Volver a Administración</span>
+          </button>
+        </div>
+
+        {/* Screen Header */}
+        <div>
+          <h2 className="text-base sm:text-lg font-bold text-stone-900 tracking-tight">
+            Cambiar contraseña
+          </h2>
+        </div>
+
+        {/* Form Card */}
+        <div className="rounded-2xl border border-stone-200/80 bg-white p-4 sm:p-5 shadow-xs space-y-4">
+          {/* iOS Segmented Control */}
+          <div className="bg-stone-100/90 p-1 rounded-xl flex text-xs font-medium border border-stone-200/60">
+            <button
+              type="button"
+              onClick={() => {
+                setPwdTargetRole('usuario');
+                setPwdErrorMsg(null);
+                setPwdSuccessMsg(null);
+              }}
+              className={`flex-1 py-2 rounded-lg text-center font-semibold transition cursor-pointer ${
+                pwdTargetRole === 'usuario'
+                  ? 'bg-white text-stone-900 shadow-xs'
+                  : 'text-stone-500 hover:text-stone-800'
+              }`}
+            >
+              Usuario
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setPwdTargetRole('admin');
+                setPwdErrorMsg(null);
+                setPwdSuccessMsg(null);
+              }}
+              className={`flex-1 py-2 rounded-lg text-center font-semibold transition cursor-pointer ${
+                pwdTargetRole === 'admin'
+                  ? 'bg-white text-stone-900 shadow-xs'
+                  : 'text-stone-500 hover:text-stone-800'
+              }`}
+            >
+              Admin
+            </button>
+          </div>
+
+          {/* Alert Messages */}
+          {pwdErrorMsg && (
+            <div className="rounded-xl border border-red-200 bg-red-50/80 p-3 text-xs text-red-800 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <AlertCircle className="h-4 w-4 text-red-600 shrink-0" />
+                <span className="font-semibold break-words">{pwdErrorMsg}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPwdErrorMsg(null)}
+                className="text-red-500 hover:text-red-700 p-1 shrink-0 cursor-pointer"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+
+          {pwdSuccessMsg && (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50/80 p-3 text-xs text-emerald-900 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Check className="h-4 w-4 text-emerald-600 shrink-0" />
+                <span className="font-semibold break-words">{pwdSuccessMsg}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPwdSuccessMsg(null)}
+                className="text-emerald-600 hover:text-emerald-800 p-1 shrink-0 cursor-pointer"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+
+          <form onSubmit={handleInitiatePasswordChange} className="space-y-3.5">
+            {/* Field 1: Contraseña actual de Admin */}
+            <div className="space-y-1">
+              <label className="block text-xs font-semibold text-stone-700">
+                Contraseña actual de Admin
+              </label>
+              <div className="relative">
+                <input
+                  type={showPwdCurrent ? 'text' : 'password'}
+                  value={pwdCurrentAdmin}
+                  onChange={(e) => setPwdCurrentAdmin(e.target.value)}
+                  placeholder="••••••••"
+                  autoComplete="current-password"
+                  className="w-full rounded-xl border border-stone-200 bg-stone-50/50 px-3.5 py-2.5 pr-10 text-xs text-stone-900 focus:bg-white focus:border-emerald-600 focus:outline-none transition min-h-[42px]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPwdCurrent(!showPwdCurrent)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-stone-400 hover:text-stone-600 transition cursor-pointer"
+                  title={showPwdCurrent ? 'Ocultar' : 'Ver'}
+                >
+                  {showPwdCurrent ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+
+            {/* Field 2: Nueva contraseña */}
+            <div className="space-y-1">
+              <label className="block text-xs font-semibold text-stone-700">
+                Nueva contraseña
+              </label>
+              <div className="relative">
+                <input
+                  type={showPwdNew ? 'text' : 'password'}
+                  value={pwdNew}
+                  onChange={(e) => setPwdNew(e.target.value)}
+                  placeholder="••••••••"
+                  autoComplete="new-password"
+                  className="w-full rounded-xl border border-stone-200 bg-stone-50/50 px-3.5 py-2.5 pr-10 text-xs text-stone-900 focus:bg-white focus:border-emerald-600 focus:outline-none transition min-h-[42px]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPwdNew(!showPwdNew)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-stone-400 hover:text-stone-600 transition cursor-pointer"
+                  title={showPwdNew ? 'Ocultar' : 'Ver'}
+                >
+                  {showPwdNew ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+
+            {/* Field 3: Confirmar contraseña */}
+            <div className="space-y-1">
+              <label className="block text-xs font-semibold text-stone-700">
+                Confirmar contraseña
+              </label>
+              <div className="relative">
+                <input
+                  type={showPwdConfirm ? 'text' : 'password'}
+                  value={pwdConfirm}
+                  onChange={(e) => setPwdConfirm(e.target.value)}
+                  placeholder="••••••••"
+                  autoComplete="new-password"
+                  className="w-full rounded-xl border border-stone-200 bg-stone-50/50 px-3.5 py-2.5 pr-10 text-xs text-stone-900 focus:bg-white focus:border-emerald-600 focus:outline-none transition min-h-[42px]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPwdConfirm(!showPwdConfirm)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-stone-400 hover:text-stone-600 transition cursor-pointer"
+                  title={showPwdConfirm ? 'Ocultar' : 'Ver'}
+                >
+                  {showPwdConfirm ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+
+            {/* Primary Button */}
+            <div className="pt-2">
+              <button
+                type="submit"
+                disabled={isSavingPwd}
+                className="w-full flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 text-xs sm:text-sm shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[44px]"
+              >
+                {isSavingPwd ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    <span>Guardando...</span>
+                  </>
+                ) : (
+                  <span>Guardar contraseña</span>
+                )}
+              </button>
+
+              {/* Discrete Note */}
+              <p className="text-xs text-stone-500 text-center mt-2.5">
+                Se cerrarán las sesiones correspondientes.
+              </p>
+            </div>
+          </form>
+        </div>
+
+        {/* iOS Confirmation Modal Dialog */}
+        {showConfirmPwdModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 backdrop-blur-xs p-4 animate-fadeIn">
+            <div className="w-full max-w-xs rounded-2xl bg-white p-5 shadow-xl border border-stone-200/80 text-center space-y-3.5">
+              <div className="flex h-11 w-11 items-center justify-center rounded-full bg-emerald-100 text-emerald-800 mx-auto">
+                <Lock className="h-5 w-5 text-emerald-700" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-stone-900">¿Cambiar contraseña?</h3>
+                <p className="text-xs text-stone-600 mt-1.5 leading-relaxed">
+                  {pwdTargetRole === 'usuario'
+                    ? 'Se cerrarán las sesiones de Usuario en todos los dispositivos. ¿Continuar?'
+                    : 'Se cerrarán todas las sesiones de Administrador, incluida esta. ¿Continuar?'}
+                </p>
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmPwdModal(false)}
+                  className="flex-1 py-2.5 rounded-xl border border-stone-200 bg-stone-100 text-xs font-semibold text-stone-700 hover:bg-stone-200 transition cursor-pointer min-h-[40px]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExecutePasswordChange}
+                  className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-xs font-semibold text-white transition cursor-pointer shadow-xs min-h-[40px]"
+                >
+                  Cambiar contraseña
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1793,53 +2268,150 @@ export const AdminView: React.FC<Props> = ({
 
           {/* Records List FIRST */}
           <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-xs">
-            {/* MOBILE VIEW: Compact Cards */}
-            <div className="block md:hidden space-y-2.5">
-              {machines.map((m) => (
-                <div key={m.id} className="rounded-xl border border-stone-200 bg-stone-50/70 p-3.5 space-y-2">
-                  <div className="flex items-center justify-between border-b border-stone-200/60 pb-2">
-                    <div>
-                      <h4 className="text-xs font-bold text-stone-900">{m.nombre}</h4>
-                      <span className="text-[10px] text-stone-500">{m.identificacion} &bull; {m.tipo}</span>
+            {/* MOBILE VIEW: Compact Cards with Job Types Accordion */}
+            <div className="block md:hidden space-y-3">
+              {machines.map((m) => {
+                const mJobs = getJobsForMachine(m.id);
+                const isExpanded = expandedAdminMachineId === m.id;
+                const isNewHolland =
+                  m.nombre.toLowerCase().includes('new holland') ||
+                  m.nombre.toLowerCase().includes('ts115') ||
+                  m.nombre.toLowerCase().includes('ts 115');
+
+                return (
+                  <div key={m.id} className="rounded-xl border border-stone-200 bg-stone-50/70 p-3.5 space-y-2.5">
+                    <div className="flex items-center justify-between border-b border-stone-200/60 pb-2">
+                      <div>
+                        <h4 className="text-xs font-bold text-stone-900">{m.nombre}</h4>
+                        <span className="text-[10px] text-stone-500">{m.identificacion} &bull; {m.tipo}</span>
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 text-[10px] font-bold rounded ${
+                          m.estado === 'operativo'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-amber-100 text-amber-800'
+                        }`}
+                      >
+                        {m.estado}
+                      </span>
                     </div>
-                    <span
-                      className={`px-2 py-0.5 text-[10px] font-bold rounded ${
-                        m.estado === 'operativo'
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : 'bg-amber-100 text-amber-800'
-                      }`}
-                    >
-                      {m.estado}
-                    </span>
-                  </div>
 
-                  <div className="text-xs text-stone-700 flex justify-between">
-                    <span className="text-stone-500">Tarifa Base:</span>
-                    <span className="font-bold font-mono text-emerald-800">
-                      {m.moneda} {m.tarifa}/{m.unidad}
-                    </span>
-                  </div>
+                    <div className="text-xs text-stone-700 flex justify-between">
+                      <span className="text-stone-500">Tarifa Base:</span>
+                      <span className="font-bold font-mono text-emerald-800">
+                        {m.moneda} {m.tarifa}/{m.unidad}
+                      </span>
+                    </div>
 
-                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-stone-200/60">
+                    {/* Botón Acordeón de Trabajos */}
                     <button
                       type="button"
-                      onClick={() => handleEditMachine(m)}
-                      className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 cursor-pointer min-h-[36px]"
+                      onClick={() => setExpandedAdminMachineId(isExpanded ? null : m.id)}
+                      className="w-full flex items-center justify-between p-2 rounded-lg bg-white border border-stone-300 text-stone-800 text-xs font-bold transition hover:bg-stone-50 cursor-pointer min-h-[38px]"
                     >
-                      <Edit3 className="h-3.5 w-3.5 text-stone-500" />
-                      <span>Editar</span>
+                      <span className="flex items-center gap-1.5">
+                        <Wrench className="h-3.5 w-3.5 text-emerald-700" />
+                        <span>Trabajos y Tarifas ({mJobs.length})</span>
+                      </span>
+                      {isExpanded ? (
+                        <ChevronUp className="h-4 w-4 text-stone-500" />
+                      ) : (
+                        <ChevronDown className="h-4 w-4 text-stone-500" />
+                      )}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteMachineClick(m)}
-                      className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-red-200 bg-red-50 text-xs font-medium text-red-700 hover:bg-red-100 cursor-pointer min-h-[36px]"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      <span>Eliminar</span>
-                    </button>
+
+                    {/* Contenido Acordeón de Trabajos */}
+                    {isExpanded && (
+                      <div className="p-2.5 rounded-lg bg-white border border-stone-200 space-y-2.5">
+                        {isNewHolland && (
+                          <button
+                            type="button"
+                            disabled={seedingMachineId === m.id}
+                            onClick={() => handleSeedJobs(m.id)}
+                            className="w-full flex items-center justify-center gap-1.5 p-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[38px]"
+                          >
+                            {seedingMachineId === m.id ? (
+                              <>
+                                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                                <span>Cargando 10 trabajos oficiales...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Sparkles className="h-3.5 w-3.5 text-amber-300" />
+                                <span>Cargar 10 trabajos oficiales New Holland TS115</span>
+                              </>
+                            )}
+                          </button>
+                        )}
+
+                        <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
+                          {mJobs.map((jt) => (
+                            <div
+                              key={jt.id}
+                              className="p-2 rounded-lg bg-stone-50 border border-stone-200/80 flex items-center justify-between gap-2"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <span className="text-xs font-bold text-stone-900 block truncate">
+                                  {jt.nombre}
+                                </span>
+                                <span className="text-[11px] font-semibold text-emerald-800 font-mono">
+                                  {jt.moneda === 'USD' ? 'USD' : 'Bs'} {jt.tarifa} / {jt.unidad}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditJobType(jt)}
+                                  className="p-1 text-stone-500 hover:text-emerald-700 hover:bg-stone-200 rounded cursor-pointer"
+                                  title="Editar labor"
+                                >
+                                  <Edit3 className="h-3.5 w-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteJobTypeConfirm(jt)}
+                                  className="p-1 text-stone-400 hover:text-red-600 hover:bg-stone-200 rounded cursor-pointer"
+                                  title="Eliminar labor"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleOpenAddJobType(m.id)}
+                          className="w-full flex items-center justify-center gap-1.5 p-2 rounded-lg border border-dashed border-stone-300 hover:border-emerald-600 text-xs font-semibold text-stone-700 hover:text-emerald-800 hover:bg-emerald-50/50 transition cursor-pointer min-h-[36px]"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          <span>Agregar Labor / Trabajo</span>
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-end gap-2 pt-2 border-t border-stone-200/60">
+                      <button
+                        type="button"
+                        onClick={() => handleEditMachine(m)}
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 cursor-pointer min-h-[36px]"
+                      >
+                        <Edit3 className="h-3.5 w-3.5 text-stone-500" />
+                        <span>Editar</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteMachineClick(m)}
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-red-200 bg-red-50 text-xs font-medium text-red-700 hover:bg-red-100 cursor-pointer min-h-[36px]"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        <span>Eliminar</span>
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
 
               {machines.length === 0 && (
                 <div className="py-10 text-center text-xs text-stone-400">
@@ -1848,7 +2420,7 @@ export const AdminView: React.FC<Props> = ({
               )}
             </div>
 
-            {/* DESKTOP VIEW: Table */}
+            {/* DESKTOP VIEW: Table with Job Types Accordion */}
             <div className="hidden md:block overflow-x-auto">
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
@@ -1856,56 +2428,172 @@ export const AdminView: React.FC<Props> = ({
                     <th className="py-2.5 px-3 font-semibold">Identificación / Nombre</th>
                     <th className="py-2.5 px-3 font-semibold">Tipo</th>
                     <th className="py-2.5 px-3 font-semibold text-right">Tarifa Base</th>
+                    <th className="py-2.5 px-3 font-semibold text-center">Trabajos Configurados</th>
                     <th className="py-2.5 px-3 font-semibold text-center">Estado</th>
                     <th className="py-2.5 px-3 font-semibold text-center">Acciones</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-stone-100">
-                  {machines.map((m) => (
-                    <tr key={m.id} className="hover:bg-stone-50">
-                      <td className="py-2 px-3">
-                        <span className="font-bold text-stone-900">{m.nombre}</span>
-                        <span className="block text-[10px] text-stone-400">{m.identificacion}</span>
-                      </td>
-                      <td className="py-2 px-3 text-stone-600">{m.tipo}</td>
-                      <td className="py-2 px-3 text-right font-bold text-emerald-800 font-mono">
-                        {m.moneda} {m.tarifa}/{m.unidad}
-                      </td>
-                      <td className="py-2 px-3 text-center">
-                        <span
-                          className={`px-2 py-0.5 text-[10px] font-semibold rounded ${
-                            m.estado === 'operativo'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : 'bg-amber-100 text-amber-800'
-                          }`}
-                        >
-                          {m.estado}
-                        </span>
-                      </td>
-                      <td className="py-2 px-3 text-center">
-                        <div className="flex items-center justify-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => handleEditMachine(m)}
-                            className="p-1 text-stone-400 hover:text-emerald-700 hover:bg-stone-100 rounded transition cursor-pointer"
-                          >
-                            <Edit3 className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteMachineClick(m)}
-                            className="p-1 text-stone-400 hover:text-red-600 hover:bg-stone-100 rounded transition cursor-pointer"
-                            title="Eliminar Maquinaria"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                  {machines.map((m) => {
+                    const mJobs = getJobsForMachine(m.id);
+                    const isExpanded = expandedAdminMachineId === m.id;
+                    const isNewHolland =
+                      m.nombre.toLowerCase().includes('new holland') ||
+                      m.nombre.toLowerCase().includes('ts115') ||
+                      m.nombre.toLowerCase().includes('ts 115');
+
+                    return (
+                      <React.Fragment key={m.id}>
+                        <tr className="hover:bg-stone-50">
+                          <td className="py-2.5 px-3">
+                            <span className="font-bold text-stone-900">{m.nombre}</span>
+                            <span className="block text-[10px] text-stone-400">{m.identificacion}</span>
+                          </td>
+                          <td className="py-2.5 px-3 text-stone-600">{m.tipo}</td>
+                          <td className="py-2.5 px-3 text-right font-bold text-emerald-800 font-mono">
+                            {m.moneda} {m.tarifa}/{m.unidad}
+                          </td>
+                          <td className="py-2.5 px-3 text-center">
+                            <button
+                              type="button"
+                              onClick={() => setExpandedAdminMachineId(isExpanded ? null : m.id)}
+                              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg border border-stone-300 hover:border-emerald-600 bg-white hover:bg-stone-50 text-xs font-semibold text-stone-700 transition cursor-pointer min-h-[32px]"
+                            >
+                              <Wrench className="h-3.5 w-3.5 text-emerald-700" />
+                              <span>{mJobs.length} labores</span>
+                              {isExpanded ? (
+                                <ChevronUp className="h-3.5 w-3.5 text-stone-400" />
+                              ) : (
+                                <ChevronDown className="h-3.5 w-3.5 text-stone-400" />
+                              )}
+                            </button>
+                          </td>
+                          <td className="py-2.5 px-3 text-center">
+                            <span
+                              className={`px-2 py-0.5 text-[10px] font-semibold rounded ${
+                                m.estado === 'operativo'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-amber-100 text-amber-800'
+                              }`}
+                            >
+                              {m.estado}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3 text-center">
+                            <div className="flex items-center justify-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleEditMachine(m)}
+                                className="p-1.5 text-stone-400 hover:text-emerald-700 hover:bg-stone-100 rounded transition cursor-pointer"
+                                title="Editar Maquinaria"
+                              >
+                                <Edit3 className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteMachineClick(m)}
+                                className="p-1.5 text-stone-400 hover:text-red-600 hover:bg-stone-100 rounded transition cursor-pointer"
+                                title="Eliminar Maquinaria"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+
+                        {isExpanded && (
+                          <tr className="bg-stone-50/80">
+                            <td colSpan={6} className="p-4 border-t border-b border-stone-200">
+                              <div className="max-w-3xl mx-auto space-y-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <h5 className="text-xs font-bold text-stone-900 flex items-center gap-1.5">
+                                    <Wrench className="h-4 w-4 text-emerald-700" />
+                                    <span>Labores y Tarifas para {m.nombre}</span>
+                                  </h5>
+
+                                  <div className="flex items-center gap-2">
+                                    {isNewHolland && (
+                                      <button
+                                        type="button"
+                                        disabled={seedingMachineId === m.id}
+                                        onClick={() => handleSeedJobs(m.id)}
+                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-xs transition cursor-pointer min-h-[34px] disabled:opacity-50"
+                                      >
+                                        {seedingMachineId === m.id ? (
+                                          <>
+                                            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                                            <span>Cargando...</span>
+                                          </>
+                                        ) : (
+                                          <>
+                                            <Sparkles className="h-3.5 w-3.5 text-amber-300" />
+                                            <span>Cargar 10 trabajos oficiales</span>
+                                          </>
+                                        )}
+                                      </button>
+                                    )}
+
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenAddJobType(m.id)}
+                                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-emerald-600 bg-white text-emerald-800 hover:bg-emerald-50 text-xs font-bold transition cursor-pointer min-h-[34px]"
+                                    >
+                                      <Plus className="h-3.5 w-3.5" />
+                                      <span>Agregar Labor</span>
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                  {mJobs.map((jt) => (
+                                    <div
+                                      key={jt.id}
+                                      className="p-2.5 rounded-lg bg-white border border-stone-200 flex items-center justify-between gap-2 shadow-2xs"
+                                    >
+                                      <div className="min-w-0 flex-1">
+                                        <span className="text-xs font-bold text-stone-900 block truncate">
+                                          {jt.nombre}
+                                        </span>
+                                        <span className="text-[11px] font-semibold text-emerald-800 font-mono">
+                                          {jt.moneda === 'USD' ? 'USD' : 'Bs'} {jt.tarifa} / {jt.unidad}
+                                        </span>
+                                      </div>
+                                      <div className="flex items-center gap-1 shrink-0">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleOpenEditJobType(jt)}
+                                          className="p-1 text-stone-500 hover:text-emerald-700 hover:bg-stone-100 rounded cursor-pointer"
+                                          title="Editar labor"
+                                        >
+                                          <Edit3 className="h-3.5 w-3.5" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDeleteJobTypeConfirm(jt)}
+                                          className="p-1 text-stone-400 hover:text-red-600 hover:bg-stone-100 rounded cursor-pointer"
+                                          title="Eliminar labor"
+                                        >
+                                          <Trash2 className="h-3.5 w-3.5" />
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ))}
+                                  {mJobs.length === 0 && (
+                                    <div className="col-span-full py-4 text-center text-xs text-stone-500 bg-white rounded-lg border border-stone-200">
+                                      No hay labores individuales configuradas. Usa el botón superior para agregar labores o cargar las oficiales.
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
                   {machines.length === 0 && (
                     <tr>
-                      <td colSpan={5} className="py-10 text-center text-xs text-stone-400">
+                      <td colSpan={6} className="py-10 text-center text-xs text-stone-400">
                         No hay maquinarias registradas.
                       </td>
                     </tr>
@@ -1966,6 +2654,143 @@ export const AdminView: React.FC<Props> = ({
                     )}
                   </button>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal para Crear / Editar Labor y Tarifa de Maquinaria */}
+          {showJobTypeModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs animate-fade-in">
+              <div className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-xl border border-stone-200 space-y-4">
+                <div className="flex items-center justify-between border-b border-stone-100 pb-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-800">
+                      <Wrench className="h-4.5 w-4.5" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-stone-900">
+                        {editingJobTypeId ? 'Editar Labor de Máquina' : 'Nueva Labor para Máquina'}
+                      </h3>
+                      <p className="text-[11px] text-stone-500">
+                        Configure el trabajo, tarifa y unidad de cobro
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowJobTypeModal(false)}
+                    className="p-1 text-stone-400 hover:text-stone-600 rounded-lg hover:bg-stone-100 cursor-pointer"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+
+                <form onSubmit={handleSaveJobType} className="space-y-3.5">
+                  <div>
+                    <label className="block text-xs font-semibold text-stone-700 mb-1">
+                      Nombre de la Labor / Trabajo *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={jtNombre}
+                      onChange={(e) => setJtNombre(e.target.value)}
+                      placeholder="Ej. Tractor con sembradora"
+                      className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
+                    />
+                    <p className="text-[10px] text-stone-500 mt-1">
+                      Puedes modificar el nombre para adaptarlo a las labores reales de la propiedad.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-stone-700 mb-1">
+                        Tarifa *
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        required
+                        value={jtTarifa}
+                        onChange={(e) => setJtTarifa(e.target.value)}
+                        placeholder="30"
+                        className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-stone-700 mb-1">
+                        Unidad de Cobro *
+                      </label>
+                      <select
+                        value={jtUnidad}
+                        onChange={(e) => setJtUnidad(e.target.value as 'ha' | 'hora')}
+                        className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-white min-h-[42px]"
+                      >
+                        <option value="ha">Hectárea (ha)</option>
+                        <option value="hora">Hora</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-stone-700 mb-1">
+                        Moneda *
+                      </label>
+                      <select
+                        value={jtMoneda}
+                        onChange={(e) => setJtMoneda(e.target.value as Currency)}
+                        className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-white font-semibold min-h-[42px]"
+                      >
+                        <option value="USD">USD ($)</option>
+                        <option value="BOB">BOB (Bs)</option>
+                      </select>
+                    </div>
+
+                    <div className="flex items-center gap-2 pt-5">
+                      <input
+                        type="checkbox"
+                        id="jtActivo"
+                        checked={jtActivo}
+                        onChange={(e) => setJtActivo(e.target.checked)}
+                        className="h-4 w-4 rounded text-emerald-600 focus:ring-emerald-500"
+                      />
+                      <label htmlFor="jtActivo" className="text-xs font-medium text-stone-700 cursor-pointer">
+                        Labor Activa
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="bg-amber-50 p-2.5 rounded-xl border border-amber-200 text-[11px] text-amber-900 leading-snug">
+                    ℹ️ Las modificaciones de tarifas solo aplican a nuevos servicios registrados. Los registros históricos conservan la tarifa original con la que fueron guardados.
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2.5 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowJobTypeModal(false)}
+                      className="px-4 py-2.5 rounded-xl border border-stone-300 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 cursor-pointer min-h-[40px]"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isSavingJobType}
+                      className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-700 text-xs font-bold text-white hover:bg-emerald-800 transition cursor-pointer min-h-[40px] disabled:opacity-50"
+                    >
+                      {isSavingJobType ? (
+                        <>
+                          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                          <span>Guardando...</span>
+                        </>
+                      ) : (
+                        <span>{editingJobTypeId ? 'Guardar Cambios' : 'Registrar Labor'}</span>
+                      )}
+                    </button>
+                  </div>
+                </form>
               </div>
             </div>
           )}

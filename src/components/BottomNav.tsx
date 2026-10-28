@@ -5,8 +5,7 @@ import {
   Trees,
   Settings,
 } from 'lucide-react';
-import { MainView } from './Sidebar';
-import { UserSession } from '../types';
+import { MainView, UserSession } from '../types';
 import { checkIsAdmin } from '../services/backend';
 
 interface BottomNavProps {
@@ -47,8 +46,8 @@ export const BottomNav: React.FC<BottomNavProps> = ({
 
   return (
     <nav
-      aria-label="Navegación inferior"
-      className="fixed bottom-0 inset-x-0 z-40 bg-white/95 backdrop-blur-xl border-t border-slate-200/80 lg:hidden pb-[max(env(safe-area-inset-bottom),0.35rem)] shadow-[0_-2px_12px_rgba(0,0,0,0.06)]"
+      aria-label="Navegación principal"
+      className="fixed bottom-0 inset-x-0 z-40 bg-white/95 backdrop-blur-xl border-t border-slate-200/80 pb-[max(env(safe-area-inset-bottom),0.35rem)] shadow-[0_-2px_12px_rgba(0,0,0,0.06)]"
     >
       <div className="grid grid-cols-4 items-center h-16 max-w-lg mx-auto px-2">
         {navItems.map((item) => {

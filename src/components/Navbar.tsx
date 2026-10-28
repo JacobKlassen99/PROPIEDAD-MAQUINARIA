@@ -1,6 +1,6 @@
-import React from 'react';
-import { Menu, RefreshCw, FileCode } from 'lucide-react';
-import { Campaign, Currency, ExchangeRateConfig } from '../types';
+import React, { useState, useRef, useEffect } from 'react';
+import { RefreshCw, FileCode, User, LogOut, CheckCircle2 } from 'lucide-react';
+import { Campaign, Currency, ExchangeRateConfig, UserSession } from '../types';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface Props {
@@ -12,9 +12,10 @@ interface Props {
   exchangeRate: ExchangeRateConfig;
   onRefresh: () => void;
   isRefreshing: boolean;
-  onOpenMobileMenu: () => void;
   onOpenAppsScriptModal: () => void;
   showCurrencyToggle?: boolean;
+  session: UserSession | null;
+  onLogout: () => void;
 }
 
 export const Navbar: React.FC<Props> = ({
@@ -26,109 +27,205 @@ export const Navbar: React.FC<Props> = ({
   exchangeRate,
   onRefresh,
   isRefreshing,
-  onOpenMobileMenu,
   onOpenAppsScriptModal,
   showCurrencyToggle = false,
+  session,
+  onLogout,
 }) => {
+  const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setIsUserMenuOpen(false);
+      }
+    };
+    if (isUserMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isUserMenuOpen]);
+
+  const handleOpenLogoutConfirm = () => {
+    setIsUserMenuOpen(false);
+    setShowLogoutConfirm(true);
+  };
+
+  const handleConfirmLogout = () => {
+    setShowLogoutConfirm(false);
+    onLogout();
+  };
+
   return (
-    <header className="sticky top-0 z-20 w-full max-w-full flex h-14 sm:h-16 shrink-0 items-center justify-between border-b border-slate-200/80 bg-white/90 px-3 sm:px-6 backdrop-blur-md">
-      {/* Left: Mobile Hamburger & Title */}
-      <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
-        <button
-          onClick={onOpenMobileMenu}
-          className="lg:hidden p-2 -ml-1 text-slate-700 hover:text-slate-900 rounded-xl hover:bg-slate-100 transition active:scale-95 cursor-pointer shrink-0"
-          aria-label="Abrir menú"
-        >
-          <Menu className="h-6 w-6" />
-        </button>
-        <div className="min-w-0 flex-1">
-          <h2 className="text-base sm:text-lg font-bold text-slate-900 tracking-tight truncate">
+    <>
+      <header className="sticky top-0 z-30 w-full max-w-full flex h-14 sm:h-16 shrink-0 items-center justify-between border-b border-slate-200/80 bg-white/95 px-3 sm:px-6 backdrop-blur-md shadow-xs">
+        {/* Left: Pantalla actual (sin botón hamburguesa) */}
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 tracking-tight truncate">
             {title}
-          </h2>
+          </h1>
         </div>
-      </div>
 
-      {/* Right: Quick actions adaptables a 320px */}
-      <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-        {/* Active Campaign Badge */}
-        {activeCampaign && (
-          <div
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200/80 text-xs font-semibold text-emerald-900 shrink-0 max-w-[120px] sm:max-w-[200px]"
-            title={`Campaña activa: ${activeCampaign.nombre}`}
+        {/* Right: Acciones y sesión */}
+        <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+          {/* iOS Style Currency Toggle Switch (Bs [switch] USD) - Conservado en Administración */}
+          {showCurrencyToggle && (
+            <div className="flex items-center gap-1 sm:gap-1.5 bg-slate-100/90 hover:bg-slate-100 p-1 rounded-full border border-slate-200/80 shrink-0">
+              <span
+                className={`text-[11px] font-bold px-1 transition-colors ${
+                  currency === 'BOB' ? 'text-slate-900 font-extrabold' : 'text-slate-400'
+                }`}
+              >
+                Bs
+              </span>
+              <button
+                type="button"
+                onClick={onCurrencyToggle}
+                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border border-black/10 cursor-pointer focus:outline-none focus:ring-2 focus:ring-emerald-500 ${
+                  currency === 'USD' ? 'bg-emerald-600' : 'bg-slate-300'
+                }`}
+                title={`Moneda actual: ${currency === 'USD' ? 'Dólares (USD)' : 'Bolivianos (Bs)'}. Toca para cambiar.`}
+                aria-label="Cambiar moneda entre Bolivianos y Dólares"
+              >
+                <span
+                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                    currency === 'USD' ? 'translate-x-5' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+              <span
+                className={`text-[11px] font-bold px-1 transition-colors ${
+                  currency === 'USD' ? 'text-emerald-700 font-extrabold' : 'text-slate-400'
+                }`}
+              >
+                USD
+              </span>
+            </div>
+          )}
+
+          {/* Active Campaign Badge (ej. 2026) */}
+          {activeCampaign && (
+            <div
+              className="flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-full bg-emerald-50 border border-emerald-200/80 text-xs sm:text-xs font-bold text-emerald-900 shrink-0 max-w-[110px] sm:max-w-[180px]"
+              title={`Gestión activa: ${activeCampaign.nombre}`}
+            >
+              <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0" />
+              <span className="truncate">{activeCampaign.nombre}</span>
+            </div>
+          )}
+
+          {/* Manual Refresh Button */}
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={isRefreshing}
+            className="p-2 rounded-full border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 transition active:scale-95 disabled:opacity-50 cursor-pointer shrink-0 flex items-center justify-center min-w-[38px] min-h-[38px]"
+            title="Actualizar datos desde Google Sheets"
+            aria-label="Actualizar datos"
           >
-            <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0" />
-            <span className="truncate">
-              {activeCampaign.nombre}
-            </span>
-          </div>
-        )}
+            <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin text-emerald-600' : 'text-slate-600'}`} />
+          </button>
 
-        {/* Currency Switcher (Bs / USD) - Strictly enabled only in Administration / Financial Reports */}
-        {showCurrencyToggle && (
-          <div className="flex items-center border border-stone-200 rounded-lg p-0.5 bg-stone-50 shrink-0">
+          {/* User Session Icon Button & Popover */}
+          <div className="relative shrink-0" ref={menuRef}>
             <button
               type="button"
-              onClick={() => currency !== 'BOB' && onCurrencyToggle()}
-              className={`px-1.5 py-0.5 sm:px-2 sm:py-1 text-[11px] sm:text-xs font-bold rounded transition cursor-pointer ${
-                currency === 'BOB'
-                  ? 'bg-white text-emerald-800 shadow-xs border border-stone-200/80'
-                  : 'text-stone-500 hover:text-stone-900'
-              }`}
-              title="Bolivianos"
+              onClick={() => setIsUserMenuOpen((prev) => !prev)}
+              className="flex items-center justify-center h-9 w-9 sm:h-10 sm:w-10 rounded-full bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 transition active:scale-95 cursor-pointer focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              title="Opciones de usuario y sesión"
+              aria-label="Menú de usuario"
+              aria-expanded={isUserMenuOpen}
             >
-              Bs
+              <User className="h-4.5 w-4.5 sm:h-5 sm:w-5 text-slate-700" />
             </button>
-            <button
-              type="button"
-              onClick={() => currency !== 'USD' && onCurrencyToggle()}
-              className={`px-1.5 py-0.5 sm:px-2 sm:py-1 text-[11px] sm:text-xs font-bold rounded transition cursor-pointer ${
-                currency === 'USD'
-                  ? 'bg-white text-emerald-800 shadow-xs border border-stone-200/80'
-                  : 'text-stone-500 hover:text-stone-900'
-              }`}
-              title="Dólares"
-            >
-              USD
-            </button>
+
+            {/* User Dropdown Menu */}
+            {isUserMenuOpen && (
+              <div className="absolute right-0 top-full mt-2 w-56 bg-white rounded-2xl shadow-xl border border-slate-200 p-2 z-50 animate-in fade-in zoom-in-95 origin-top-right">
+                {/* User Info Header */}
+                <div className="flex items-center gap-2.5 p-2 bg-slate-50 rounded-xl border border-slate-100">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-800 font-bold text-xs">
+                    {session?.usuario ? session.usuario.charAt(0).toUpperCase() : 'U'}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs sm:text-sm font-bold text-slate-900 truncate">
+                      {session?.usuario || 'Administrador'}
+                    </p>
+                    <span className="inline-block text-[10px] font-semibold text-emerald-800 bg-emerald-50 px-1.5 py-0.2 rounded-full border border-emerald-200/60 capitalize tracking-tight">
+                      {session?.rol || 'administrador'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="mt-1.5 pt-1 border-t border-slate-100">
+                  {/* Cerrar sesión */}
+                  <button
+                    type="button"
+                    onClick={handleOpenLogoutConfirm}
+                    className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-bold text-red-600 hover:bg-red-50 rounded-xl transition text-left cursor-pointer active:scale-98"
+                  >
+                    <LogOut className="h-4 w-4 text-red-600 shrink-0" />
+                    <span>Cerrar sesión</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
-        )}
 
-        {/* Exchange Rate Tip (Visible in Admin view) */}
-        {showCurrencyToggle && (
-          <div className="hidden xl:flex items-center text-[10px] text-stone-500 bg-stone-100/80 px-2 py-1 rounded">
-            <span>TC: 1 USD = {(exchangeRate?.tasaBobPerUsd || 6.96).toFixed(2)} Bs</span>
+          {/* PWA In-App Install Button (Discreet) */}
+          <div className="hidden sm:block shrink-0">
+            <PWAInstallButton />
           </div>
-        )}
-
-        {/* Apps Script Code Modal (Desktop only) */}
-        <button
-          type="button"
-          onClick={onOpenAppsScriptModal}
-          className="hidden md:flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-stone-300 text-xs font-medium text-stone-700 hover:bg-stone-50 transition cursor-pointer"
-          title="Ver o copiar Código.gs para Google Sheets"
-        >
-          <FileCode className="h-3.5 w-3.5 text-emerald-700" />
-          <span>Apps Script</span>
-        </button>
-
-        {/* Manual Refresh Button */}
-        <button
-          type="button"
-          onClick={onRefresh}
-          disabled={isRefreshing}
-          className="p-2 sm:px-3 sm:py-2 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition active:scale-95 disabled:opacity-50 cursor-pointer shrink-0 flex items-center gap-1.5 min-h-[38px]"
-          title="Actualizar datos desde Google Sheets"
-          aria-label="Actualizar datos"
-        >
-          <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin text-emerald-600' : 'text-slate-600'}`} />
-          <span className="hidden sm:inline">Actualizar</span>
-        </button>
-
-        {/* PWA In-App Install Button */}
-        <div className="hidden sm:block shrink-0">
-          <PWAInstallButton />
         </div>
-      </div>
-    </header>
+      </header>
+
+      {/* Confirmation Modal: Cerrar Sesión */}
+      {showLogoutConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs animate-in fade-in duration-200"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="logout-title"
+        >
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-200 space-y-5 text-center animate-in zoom-in-95 duration-200">
+            <div className="flex h-14 w-14 mx-auto items-center justify-center rounded-2xl bg-red-100 text-red-600">
+              <LogOut className="h-7 w-7" />
+            </div>
+
+            <div className="space-y-1.5">
+              <h3 id="logout-title" className="text-lg font-bold text-slate-900 tracking-tight">
+                ¿Cerrar sesión?
+              </h3>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                ¿Estás seguro de que deseas salir de la aplicación MAQUINARIAS Y PROPIEDAD?
+              </p>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowLogoutConfirm(false)}
+                className="w-full sm:flex-1 py-3 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-sm font-semibold transition active:scale-95 cursor-pointer min-h-[44px]"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmLogout}
+                className="w-full sm:flex-1 py-3 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-bold transition active:scale-95 cursor-pointer min-h-[44px] shadow-sm"
+              >
+                Cerrar sesión
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 };

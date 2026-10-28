@@ -36,6 +36,7 @@ const SHEET_SCHEMAS = {
   Campanas: ['id', 'nombre', 'activa', 'creadoEn'],
   Lotes: ['id', 'nombre', 'hectareas', 'ubicacion', 'activo', 'creadoEn'],
   Maquinas: ['id', 'nombre', 'tipo', 'icono', 'unidad', 'tarifa', 'moneda', 'activo', 'creadoEn'],
+  TrabajosMaquinaria: ['id', 'maquinaId', 'nombre', 'icono', 'unidad', 'tarifa', 'moneda', 'activo', 'creadoEn', 'actualizadoEn'],
   Items: ['id', 'nombre', 'modulo', 'clase', 'icono', 'unidad', 'precio', 'moneda', 'activo'],
   Trabajos: ['id', 'fecha', 'campanaId', 'maquinaId', 'destino', 'loteId', 'cliente', 'cantidad', 'unidad', 'precioUnitario', 'moneda', 'tc', 'importe', 'observacion', 'creadoPor', 'creadoEn', 'actualizadoEn'],
   Movimientos: ['id', 'fecha', 'campanaId', 'modulo', 'clase', 'itemId', 'descripcion', 'loteId', 'maquinaId', 'cantidad', 'unidad', 'precioUnitario', 'importe', 'moneda', 'tc', 'trabajoId', 'creadoPor', 'creadoEn', 'actualizadoEn'],
@@ -90,31 +91,46 @@ function dispatch_(p) {
     return handleAdminAuthorize(data);
   }
 
-  // 2. Validación de sesión de usuario normal (Requerida para todas las demás acciones)
+  // 2. Validación de sesión (Usuario y/o Administrador)
   const userToken = p.token || (p.data && p.data.token);
+  const adminTok = p.tokenAdmin || p.adminToken || (p.data && (p.data.tokenAdmin || p.data.adminToken));
+
+  const adminSession = validateAdminToken(adminTok);
   const userSession = validateToken(userToken);
-  if (!userSession) {
-    return { ok: false, error: 'Sesión vencida o revocada. Inicie sesión nuevamente.' };
+
+  // Si ninguna de las dos credenciales es válida, rechazar la petición
+  const effectiveSession = adminSession || userSession;
+  if (!effectiveSession) {
+    return { ok: false, error: 'Sesión vencida o revocada. Inicie sesión nuevamente.', code: 'SESSION_EXPIRED' };
+  }
+
+  if (action === 'auth.session.validate') {
+    return {
+      ok: true,
+      valid: true,
+      usuario: effectiveSession.usuarioId,
+      rol: adminSession ? 'admin' : (userSession ? userSession.rol : 'usuario')
+    };
   }
 
   if (action === 'auth.logout' || action === 'logout') {
-    return handleLogout(userToken);
+    return handleLogout(userToken, adminTok);
   }
 
   // 3. Verificación y revocación de autorización de dispositivo admin
   if (action === 'auth.admin.verify') {
-    const adminTok = p.tokenAdmin || p.adminToken || (p.data && (p.data.tokenAdmin || p.data.adminToken));
     return handleAdminVerify(adminTok);
   }
 
   if (action === 'auth.admin.revoke') {
-    const adminTok = p.tokenAdmin || p.adminToken || (p.data && (p.data.tokenAdmin || p.data.adminToken));
     return handleAdminRevoke(adminTok);
   }
 
   // 4. Acciones Administrativas Protegidas (Exigen token administrativo válido)
   // NOTA: fx.get y getExchangeRateConfig NO están aquí: se consultan con sesión operativa normal.
   const adminActions = [
+    'auth.password.change',
+    'password.change',
     'getCampaigns',
     'campaign.create',
     'createCampaign',
@@ -128,6 +144,9 @@ function dispatch_(p) {
     'machine.update',
     'machine.delete',
     'machine.save',
+    'machineJobType.save',
+    'machineJobType.delete',
+    'machineJobType.seed',
     'getLots',
     'createLot',
     'updateLot',
@@ -154,8 +173,6 @@ function dispatch_(p) {
   ];
 
   if (adminActions.indexOf(action) !== -1) {
-    const adminTok = p.tokenAdmin || p.adminToken || (p.data && (p.data.tokenAdmin || p.data.adminToken));
-    const adminSession = validateAdminToken(adminTok);
     if (!adminSession) {
       return {
         ok: false,
@@ -165,10 +182,11 @@ function dispatch_(p) {
   }
 
   // 5. Ejecución de la acción solicitada
-  return handleAction_(action, data, userSession);
+  const effectiveUserSession = userSession || adminSession;
+  return handleAction_(action, data, effectiveUserSession, adminSession);
 }
 
-function handleAction_(action, payload, userSession) {
+function handleAction_(action, payload, userSession, adminSession) {
   switch (action) {
     // --- Catálogo y Configuración General ---
     case 'catalog.list':
@@ -204,6 +222,16 @@ function handleAction_(action, payload, userSession) {
         return handleUpdateMachine(payload.id, payload.machine || payload.maquinaria || payload, userSession);
       }
       return handleCreateMachine(payload.machine || payload.maquinaria || payload, userSession);
+
+    // --- Trabajos y Tarifas por Máquina (Hoja TrabajosMaquinaria) ---
+    case 'machineJobType.list':
+      return handleGetMachineJobTypes(payload.maquinaId);
+    case 'machineJobType.save':
+      return handleSaveMachineJobType(payload.jobType || payload.trabajo || payload, userSession);
+    case 'machineJobType.delete':
+      return handleDeleteMachineJobType(payload.id, userSession);
+    case 'machineJobType.seed':
+      return handleSeedNewHollandJobs(payload.maquinaId, userSession);
 
     // --- Lotes (Hoja Lotes) ---
     case 'getLots':
@@ -325,6 +353,11 @@ function handleAction_(action, payload, userSession) {
         return handleAddAssetImprovement(payload.assetId || payload.id, payload.improvement || payload, userSession);
       }
       return handleCreateAsset(payload.asset || payload, userSession);
+
+    // --- Cambio de Contraseñas e Invalidación de Sesiones ---
+    case 'auth.password.change':
+    case 'password.change':
+      return handleChangePassword(payload, userSession, adminSession);
 
     default:
       return { ok: false, error: 'Acción no reconocida en Google Apps Script: ' + action };
@@ -451,6 +484,49 @@ function hashPassword_(pwd) {
   return hex;
 }
 
+function generateSalt_() {
+  return Utilities.getUuid().replace(/-/g, '').substring(0, 16);
+}
+
+function hashWithSalt_(password, salt) {
+  if (!password) return '';
+  const salted = String(salt || '') + ':' + String(password).trim();
+  const rawBytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salted);
+  let hex = '';
+  for (let i = 0; i < rawBytes.length; i++) {
+    const b = rawBytes[i];
+    const v = (b < 0 ? b + 256 : b).toString(16);
+    hex += (v.length === 1 ? '0' + v : v);
+  }
+  return hex;
+}
+
+function createSaltedPassword_(password) {
+  const salt = generateSalt_();
+  const hash = hashWithSalt_(password, salt);
+  return 'sha256:' + salt + ':' + hash;
+}
+
+function verifyPasswordAgainstStored_(inputPassword, storedValue) {
+  if (!inputPassword || !storedValue) return false;
+  const inputStr = String(inputPassword).trim();
+  const storedStr = String(storedValue).trim();
+
+  // Si está almacenada con el esquema moderno sha256:salt:hash
+  if (storedStr.indexOf('sha256:') === 0) {
+    const parts = storedStr.split(':');
+    if (parts.length >= 3) {
+      const salt = parts[1];
+      const expectedHash = parts[2];
+      const calculatedHash = hashWithSalt_(inputStr, salt);
+      return calculatedHash.toLowerCase() === expectedHash.toLowerCase();
+    }
+  }
+
+  // Compatibilidad hacia atrás garantizada: si todavía está en texto plano
+  return inputStr === storedStr;
+}
+
 // -------------------------------------------------------------
 // AUTENTICACIÓN Y SESIONES (HOJA SESIONES ORIGINAL)
 // Columnas: id, usuarioId, tokenHash, version, venceEn, revocada, creadoEn, ultimoUso
@@ -459,21 +535,32 @@ function hashPassword_(pwd) {
 function handleLogin(data) {
   const inputPwd = String(data.password || data.contrasena || data.pin || '').trim();
   if (!inputPwd) {
-    return { ok: false, error: 'Por favor ingrese la contraseña de usuario (CONTRASENA_USUARIO).' };
+    return { ok: false, error: 'Por favor ingrese la contraseña.' };
   }
 
-  const currentPwd = getConfigValue('CONTRASENA_USUARIO', '');
-  if (!currentPwd || inputPwd !== currentPwd) {
+  const userStoredPwd = getConfigValue('CONTRASENA_USUARIO', '');
+  const adminStoredPwd = getConfigValue('CONTRASENA_ADMIN', '');
+
+  const isUserMatch = verifyPasswordAgainstStored_(inputPwd, userStoredPwd);
+  const isAdminMatch = verifyPasswordAgainstStored_(inputPwd, adminStoredPwd);
+
+  if (!isUserMatch && !isAdminMatch) {
     return {
       ok: false,
-      error: 'Contraseña de usuario incorrecta. Verifique la clave CONTRASENA_USUARIO en la hoja Configuracion.'
+      error: 'Contraseña incorrecta. Verifique las credenciales en la hoja Configuracion.'
     };
   }
 
+  // Si coincide con Administrador se otorga rol admin y credencial administrativa
+  const rol = isAdminMatch ? 'admin' : 'usuario';
+  const nombre = isAdminMatch ? 'Administrador' : 'Operador';
+  const matchedStored = isAdminMatch ? adminStoredPwd : userStoredPwd;
+  const pwdVersion = hashPassword_(matchedStored);
+
   const token = Utilities.getUuid();
   const tokenHash = hashPassword_(token);
-  const pwdHash = hashPassword_(currentPwd);
-  const expira = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(); // 14 días
+  // Sesiones de admin duran 60 días persistentes; sesiones de usuario 14 días
+  const expira = new Date(Date.now() + (isAdminMatch ? 60 : 14) * 24 * 60 * 60 * 1000).toISOString();
   const ahora = new Date().toISOString();
 
   const sheet = findSheetIgnoreCase_('Sesiones');
@@ -485,9 +572,9 @@ function handleLogin(data) {
 
   const row = [];
   row[map['id']] = Utilities.getUuid();
-  row[map['usuarioid']] = 'usuario';
+  row[map['usuarioid']] = rol;
   row[map['tokenhash']] = tokenHash;
-  row[map['version']] = pwdHash;
+  row[map['version']] = pwdVersion;
   row[map['venceen']] = expira;
   row[map['revocada']] = false;
   row[map['creadoen']] = ahora;
@@ -495,17 +582,23 @@ function handleLogin(data) {
 
   sheet.appendRow(row);
 
-  logAudit_('usuario', 'LOGIN', 'Sesiones', row[map['id']], 'Inicio de sesión operativo exitoso');
+  logAudit_(rol, 'LOGIN', 'Sesiones', row[map['id']], 'Inicio de sesión exitoso como ' + nombre);
+
+  const resData = {
+    token: token,
+    usuario: rol,
+    nombre: nombre,
+    rol: rol,
+    expira: expira
+  };
+
+  if (isAdminMatch) {
+    resData.tokenAdmin = token;
+  }
 
   return {
     ok: true,
-    result: {
-      token: token,
-      usuario: 'usuario',
-      nombre: 'Operador',
-      rol: 'usuario',
-      expira: expira
-    }
+    result: resData
   };
 }
 
@@ -548,6 +641,14 @@ function validateToken(token) {
         sheet.getRange(i + 1, revocadaCol + 1).setValue(true);
         return null;
       }
+      if (uId === 'admin') {
+        const currentAdminPwd = getConfigValue('CONTRASENA_ADMIN', '');
+        const currentAdminHash = currentAdminPwd ? hashPassword_(currentAdminPwd) : '';
+        if (currentAdminHash && stampedVersion && stampedVersion !== currentAdminHash) {
+          sheet.getRange(i + 1, revocadaCol + 1).setValue(true);
+          return null;
+        }
+      }
 
       // Actualizar último uso
       sheet.getRange(i + 1, ultimoUsoCol + 1).setValue(new Date().toISOString());
@@ -563,8 +664,8 @@ function validateToken(token) {
   return null;
 }
 
-function handleLogout(token) {
-  if (!token) return { ok: true };
+function handleLogout(userToken, adminTok) {
+  if (!userToken && !adminTok) return { ok: true };
   const sheet = findSheetIgnoreCase_('Sesiones');
   if (!sheet) return { ok: true };
 
@@ -574,14 +675,18 @@ function handleLogout(token) {
   const map = getHeaderIndexMap_(rows[0]);
   const tokenHashCol = map['tokenhash'];
   const revocadaCol = map['revocada'];
-  const inputHash = hashPassword_(token);
+
+  const hashesToRevoke = [];
+  if (userToken) hashesToRevoke.push(hashPassword_(userToken));
+  if (adminTok) hashesToRevoke.push(hashPassword_(adminTok));
 
   for (let i = 1; i < rows.length; i++) {
-    if (String(rows[i][tokenHashCol]) === inputHash) {
+    const rowHash = String(rows[i][tokenHashCol]);
+    if (hashesToRevoke.indexOf(rowHash) !== -1) {
       sheet.getRange(i + 1, revocadaCol + 1).setValue(true);
-      break;
     }
   }
+  SpreadsheetApp.flush();
   return { ok: true };
 }
 
@@ -592,7 +697,7 @@ function handleAdminAuthorize(data) {
   }
 
   const currentAdminPwd = getConfigValue('CONTRASENA_ADMIN', '');
-  if (!currentAdminPwd || inputPwd !== currentAdminPwd) {
+  if (!currentAdminPwd || !verifyPasswordAgainstStored_(inputPwd, currentAdminPwd)) {
     return {
       ok: false,
       error: 'Contraseña de administrador incorrecta. Verifique la clave CONTRASENA_ADMIN en la hoja Configuracion.'
@@ -716,6 +821,132 @@ function handleAdminRevoke(tokenAdmin) {
   return { ok: true, message: 'Autorización administrativa revocada exitosamente' };
 }
 
+/**
+ * Invalida inmediatamente todas las sesiones de un rol ('admin' o 'usuario')
+ * marcando revocada = true en la hoja "Sesiones".
+ */
+function invalidateAllSessionsForRole_(role) {
+  const sheet = findSheetIgnoreCase_('Sesiones');
+  if (!sheet) return;
+
+  const rows = sheet.getDataRange().getValues();
+  if (rows.length < 2) return;
+
+  const headers = rows[0];
+  const map = getHeaderIndexMap_(headers);
+  const userIdCol = map['usuarioid'];
+  const revocadaCol = map['revocada'];
+
+  const targetRole = String(role).trim().toLowerCase();
+
+  for (let i = 1; i < rows.length; i++) {
+    const uId = String(rows[i][userIdCol] || '').trim().toLowerCase();
+    if (uId === targetRole) {
+      sheet.getRange(i + 1, revocadaCol + 1).setValue(true);
+    }
+  }
+
+  // Asegurar persistencia inmediata en la hoja
+  SpreadsheetApp.flush();
+}
+
+/**
+ * Cambia la contraseña en la hoja "Configuracion" e invalida globalmente
+ * las sesiones activas en todos los dispositivos para el rol indicado.
+ * Protegido con LockService contra escrituras y carreras simultáneas.
+ */
+function handleChangePassword(payload, userSession, adminSession) {
+  // 1. Validar autorización administrativa previa (token de administrador)
+  if (!adminSession || !adminSession.id) {
+    return {
+      ok: false,
+      error: 'Acceso denegado: se requiere autorización administrativa activa para cambiar contraseñas.'
+    };
+  }
+
+  const targetRole = String(payload.targetRole || payload.rol || '').trim().toLowerCase();
+  const currentAdminPassword = String(payload.currentAdminPassword || payload.contrasenaActualAdmin || '').trim();
+  const newPassword = String(payload.newPassword || payload.nuevaContrasena || '').trim();
+
+  if (!currentAdminPassword) {
+    return { ok: false, error: 'Debe ingresar la contraseña actual de Administrador para autorizar el cambio.' };
+  }
+
+  if (!newPassword) {
+    return { ok: false, error: 'La nueva contraseña no puede estar vacía.' };
+  }
+
+  if (newPassword.length < 8) {
+    return { ok: false, error: 'La nueva contraseña debe tener al menos 8 caracteres.' };
+  }
+
+  if (targetRole !== 'admin' && targetRole !== 'usuario') {
+    return { ok: false, error: 'Rol destino inválido. Debe ser "admin" o "usuario".' };
+  }
+
+  // 2. Proteger con LockService para evitar condiciones de carrera por accesos simultáneos
+  const lock = LockService.getScriptLock();
+  const hasLock = lock.tryLock(10000); // Esperar hasta 10 segundos
+  if (!hasLock) {
+    return {
+      ok: false,
+      error: 'El servidor está ocupado procesando otra actualización. Intente nuevamente en unos segundos.'
+    };
+  }
+
+  try {
+    // 3. Validar la contraseña actual del Administrador contra Configuracion (CONTRASENA_ADMIN)
+    const realAdminPassword = getConfigValue('CONTRASENA_ADMIN', '');
+    if (!realAdminPassword || !verifyPasswordAgainstStored_(currentAdminPassword, realAdminPassword)) {
+      return { ok: false, error: 'La contraseña actual de Administrador es incorrecta.' };
+    }
+
+    if (targetRole === 'admin') {
+      // Guardar nueva CONTRASENA_ADMIN protegida con sal en Configuracion (sha256:salt:hash)
+      const saltedAdminPassword = createSaltedPassword_(newPassword);
+      setConfigValue('CONTRASENA_ADMIN', saltedAdminPassword);
+
+      // Invalidar inmediatamente TODAS las sesiones de Administrador en la hoja Sesiones
+      invalidateAllSessionsForRole_('admin');
+
+      // Forzar escritura inmediata en Google Sheets
+      SpreadsheetApp.flush();
+
+      // Registrar en auditoría (NUNCA registrar contraseñas ni valores confidenciales)
+      logAudit_('admin', 'CHANGE_PASSWORD', 'Configuracion', 'CONTRASENA_ADMIN', 'Contraseña de Administrador actualizada con hash seguro e invalidación global de sesiones admin');
+
+      return {
+        ok: true,
+        targetRole: 'admin',
+        message: 'Contraseña de Administrador actualizada exitosamente. Todas las sesiones han sido cerradas.',
+        sessionRevoked: true
+      };
+    } else {
+      // Guardar nueva CONTRASENA_USUARIO protegida con sal en Configuracion (sha256:salt:hash)
+      const saltedUserPassword = createSaltedPassword_(newPassword);
+      setConfigValue('CONTRASENA_USUARIO', saltedUserPassword);
+
+      // Invalidar inmediatamente TODAS las sesiones de Usuario en la hoja Sesiones
+      invalidateAllSessionsForRole_('usuario');
+
+      // Forzar escritura inmediata en Google Sheets
+      SpreadsheetApp.flush();
+
+      // Registrar en auditoría
+      logAudit_('admin', 'CHANGE_PASSWORD', 'Configuracion', 'CONTRASENA_USUARIO', 'Contraseña de Usuario actualizada con hash seguro e invalidación global de sesiones usuario');
+
+      return {
+        ok: true,
+        targetRole: 'usuario',
+        message: 'Contraseña de Usuario actualizada exitosamente. Todas las sesiones de usuarios operativos han sido revocadas.',
+        sessionRevoked: false
+      };
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 // -------------------------------------------------------------
 // CATÁLOGO CONSOLIDADO
 // -------------------------------------------------------------
@@ -725,6 +956,7 @@ function handleCatalogList() {
   const machines = getSheetDataAsObjects('Maquinas');
   const lots = getSheetDataAsObjects('Lotes');
   const items = getSheetDataAsObjects('Items');
+  const machineJobTypes = findSheetIgnoreCase_('TrabajosMaquinaria') ? getSheetDataAsObjects('TrabajosMaquinaria') : [];
   const fxRes = handleGetExchangeRate();
   const exchangeRate = (fxRes && fxRes.ok && fxRes.result) ? fxRes.result : null;
 
@@ -736,6 +968,8 @@ function handleCatalogList() {
       machines: machines,
       maquinas: machines,
       maquinarias: machines,
+      machineJobTypes: machineJobTypes,
+      trabajosMaquinaria: machineJobTypes,
       lots: lots,
       lotes: lots,
       items: items,
@@ -934,6 +1168,169 @@ function handleDeleteMachine(id, userSession) {
 }
 
 // -------------------------------------------------------------
+// TRABAJOS Y TARIFAS POR MÁQUINA (HOJA TRABAJOSMAQUINARIA)
+// Columnas: id, maquinaId, nombre, unidad, tarifa, moneda, activo, creadoEn, actualizadoEn
+// -------------------------------------------------------------
+
+function ensureTrabajosMaquinariaSheet_() {
+  let sheet = findSheetIgnoreCase_('TrabajosMaquinaria');
+  if (!sheet) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    sheet = ss.insertSheet('TrabajosMaquinaria');
+    sheet.appendRow(SHEET_SCHEMAS.TrabajosMaquinaria);
+  } else {
+    // Migración segura: si la hoja ya existe pero le falta la columna 'icono', agregarla al final sin mover columnas previas
+    const headers = getSheetHeaders_(sheet);
+    const map = getHeaderIndexMap_(headers);
+    if (map['icono'] === undefined && headers.length > 0) {
+      sheet.getRange(1, headers.length + 1).setValue('icono');
+    }
+  }
+  return sheet;
+}
+
+function handleGetMachineJobTypes(maquinaId) {
+  const sheet = findSheetIgnoreCase_('TrabajosMaquinaria');
+  if (!sheet) return { ok: true, result: [] };
+  let list = getSheetDataAsObjects('TrabajosMaquinaria');
+  if (maquinaId) {
+    list = list.filter(j => String(j.maquinaId || j.maquinariaId) === String(maquinaId));
+  }
+  const mapped = list.map(j => ({
+    ...j,
+    tarifa: Number(j.tarifa) || 0,
+    activo: j.activo !== false && String(j.activo).toLowerCase() !== 'false'
+  }));
+  return { ok: true, result: mapped, machineJobTypes: mapped };
+}
+
+function handleSaveMachineJobType(j, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheet = ensureTrabajosMaquinariaSheet_();
+    const rows = sheet.getDataRange().getValues();
+    const headers = rows.length > 0 ? rows[0] : SHEET_SCHEMAS.TrabajosMaquinaria;
+    const map = getHeaderIndexMap_(headers);
+    const ahora = new Date().toISOString();
+
+    const id = j.id || Utilities.getUuid();
+    const maquinaId = String(j.maquinaId || j.maquinariaId || '').trim();
+    const nombre = String(j.nombre || j.trabajo || '').trim();
+    const icono = String(j.icono || '').trim();
+    const unidad = String(j.unidad || 'ha').trim();
+    const tarifa = Number(j.tarifa) || 0;
+    const moneda = String(j.moneda || 'USD').trim().toUpperCase();
+    const activo = j.activo !== false && String(j.activo).toLowerCase() !== 'false';
+
+    let foundRowIdx = -1;
+    if (j.id && rows.length > 1) {
+      const idCol = map['id'];
+      for (let i = 1; i < rows.length; i++) {
+        if (String(rows[i][idCol]) === String(j.id)) {
+          foundRowIdx = i + 1;
+          break;
+        }
+      }
+    }
+
+    if (foundRowIdx > 0) {
+      if (map['maquinaid'] !== undefined) sheet.getRange(foundRowIdx, map['maquinaid'] + 1).setValue(maquinaId);
+      if (map['nombre'] !== undefined) sheet.getRange(foundRowIdx, map['nombre'] + 1).setValue(nombre);
+      if (map['icono'] !== undefined && j.icono !== undefined) sheet.getRange(foundRowIdx, map['icono'] + 1).setValue(icono);
+      if (map['unidad'] !== undefined) sheet.getRange(foundRowIdx, map['unidad'] + 1).setValue(unidad);
+      if (map['tarifa'] !== undefined) sheet.getRange(foundRowIdx, map['tarifa'] + 1).setValue(tarifa);
+      if (map['moneda'] !== undefined) sheet.getRange(foundRowIdx, map['moneda'] + 1).setValue(moneda);
+      if (map['activo'] !== undefined) sheet.getRange(foundRowIdx, map['activo'] + 1).setValue(activo);
+      if (map['actualizadoen'] !== undefined) sheet.getRange(foundRowIdx, map['actualizadoen'] + 1).setValue(ahora);
+
+      logAudit_(userSession?.usuarioId, 'UPDATE', 'TrabajosMaquinaria', id, 'Trabajo de máquina actualizado: ' + nombre);
+      return { ok: true, result: { id, maquinaId, nombre, icono, unidad, tarifa, moneda, activo, actualizadoEn: ahora } };
+    } else {
+      const row = [];
+      row[map['id']] = id;
+      row[map['maquinaid']] = maquinaId;
+      row[map['nombre']] = nombre;
+      if (map['icono'] !== undefined) row[map['icono']] = icono;
+      row[map['unidad']] = unidad;
+      row[map['tarifa']] = tarifa;
+      row[map['moneda']] = moneda;
+      row[map['activo']] = activo;
+      row[map['creadoen']] = ahora;
+      row[map['actualizadoen']] = ahora;
+
+      sheet.appendRow(row);
+      logAudit_(userSession?.usuarioId, 'CREATE', 'TrabajosMaquinaria', id, 'Trabajo de máquina registrado: ' + nombre);
+      return { ok: true, result: { id, maquinaId, nombre, icono, unidad, tarifa, moneda, activo, creadoEn: ahora, actualizadoEn: ahora } };
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function handleDeleteMachineJobType(id, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheet = findSheetIgnoreCase_('TrabajosMaquinaria');
+    if (!sheet) return { ok: true };
+
+    const rows = sheet.getDataRange().getValues();
+    if (rows.length < 2) return { ok: true };
+
+    const map = getHeaderIndexMap_(rows[0]);
+    const idCol = map['id'];
+    let foundIdx = -1;
+
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i][idCol]) === String(id)) {
+        foundIdx = i + 1;
+        break;
+      }
+    }
+
+    if (foundIdx !== -1) {
+      sheet.deleteRow(foundIdx);
+      logAudit_(userSession?.usuarioId, 'DELETE', 'TrabajosMaquinaria', id, 'Trabajo de maquinaria eliminado');
+    }
+    return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function handleSeedNewHollandJobs(maquinaId, userSession) {
+  const defaultJobs = [
+    { nombre: 'Tractor con sembradora', tarifa: 30, moneda: 'USD', unidad: 'ha', icono: 'sembradora' },
+    { nombre: 'Tractor con romplow', tarifa: 35, moneda: 'USD', unidad: 'ha', icono: 'romplow' },
+    { nombre: 'Tractor con ripper (subsolador)', tarifa: 50, moneda: 'USD', unidad: 'ha', icono: 'ripper' },
+    { nombre: 'Tractor con pala niveladora', tarifa: 45, moneda: 'USD', unidad: 'ha', icono: 'pala-niveladora' },
+    { nombre: 'Tractor con rastra', tarifa: 25, moneda: 'USD', unidad: 'ha', icono: 'rastra' },
+    { nombre: 'Tractor con traílla', tarifa: 35, moneda: 'USD', unidad: 'hora', icono: 'trailla' },
+    { nombre: 'Tractor con cortadora de sorgo', tarifa: 20, moneda: 'USD', unidad: 'ha', icono: 'cortadora-sorgo' },
+    { nombre: 'Tractor con rolo', tarifa: 30, moneda: 'USD', unidad: 'ha', icono: 'rolo' },
+    { nombre: 'Fumigación', tarifa: 55, moneda: 'BOB', unidad: 'ha', icono: 'fumigadora' },
+    { nombre: 'Tractor solo', tarifa: 20, moneda: 'USD', unidad: 'hora', icono: 'tractor-blue' }
+  ];
+
+  const results = [];
+  for (let i = 0; i < defaultJobs.length; i++) {
+    const job = defaultJobs[i];
+    const res = handleSaveMachineJobType({
+      maquinaId: maquinaId,
+      nombre: job.nombre,
+      icono: job.icono,
+      tarifa: job.tarifa,
+      moneda: job.moneda,
+      unidad: job.unidad,
+      activo: true
+    }, userSession);
+    if (res && res.result) results.push(res.result);
+  }
+  return { ok: true, result: results, count: results.length };
+}
+
+// -------------------------------------------------------------
 // LOTES (HOJA LOTES ORIGINAL)
 // Columnas: id, nombre, hectareas, ubicacion, activo, creadoEn
 // -------------------------------------------------------------
@@ -1113,12 +1510,20 @@ function handleCreateMachineryJob(j, userSession) {
     jRow[jMap['moneda']] = monVal;
     jRow[jMap['tc']] = finalTc;
     jRow[jMap['importe']] = totalVal;
-    jRow[jMap['observacion']] = String(j.observacion || j.observaciones || '');
+    let obsVal = String(j.observacion || j.observaciones || '');
+    if (j.trabajoNombre && obsVal.indexOf('[Trabajo:') === -1) {
+      obsVal = obsVal ? (obsVal + ' [Trabajo: ' + j.trabajoNombre + ']') : ('[Trabajo: ' + j.trabajoNombre + ']');
+    }
+    jRow[jMap['observacion']] = obsVal;
+    if (jMap['trabajonombre'] !== undefined) jRow[jMap['trabajonombre']] = String(j.trabajoNombre || '');
+    if (jMap['trabajotipoid'] !== undefined) jRow[jMap['trabajotipoid']] = String(j.trabajoTipoId || '');
     jRow[jMap['creadopor']] = usuarioNombre;
     jRow[jMap['creadoen']] = ahora;
     jRow[jMap['actualizadoen']] = ahora;
 
     jobsSheet.appendRow(jRow);
+
+    const trabajoDesc = j.trabajoNombre ? (' - ' + j.trabajoNombre) : '';
 
     // 2. Insertar en Movimientos: Ingreso de Maquinarias (siempre)
     const incRow = [];
@@ -1129,8 +1534,8 @@ function handleCreateMachineryJob(j, userSession) {
     incRow[mMap['clase']] = 'INGRESO';
     incRow[mMap['itemid']] = '';
     incRow[mMap['descripcion']] = destinoVal === 'PROPIEDAD'
-      ? ('Trabajo en propiedad (' + (j.loteNombre || j.loteId || 'Lote') + ')')
-      : ('Servicio a tercero (' + (j.cliente || 'Externo') + ')');
+      ? ('Trabajo en propiedad' + trabajoDesc + ' (' + (j.loteNombre || j.loteId || 'Lote') + ')')
+      : ('Servicio a tercero' + trabajoDesc + ' (' + (j.cliente || 'Externo') + ')');
     incRow[mMap['loteid']] = destinoVal === 'PROPIEDAD' ? String(j.loteId || '') : '';
     incRow[mMap['maquinaid']] = String(maqId);
     incRow[mMap['cantidad']] = cantVal;
@@ -1155,7 +1560,7 @@ function handleCreateMachineryJob(j, userSession) {
       expRow[mMap['modulo']] = 'PROPIEDAD';
       expRow[mMap['clase']] = 'GASTO';
       expRow[mMap['itemid']] = '';
-      expRow[mMap['descripcion']] = 'Servicio Maquinaria Propia (' + (j.maquinariaNombre || maqId) + ')';
+      expRow[mMap['descripcion']] = 'Servicio Maquinaria Propia' + trabajoDesc + ' (' + (j.maquinariaNombre || maqId) + ')';
       expRow[mMap['loteid']] = String(j.loteId);
       expRow[mMap['maquinaid']] = String(maqId);
       expRow[mMap['cantidad']] = cantVal;

@@ -17,17 +17,30 @@ export interface Campaign {
   estado: 'activa' | 'cerrada';
 }
 
+export interface MachineJobType {
+  id: string;
+  maquinaId: string;
+  nombre: string;
+  icono?: string;
+  tarifa: number;
+  moneda: Currency;
+  unidad: 'h' | 'ha' | 'hora' | 'hectarea' | string;
+  activo?: boolean;
+}
+
 export interface Machine {
   id: string;
   nombre: string;
   identificacion: string;
   tipo: string;
+  icono?: string;
   tarifa: number;
   unidad: 'h' | 'ha' | 'hora' | 'hectarea' | string;
   unidadCobro?: 'h' | 'ha' | string;
   moneda: Currency;
   estado: 'operativo' | 'mantenimiento' | 'inactivo';
   observaciones?: string;
+  trabajos?: MachineJobType[];
 }
 
 export interface Lot {
@@ -48,11 +61,15 @@ export interface MachineryJob {
   campanaNombre?: string;
   maquinariaId: string;
   maquinariaNombre?: string;
+  maquinariaIcono?: string;
+  trabajoTipoId?: string;
+  trabajoNombre?: string;
+  trabajoIcono?: string;
   cliente?: string;
   loteId?: string;
   loteNombre?: string;
   cantidad: number;
-  unidad: 'hora' | 'hectarea';
+  unidad: 'hora' | 'hectarea' | 'h' | 'ha' | string;
   tarifa: number;
   moneda: Currency;
   tipoCambio: number;
@@ -69,9 +86,11 @@ export interface Expense {
   modulo: 'maquinarias' | 'propiedad';
   maquinariaId?: string;
   maquinariaNombre?: string;
+  maquinariaIcono?: string;
   loteId?: string;
   loteNombre?: string;
   itemGasto: string;
+  itemIcono?: string;
   cantidad: number;
   unidad: string;
   precio: number;
@@ -154,3 +173,5 @@ export interface BackendHealthResponse {
   version?: string;
   timestamp?: string;
 }
+
+export type MainView = 'inicio' | 'maquinarias' | 'propiedad' | 'administracion';

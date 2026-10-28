@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   getActiveSession,
   logout,
+  onSessionChange,
+  validateCurrentSession,
   getCampaigns,
   getMachines,
   getLots,
@@ -11,12 +13,14 @@ import {
   getItemsConfig,
   getAssets,
   getExchangeRateConfig,
+  getMachineJobTypes,
   checkBackendHealth,
 } from './services/backend';
 import {
   UserSession,
   Campaign,
   Machine,
+  MachineJobType,
   Lot,
   MachineryJob,
   Expense,
@@ -25,10 +29,10 @@ import {
   Asset,
   ExchangeRateConfig,
   Currency,
+  MainView,
 } from './types';
 
 import { LoginView } from './views/LoginView';
-import { Sidebar, MainView } from './components/Sidebar';
 import { Navbar } from './components/Navbar';
 import { DashboardView } from './views/DashboardView';
 import { MachineryView } from './views/MachineryView';
@@ -42,13 +46,13 @@ import { BottomNav } from './components/BottomNav';
 export default function App() {
   const [session, setSession] = useState<UserSession | null>(getActiveSession());
   const [currentView, setCurrentView] = useState<MainView>('inicio');
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [showAppsScriptModal, setShowAppsScriptModal] = useState(false);
 
   // Global State Loaded from Google Sheets
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [activeCampaign, setActiveCampaignState] = useState<Campaign | null>(null);
   const [machines, setMachines] = useState<Machine[]>([]);
+  const [machineJobTypes, setMachineJobTypes] = useState<MachineJobType[]>([]);
   const [lots, setLots] = useState<Lot[]>([]);
   const [jobs, setJobs] = useState<MachineryJob[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -87,6 +91,7 @@ export default function App() {
         itemsRes,
         assetsRes,
         rateRes,
+        jobTypesRes,
       ] = await Promise.allSettled([
         getCampaigns(useCache),
         getMachines(useCache),
@@ -97,6 +102,7 @@ export default function App() {
         getItemsConfig(useCache),
         getAssets(useCache),
         getExchangeRateConfig(useCache),
+        getMachineJobTypes(undefined, useCache),
       ]);
 
       if (campsRes.status === 'fulfilled') {
@@ -113,6 +119,11 @@ export default function App() {
       } else {
         console.warn(`[App.tsx Diagnostic Error] Machines fetch rejected:`, machsRes.reason);
       }
+
+      if (jobTypesRes.status === 'fulfilled') {
+        setMachineJobTypes(jobTypesRes.value || []);
+      }
+
       if (lotsRes.status === 'fulfilled') setLots(lotsRes.value || []);
       if (jobsRes.status === 'fulfilled') setJobs(jobsRes.value || []);
       if (expRes.status === 'fulfilled') setExpenses(expRes.value || []);
@@ -134,6 +145,29 @@ export default function App() {
       loadData(true);
     }
   }, [session, loadData]);
+
+  // Global session invalidation listener
+  useEffect(() => {
+    const unsubscribe = onSessionChange((newSession) => {
+      setSession(newSession);
+    });
+    return unsubscribe;
+  }, []);
+
+  // Proactive session revalidation when user re-opens or focuses the app
+  useEffect(() => {
+    const handleRevalidate = () => {
+      if (document.visibilityState === 'visible' && getActiveSession()) {
+        validateCurrentSession().catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', handleRevalidate);
+    window.addEventListener('focus', handleRevalidate);
+    return () => {
+      document.removeEventListener('visibilitychange', handleRevalidate);
+      window.removeEventListener('focus', handleRevalidate);
+    };
+  }, []);
 
   const handleLoginSuccess = (newSession: UserSession) => {
     setSession(newSession);
@@ -184,36 +218,27 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#F2F2F7] text-slate-900 flex font-sans selection:bg-emerald-100 selection:text-emerald-900">
-      {/* Sidebar Navigation */}
-      <Sidebar
-        currentView={currentView}
-        onNavigate={handleNavigate}
+    <div className="min-h-screen bg-[#F2F2F7] text-slate-900 flex flex-col font-sans selection:bg-emerald-100 selection:text-emerald-900">
+      {/* Top Sticky Header Navbar */}
+      <Navbar
+        title={viewTitles[currentView]?.title || viewTitles.inicio.title}
+        subtitle={viewTitles[currentView]?.subtitle || viewTitles.inicio.subtitle}
+        activeCampaign={activeCampaign}
+        currency={currency}
+        onCurrencyToggle={toggleCurrency}
+        showCurrencyToggle={currentView === 'administracion'}
+        exchangeRate={exchangeRate}
+        onRefresh={() => loadData(false)}
+        isRefreshing={isRefreshing}
+        onOpenAppsScriptModal={() => setShowAppsScriptModal(true)}
         session={session}
         onLogout={handleLogout}
-        isOpenMobile={isMobileMenuOpen}
-        onCloseMobile={() => setIsMobileMenuOpen(false)}
       />
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 lg:pl-64">
-        {/* Top Sticky Header Navbar */}
-        <Navbar
-          title={viewTitles[currentView]?.title || viewTitles.inicio.title}
-          subtitle={viewTitles[currentView]?.subtitle || viewTitles.inicio.subtitle}
-          activeCampaign={activeCampaign}
-          currency={currency}
-          onCurrencyToggle={toggleCurrency}
-          showCurrencyToggle={currentView === 'administracion'}
-          exchangeRate={exchangeRate}
-          onRefresh={() => loadData(false)}
-          isRefreshing={isRefreshing}
-          onOpenMobileMenu={() => setIsMobileMenuOpen(true)}
-          onOpenAppsScriptModal={() => setShowAppsScriptModal(true)}
-        />
-
+      <div className="flex-1 flex flex-col min-w-0">
         {/* View Body */}
-        <main className="flex-1 p-3 pb-28 sm:p-6 sm:pb-12 lg:p-8 max-w-5xl w-full mx-auto min-w-0">
+        <main className="flex-1 p-3 pb-28 sm:p-6 sm:pb-28 lg:p-8 lg:pb-28 max-w-5xl w-full mx-auto min-w-0">
           {currentView === 'inicio' && (
             <DashboardView
               activeCampaign={activeCampaign}
@@ -229,6 +254,7 @@ export default function App() {
               key={machineryKey}
               activeCampaign={activeCampaign}
               machines={machines}
+              machineJobTypes={machineJobTypes}
               lots={lots}
               jobs={jobs}
               expenses={expenses}
@@ -261,6 +287,7 @@ export default function App() {
               campaigns={campaigns}
               activeCampaign={activeCampaign}
               machines={machines}
+              machineJobTypes={machineJobTypes}
               lots={lots}
               jobs={jobs}
               expenses={expenses}

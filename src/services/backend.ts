@@ -2,6 +2,7 @@ import {
   UserSession,
   Campaign,
   Machine,
+  MachineJobType,
   Lot,
   MachineryJob,
   Expense,
@@ -175,6 +176,14 @@ export function isTechnicalId(str?: string | null): boolean {
   return false;
 }
 
+type SessionChangeListener = (session: UserSession | null) => void;
+const sessionListeners = new Set<SessionChangeListener>();
+
+export function onSessionChange(listener: SessionChangeListener): () => void {
+  sessionListeners.add(listener);
+  return () => sessionListeners.delete(listener);
+}
+
 export function setActiveSession(session: UserSession | null) {
   activeSession = session;
   if (session) {
@@ -183,6 +192,13 @@ export function setActiveSession(session: UserSession | null) {
     sessionStorage.removeItem('myp_session');
     clearMemoryCache();
   }
+  sessionListeners.forEach((listener) => {
+    try {
+      listener(session);
+    } catch {
+      // Ignore listener error
+    }
+  });
 }
 
 export function clearMemoryCache(pattern?: string) {
@@ -296,15 +312,24 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
     }
 
     if (!data.ok) {
-      // Check for expired or missing user session
-      if (data.error === 'Se requiere iniciar sesion' || data.error === 'Sesion vencida o revocada') {
+      const errStr = String(data.error || '').toLowerCase();
+      const code = String(data.code || '');
+
+      // Check for expired or missing user session, revoked token, or password update
+      if (
+        code === 'SESSION_EXPIRED' ||
+        errStr.includes('sesión vencida') ||
+        errStr.includes('sesion vencida') ||
+        errStr.includes('se requiere iniciar sesion') ||
+        errStr.includes('revocada')
+      ) {
         if (action !== 'auth.login' && action !== 'health') {
           setActiveSession(null);
+          setAdminToken(null);
         }
       }
 
       // Check for expired or revoked administrative token or changed CONTRASENA_ADMIN
-      const errStr = String(data.error || '').toLowerCase();
       if (
         errStr.includes('autorización de administrador') ||
         errStr.includes('autorizacion de administrador') ||
@@ -353,10 +378,10 @@ export async function checkBackendHealth(): Promise<BackendHealthResponse> {
  */
 export async function loginWithUserPassword(password: string): Promise<UserSession> {
   if (!password || !password.trim()) {
-    throw new Error('Ingrese la contraseña de usuario.');
+    throw new Error('Ingrese la contraseña.');
   }
 
-  const result = await callGAS<UserSession>('auth.login', {
+  const result = await callGAS<UserSession & { tokenAdmin?: string }>('auth.login', {
     usuario: 'usuario',
     pin: password.trim(),
     password: password.trim(),
@@ -365,6 +390,10 @@ export async function loginWithUserPassword(password: string): Promise<UserSessi
 
   if (!result || !result.token) {
     throw new Error('La autenticación en Apps Script no retornó un token válido');
+  }
+
+  if (result.tokenAdmin) {
+    setAdminToken(result.tokenAdmin);
   }
 
   setActiveSession(result);
@@ -469,6 +498,87 @@ export async function logout(): Promise<void> {
   }
 }
 
+/**
+ * Validar si la sesión actual del usuario o dispositivo sigue activa y no ha sido revocada en Google Apps Script.
+ * Si la contraseña fue cambiada, Apps Script retorna SESSION_EXPIRED o error de sesión vencida,
+ * lo cual dispara automáticamente el cierre de sesión en memoria y notifica a los componentes.
+ */
+export async function validateCurrentSession(): Promise<boolean> {
+  const session = getActiveSession();
+  if (!session || !session.token) {
+    return false;
+  }
+
+  try {
+    const res = await callGAS<{ valid: boolean; ok?: boolean }>(
+      'auth.session.validate',
+      { token: session.token },
+      false
+    );
+    if (!res || res.valid === false || res.ok === false) {
+      setActiveSession(null);
+      setAdminToken(null);
+      return false;
+    }
+    return true;
+  } catch (err: unknown) {
+    const msg = String(err instanceof Error ? err.message : '').toLowerCase();
+    if (
+      msg.includes('sesión vencida') ||
+      msg.includes('sesion vencida') ||
+      msg.includes('revocada') ||
+      msg.includes('se requiere iniciar sesion')
+    ) {
+      setActiveSession(null);
+      setAdminToken(null);
+      return false;
+    }
+    return true;
+  }
+}
+
+/**
+ * Cambiar contraseña de Administrador (CONTRASENA_ADMIN) o de Usuario (CONTRASENA_USUARIO).
+ * Exige la contraseña actual de Administrador para autorizar el cambio.
+ * Al completarse, invalida de forma inmediata y global todas las sesiones del rol afectado en Google Sheets.
+ */
+export async function changeSystemPassword(
+  targetRole: 'admin' | 'usuario',
+  currentAdminPassword: string,
+  newPassword: string
+): Promise<{ ok: boolean; message: string; targetRole: string; sessionRevoked: boolean }> {
+  if (!currentAdminPassword || !currentAdminPassword.trim()) {
+    throw new Error('Debe ingresar la contraseña actual de Administrador para autorizar el cambio.');
+  }
+  if (!newPassword || !newPassword.trim()) {
+    throw new Error('La nueva contraseña no puede estar vacía.');
+  }
+  if (newPassword.trim().length < 8) {
+    throw new Error('La nueva contraseña debe tener al menos 8 caracteres.');
+  }
+
+  const result = await callGAS<{ ok: boolean; message: string; targetRole: string; sessionRevoked: boolean }>(
+    'auth.password.change',
+    {
+      targetRole,
+      currentAdminPassword: currentAdminPassword.trim(),
+      newPassword: newPassword.trim(),
+    },
+    false
+  );
+
+  // Si se cambió la contraseña de administrador, limpiar el token administrativo local y cerrar la sesión actual
+  if (targetRole === 'admin') {
+    setAdminToken(null);
+    setActiveSession(null);
+  }
+
+  // Limpiar toda la caché de memoria local
+  clearMemoryCache();
+
+  return result;
+}
+
 // -------------------------------------------------------------
 // 3. Campaigns (Campañas)
 // -------------------------------------------------------------
@@ -477,7 +587,7 @@ export async function getCampaigns(useCache = true): Promise<Campaign[]> {
   const res = await callGAS<any>('catalog.list', {}, useCache);
   const rawList = extractArrayFromResponse(res, ['campaigns', 'campanas', 'Campanas', 'items']);
   console.log(`[catalog.list Diagnostic - Campanas] Count: ${rawList.length}`);
-  return rawList;
+  return rawList.map(normalizeCampaign);
 }
 
 export async function createCampaign(campaign: Omit<Campaign, 'id'>): Promise<Campaign> {
@@ -537,6 +647,26 @@ export function parseDecimalNumber(val: any): number {
     return isNaN(parsed) ? 0 : parsed;
   }
   return 0;
+}
+
+export function normalizeCampaign(raw: any): Campaign {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      id: '',
+      nombre: '',
+      activa: false,
+      estado: 'activa',
+      fechaInicio: '',
+    };
+  }
+  return {
+    id: String(raw.id || raw.ID || raw.campanaId || raw.CampanaId || ''),
+    nombre: String(raw.nombre ?? raw.Nombre ?? raw.name ?? raw.Name ?? ''),
+    activa: Boolean(raw.activa ?? raw.Activa ?? raw.is_active ?? raw.activo ?? false),
+    fechaInicio: String(raw.fechaInicio ?? raw.FechaInicio ?? raw.fecha ?? ''),
+    fechaFin: raw.fechaFin ? String(raw.fechaFin) : undefined,
+    estado: String(raw.estado ?? raw.Estado ?? 'activa').toLowerCase() as 'activa' | 'cerrada',
+  };
 }
 
 export function normalizeItemConfig(raw: any): ItemConfig {
@@ -710,6 +840,7 @@ export function normalizeMachine(raw: any): Machine {
     unidadCobro: normalizedUnidad,
     moneda: (monedaVal === 'USD' ? 'USD' : 'BOB') as Currency,
     estado: estadoVal,
+    icono: raw.icono ? String(raw.icono).trim() : undefined,
     observaciones: String(raw.observaciones || raw.Observaciones || raw.observacion || raw.Notas || ''),
   };
 }
@@ -737,7 +868,35 @@ export async function getMachines(useCache = true): Promise<Machine[]> {
     'items',
   ]);
 
-  const normalized = rawList.map(normalizeMachine);
+  const rawJobTypes = extractArrayFromResponse(res, [
+    'machineJobTypes',
+    'trabajosMaquinaria',
+    'laboresMaquinaria',
+    'tarifasMaquinaria',
+    'machineJobs',
+    'jobTypes',
+  ]);
+  const allJobTypes = rawJobTypes.map(normalizeMachineJobType);
+
+  const normalized = rawList.map((raw) => {
+    const m = normalizeMachine(raw);
+    let jobsForMachine = allJobTypes.filter((j) => String(j.maquinaId) === String(m.id));
+    const isNewHolland =
+      m.nombre.toLowerCase().includes('new holland') ||
+      m.nombre.toLowerCase().includes('ts115') ||
+      m.nombre.toLowerCase().includes('ts 115');
+
+    if (jobsForMachine.length === 0 && isNewHolland) {
+      jobsForMachine = NEW_HOLLAND_DEFAULT_JOBS.map((j, idx) => ({
+        ...j,
+        id: `nh_default_${idx + 1}`,
+        maquinaId: m.id,
+      }));
+    }
+    m.trabajos = jobsForMachine;
+    return m;
+  });
+
   console.log(`[catalog.list Diagnostic - Maquinas] Raw items: ${rawList.length} | Normalized: ${normalized.length}`);
   return normalized;
 }
@@ -813,6 +972,134 @@ export async function deleteMachine(id: string): Promise<void> {
     throw new Error(res.error || 'No se pudo eliminar la maquinaria en el servidor.');
   }
   clearMemoryCache();
+}
+
+// -------------------------------------------------------------
+// 4.1 Machine Job Types (Tipos de Trabajo y Tarifas por Máquina)
+// -------------------------------------------------------------
+
+export const NEW_HOLLAND_DEFAULT_JOBS: Omit<MachineJobType, 'id' | 'maquinaId'>[] = [
+  { nombre: 'Tractor con sembradora', tarifa: 30, moneda: 'USD', unidad: 'ha', icono: 'sembradora', activo: true },
+  { nombre: 'Tractor con romplow', tarifa: 35, moneda: 'USD', unidad: 'ha', icono: 'romplow', activo: true },
+  { nombre: 'Tractor con ripper (subsolador)', tarifa: 50, moneda: 'USD', unidad: 'ha', icono: 'ripper', activo: true },
+  { nombre: 'Tractor con pala niveladora', tarifa: 45, moneda: 'USD', unidad: 'ha', icono: 'pala-niveladora', activo: true },
+  { nombre: 'Tractor con rastra', tarifa: 25, moneda: 'USD', unidad: 'ha', icono: 'rastra', activo: true },
+  { nombre: 'Tractor con traílla', tarifa: 35, moneda: 'USD', unidad: 'hora', icono: 'trailla', activo: true },
+  { nombre: 'Tractor con cortadora de sorgo', tarifa: 20, moneda: 'USD', unidad: 'ha', icono: 'cortadora-sorgo', activo: true },
+  { nombre: 'Tractor con rolo', tarifa: 30, moneda: 'USD', unidad: 'ha', icono: 'rolo', activo: true },
+  { nombre: 'Fumigación', tarifa: 55, moneda: 'BOB', unidad: 'ha', icono: 'fumigadora', activo: true },
+  { nombre: 'Tractor solo', tarifa: 20, moneda: 'USD', unidad: 'hora', icono: 'tractor-blue', activo: true },
+];
+
+export function normalizeMachineJobType(raw: any): MachineJobType {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      id: '',
+      maquinaId: '',
+      nombre: '',
+      tarifa: 0,
+      moneda: 'USD',
+      unidad: 'ha',
+      activo: true,
+    };
+  }
+  const rawMoneda = String(raw.moneda || raw.Moneda || 'USD').toUpperCase();
+  const rawUnidad = String(raw.unidad || raw.Unidad || 'ha').toLowerCase();
+  const normalizedUnidad: 'hora' | 'ha' = (rawUnidad.includes('hora') || rawUnidad === 'h') ? 'hora' : 'ha';
+  return {
+    id: String(raw.id || raw.ID || `mjt_${Math.random().toString(36).substr(2, 6)}`),
+    maquinaId: String(raw.maquinaId || raw.maquinariaId || raw.maquina_id || ''),
+    nombre: String(raw.nombre || raw.Nombre || raw.trabajo || 'Labor'),
+    icono: raw.icono ? String(raw.icono).trim() : undefined,
+    tarifa: parseDecimalNumber(raw.tarifa ?? raw.Tarifa ?? raw.precio ?? 0),
+    moneda: (rawMoneda === 'BOB' || rawMoneda === 'BS' ? 'BOB' : 'USD') as Currency,
+    unidad: normalizedUnidad,
+    activo: raw.activo !== false && String(raw.activo).toLowerCase() !== 'false',
+  };
+}
+
+export async function getMachineJobTypes(maquinaId?: string, useCache = true): Promise<MachineJobType[]> {
+  let list: any[] = [];
+  try {
+    const res = await callGAS<any>('catalog.list', {}, useCache);
+    list = extractArrayFromResponse(res, [
+      'machineJobTypes',
+      'trabajosMaquinaria',
+      'laboresMaquinaria',
+      'tarifasMaquinaria',
+      'machineJobs',
+      'jobTypes',
+    ]);
+  } catch {
+    // fallback
+  }
+
+  if (list.length === 0) {
+    try {
+      const res = await callGAS<any>('machineJobType.list', { maquinaId }, useCache);
+      list = extractArrayFromResponse(res, ['jobTypes', 'items', 'result', 'trabajos']);
+    } catch {
+      // empty list
+    }
+  }
+
+  const normalized = list.map(normalizeMachineJobType);
+
+  if (maquinaId) {
+    return normalized.filter((j) => String(j.maquinaId) === String(maquinaId));
+  }
+  return normalized;
+}
+
+export async function saveMachineJobType(jobType: Partial<MachineJobType> & { nombre: string; maquinaId: string }): Promise<MachineJobType> {
+  const rawU = String(jobType.unidad || 'ha').toLowerCase();
+  const codeUnidad: 'hora' | 'ha' = (rawU.includes('hora') || rawU === 'h') ? 'hora' : 'ha';
+  const tarifaNum = parseDecimalNumber(jobType.tarifa);
+  const rawMon = String(jobType.moneda || 'USD').toUpperCase();
+  const monedaVal: Currency = (rawMon === 'BOB' || rawMon === 'BS') ? 'BOB' : 'USD';
+
+  const jobTypeData = {
+    ...jobType,
+    nombre: jobType.nombre.trim(),
+    maquinaId: jobType.maquinaId,
+    tarifa: tarifaNum,
+    moneda: monedaVal,
+    unidad: codeUnidad,
+    activo: jobType.activo !== false,
+  };
+
+  const payload = {
+    ...jobTypeData,
+    jobType: jobTypeData,
+    trabajo: jobTypeData,
+  };
+
+  const res = await callGAS<any>('machineJobType.save', payload);
+  clearMemoryCache();
+  return normalizeMachineJobType(res?.result || res || jobTypeData);
+}
+
+export async function deleteMachineJobType(id: string): Promise<void> {
+  const payload = { id, deleted: true, action: 'delete' };
+  try {
+    await callGAS('machineJobType.delete', payload);
+  } catch {
+    await callGAS('machineJobType.save', payload);
+  }
+  clearMemoryCache();
+}
+
+export async function seedNewHollandJobs(maquinaId: string): Promise<MachineJobType[]> {
+  const saved: MachineJobType[] = [];
+  for (const jobDef of NEW_HOLLAND_DEFAULT_JOBS) {
+    const res = await saveMachineJobType({
+      ...jobDef,
+      maquinaId,
+    });
+    saved.push(res);
+  }
+  clearMemoryCache();
+  return saved;
 }
 
 // -------------------------------------------------------------
@@ -901,6 +1188,74 @@ export async function deleteLot(id: string): Promise<void> {
 // 6. Machinery Jobs (Servicios a terceros y Trabajos en propiedad)
 // -------------------------------------------------------------
 
+export function normalizeMachineryJob(raw: any): MachineryJob {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      id: '',
+      tipoTrabajo: 'tercero',
+      fecha: new Date().toISOString().slice(0, 10),
+      campanaId: '',
+      maquinariaId: '',
+      cantidad: 0,
+      unidad: 'ha',
+      tarifa: 0,
+      moneda: 'BOB',
+      tipoCambio: 6.96,
+      total: 0,
+    };
+  }
+  const idVal = String(raw.id || raw.ID || '');
+  const tipoRaw = String(raw.tipoTrabajo || raw.destino || raw.tipo || '').toLowerCase();
+  const tipoTrabajoVal: 'tercero' | 'propiedad' =
+    tipoRaw.includes('prop') || String(raw.destino || '').toUpperCase() === 'PROPIEDAD'
+      ? 'propiedad'
+      : 'tercero';
+
+  const cantVal = parseDecimalNumber(raw.cantidad ?? raw.horas ?? raw.hectareas ?? 0);
+  const tarifaVal = parseDecimalNumber(raw.tarifa ?? raw.precioUnitario ?? raw.precio ?? 0);
+  const totalVal = parseDecimalNumber(raw.total ?? raw.importe ?? cantVal * tarifaVal);
+  const rawMoneda = String(raw.moneda || 'BOB').toUpperCase();
+  const monedaVal: Currency = rawMoneda === 'USD' || rawMoneda === 'U$D' ? 'USD' : 'BOB';
+  const rawUnidad = String(raw.unidad || 'ha').toLowerCase();
+  const unidadVal = rawUnidad.includes('hora') || rawUnidad === 'h' ? 'hora' : 'ha';
+
+  let trabajoNombreVal = String(
+    raw.trabajoNombre || raw.trabajo || raw.labor || raw.trabajo_nombre || raw.tipo_trabajo || ''
+  ).trim();
+  const obs = String(raw.observacion || raw.observaciones || '');
+  if (!trabajoNombreVal && obs.includes('[Trabajo:')) {
+    const match = obs.match(/\[Trabajo:\s*([^\]]+)\]/);
+    if (match && match[1]) {
+      trabajoNombreVal = match[1].trim();
+    }
+  }
+
+  return {
+    id: idVal,
+    tipoTrabajo: tipoTrabajoVal,
+    fecha: formatDateDDMMAAAA(raw.fecha || ''),
+    campanaId: String(raw.campanaId || raw.id_campana || ''),
+    campanaNombre: raw.campanaNombre || raw.campana || '',
+    maquinariaId: String(raw.maquinariaId || raw.maquinaId || raw.id_maquina || ''),
+    maquinariaNombre: raw.maquinariaNombre || raw.maquina || raw.maquinaria || '',
+    trabajoTipoId: String(raw.trabajoTipoId || raw.trabajo_tipo_id || raw.tipoTrabajoId || ''),
+    trabajoNombre: trabajoNombreVal,
+    icono: raw.icono ? String(raw.icono).trim() : undefined,
+    cliente: String(raw.cliente || ''),
+    loteId: String(raw.loteId || raw.id_lote || ''),
+    loteNombre: raw.loteNombre || raw.lote || '',
+    cantidad: cantVal,
+    unidad: unidadVal,
+    tarifa: tarifaVal,
+    moneda: monedaVal,
+    tipoCambio: parseDecimalNumber(raw.tipoCambio ?? raw.tc ?? 6.96),
+    tc: parseDecimalNumber(raw.tc ?? raw.tipoCambio ?? 6.96),
+    total: totalVal,
+    observacion: obs,
+    linkedMovimientoId: raw.linkedMovimientoId || raw.trabajoId || '',
+  };
+}
+
 export async function getMachineryJobs(campanaId?: string, useCache = true): Promise<MachineryJob[]> {
   let res: any;
   try {
@@ -913,18 +1268,23 @@ export async function getMachineryJobs(campanaId?: string, useCache = true): Pro
   if (campanaId) {
     list = list.filter((j) => !j.campanaId || j.campanaId === campanaId);
   }
-  return list;
+  return list.map(normalizeMachineryJob);
 }
 
 export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise<MachineryJob> {
   const rawU = String(job.unidad || '').toLowerCase();
-  const codeUnidad: 'h' | 'ha' = (rawU.includes('ha') || rawU.includes('hect')) ? 'ha' : 'h';
+  const codeUnidad: 'hora' | 'ha' = rawU.includes('hora') || rawU === 'h' ? 'hora' : 'ha';
   const cantNum = parseDecimalNumber(job.cantidad);
   const tarifaNum = parseDecimalNumber(job.tarifa);
   const totalNum = parseDecimalNumber(job.total) || cantNum * tarifaNum;
-  const gasMoneda = (job.moneda === 'USD' ? 'USD' : 'BS');
+  const gasMoneda = job.moneda === 'USD' ? 'USD' : 'BS';
   const tcNum = resolveEffectiveExchangeRate(job.tipoCambio);
   const gasDestino = job.tipoTrabajo === 'propiedad' ? 'PROPIEDAD' : 'TERCERO';
+
+  let finalObs = job.observacion || '';
+  if (job.trabajoNombre && !finalObs.includes('[Trabajo:')) {
+    finalObs = finalObs ? `${finalObs} [Trabajo: ${job.trabajoNombre}]` : `[Trabajo: ${job.trabajoNombre}]`;
+  }
 
   const jobData = {
     ...job,
@@ -935,6 +1295,10 @@ export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise
     fecha: job.fecha,
     campanaId: job.campanaId,
     campanaNombre: job.campanaNombre || '',
+    trabajoTipoId: job.trabajoTipoId || '',
+    trabajoNombre: job.trabajoNombre || '',
+    labor: job.trabajoNombre || '',
+    trabajo: job.trabajoNombre || '',
     ...(job.loteId ? { loteId: job.loteId, loteNombre: job.loteNombre || '' } : {}),
     ...(job.cliente ? { cliente: job.cliente } : {}),
     cantidad: cantNum,
@@ -948,8 +1312,8 @@ export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise
     unidadCobro: codeUnidad,
     tc: tcNum,
     tipoCambio: tcNum,
-    observacion: job.observacion || '',
-    observaciones: job.observacion || '',
+    observacion: finalObs,
+    observaciones: finalObs,
   };
 
   const payload = {
@@ -964,29 +1328,45 @@ export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise
     ...job,
     id: res?.id || res?.result?.id || `job_${Date.now()}`,
     total: totalNum,
+    observacion: finalObs,
   };
 }
 
 export async function updateMachineryJob(id: string, job: Partial<MachineryJob>): Promise<MachineryJob> {
   const rawU = String(job.unidad || '').toLowerCase();
-  const codeUnidad: 'h' | 'ha' = (rawU.includes('ha') || rawU.includes('hect')) ? 'ha' : 'h';
+  const codeUnidad: 'hora' | 'ha' = rawU.includes('hora') || rawU === 'h' ? 'hora' : 'ha';
   const cantNum = parseDecimalNumber(job.cantidad);
   const tarifaNum = parseDecimalNumber(job.tarifa);
   const gasMoneda = job.moneda ? (job.moneda === 'USD' ? 'USD' : 'BS') : undefined;
-  const tcNum = job.tipoCambio !== undefined ? resolveEffectiveExchangeRate(job.tipoCambio) : (getConfiguredExchangeRate() > 0 ? getConfiguredExchangeRate() : undefined);
+  const tcNum =
+    job.tipoCambio !== undefined
+      ? resolveEffectiveExchangeRate(job.tipoCambio)
+      : getConfiguredExchangeRate() > 0
+      ? getConfiguredExchangeRate()
+      : undefined;
   const { id: _, ...restJob } = job as any;
+
+  let finalObs = job.observacion;
+  if (job.trabajoNombre && finalObs !== undefined && !finalObs.includes('[Trabajo:')) {
+    finalObs = finalObs ? `${finalObs} [Trabajo: ${job.trabajoNombre}]` : `[Trabajo: ${job.trabajoNombre}]`;
+  }
 
   const jobData = {
     id,
     ...restJob,
     ...(job.maquinariaId ? { maquinaId: job.maquinariaId, maquinariaId: job.maquinariaId } : {}),
-    ...(job.tipoTrabajo ? { destino: job.tipoTrabajo === 'propiedad' ? 'PROPIEDAD' : 'TERCERO', tipoTrabajo: job.tipoTrabajo } : {}),
+    ...(job.tipoTrabajo
+      ? { destino: job.tipoTrabajo === 'propiedad' ? 'PROPIEDAD' : 'TERCERO', tipoTrabajo: job.tipoTrabajo }
+      : {}),
+    ...(job.trabajoTipoId !== undefined ? { trabajoTipoId: job.trabajoTipoId } : {}),
+    ...(job.trabajoNombre !== undefined ? { trabajoNombre: job.trabajoNombre, labor: job.trabajoNombre, trabajo: job.trabajoNombre } : {}),
     unidad: codeUnidad,
     unidadCobro: codeUnidad,
     ...(cantNum ? { cantidad: cantNum } : {}),
     ...(tarifaNum ? { tarifa: tarifaNum, precio: tarifaNum, precioUnitario: tarifaNum } : {}),
     ...(gasMoneda ? { moneda: gasMoneda } : {}),
     ...(tcNum ? { tc: tcNum, tipoCambio: tcNum } : {}),
+    ...(finalObs !== undefined ? { observacion: finalObs, observaciones: finalObs } : {}),
   };
 
   const payload = {
@@ -1001,6 +1381,7 @@ export async function updateMachineryJob(id: string, job: Partial<MachineryJob>)
   return {
     ...(job as any),
     id: res?.id || res?.result?.id || id,
+    observacion: finalObs !== undefined ? finalObs : (job as any).observacion,
   };
 }
 
@@ -1054,6 +1435,7 @@ export async function getExpenses(campanaId?: string, modulo?: 'maquinarias' | '
         loteId: e.loteId || undefined,
         loteNombre: e.loteNombre || undefined,
         itemGasto: String(e.descripcion || e.itemGasto || e.item || 'Gasto'),
+        icono: e.icono ? String(e.icono).trim() : undefined,
         cantidad: cant,
         unidad: String(e.unidad || ''),
         precio: prec,
