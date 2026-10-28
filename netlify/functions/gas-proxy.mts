@@ -1,4 +1,4 @@
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbyKl_Rx_xLs3dzNkNb_Fosf0txpebqEyQtA1QyAXgrKTWZFIV7n3BreSZe8dNWdwgQI2w/exec';
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbwiFRh5R1k5ZxxFD67Fl0xcmIA1NVbx9XOg2gtjbvyYgAFoprbVB8foMTnUpPvMY0tf/exec';
 
 export default async (req: Request) => {
   const method = req.method.toUpperCase();

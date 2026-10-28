@@ -31,36 +31,33 @@ export const Navbar: React.FC<Props> = ({
   showCurrencyToggle = false,
 }) => {
   return (
-    <header className="sticky top-0 z-20 w-full max-w-full flex h-14 sm:h-16 shrink-0 items-center justify-between border-b border-stone-200 bg-white/95 px-2.5 sm:px-4 md:px-6 backdrop-blur-md">
+    <header className="sticky top-0 z-20 w-full max-w-full flex h-14 sm:h-16 shrink-0 items-center justify-between border-b border-slate-200/80 bg-white/90 px-3 sm:px-6 backdrop-blur-md">
       {/* Left: Mobile Hamburger & Title */}
-      <div className="flex items-center gap-1.5 sm:gap-3 min-w-0 flex-1">
+      <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
         <button
           onClick={onOpenMobileMenu}
-          className="lg:hidden p-1.5 -ml-1 text-stone-700 hover:text-stone-900 rounded-lg hover:bg-stone-100 transition active:scale-95 cursor-pointer shrink-0"
+          className="lg:hidden p-2 -ml-1 text-slate-700 hover:text-slate-900 rounded-xl hover:bg-slate-100 transition active:scale-95 cursor-pointer shrink-0"
           aria-label="Abrir menú"
         >
-          <Menu className="h-5 w-5" />
+          <Menu className="h-6 w-6" />
         </button>
         <div className="min-w-0 flex-1">
-          <h2 className="text-xs sm:text-sm md:text-base font-bold text-stone-900 tracking-tight truncate">
+          <h2 className="text-base sm:text-lg font-bold text-slate-900 tracking-tight truncate">
             {title}
           </h2>
-          {subtitle && (
-            <p className="hidden md:block text-[11px] text-stone-500 truncate">{subtitle}</p>
-          )}
         </div>
       </div>
 
       {/* Right: Quick actions adaptables a 320px */}
-      <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+      <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
         {/* Active Campaign Badge */}
         {activeCampaign && (
           <div
-            className="flex items-center gap-1 px-1.5 py-1 sm:px-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-[10px] sm:text-xs text-emerald-800 shrink-0 max-w-[85px] sm:max-w-[160px]"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200/80 text-xs font-semibold text-emerald-900 shrink-0 max-w-[120px] sm:max-w-[200px]"
             title={`Campaña activa: ${activeCampaign.nombre}`}
           >
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-            <span className="font-semibold text-emerald-950 truncate">
+            <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0" />
+            <span className="truncate">
               {activeCampaign.nombre}
             </span>
           </div>
@@ -119,12 +116,12 @@ export const Navbar: React.FC<Props> = ({
           type="button"
           onClick={onRefresh}
           disabled={isRefreshing}
-          className="p-1.5 sm:px-2.5 sm:py-1.5 rounded-lg border border-stone-300 text-xs font-medium text-stone-700 hover:bg-stone-50 transition active:scale-95 disabled:opacity-50 cursor-pointer shrink-0"
+          className="p-2 sm:px-3 sm:py-2 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition active:scale-95 disabled:opacity-50 cursor-pointer shrink-0 flex items-center gap-1.5 min-h-[38px]"
           title="Actualizar datos desde Google Sheets"
           aria-label="Actualizar datos"
         >
-          <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? 'animate-spin text-emerald-600' : ''}`} />
-          <span className="hidden sm:inline ml-1">Actualizar</span>
+          <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin text-emerald-600' : 'text-slate-600'}`} />
+          <span className="hidden sm:inline">Actualizar</span>
         </button>
 
         {/* PWA In-App Install Button */}

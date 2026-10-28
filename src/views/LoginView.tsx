@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldCheck, Lock, User, Eye, EyeOff, AlertCircle, RefreshCw, HelpCircle, CheckCircle2 } from 'lucide-react';
-import { loginWithPin, checkBackendHealth } from '../services/backend';
+import { loginWithUserPassword, checkBackendHealth } from '../services/backend';
 import { UserSession } from '../types';
 import { AppsScriptModal } from '../components/AppsScriptModal';
 
@@ -9,9 +9,8 @@ interface Props {
 }
 
 export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
-  const [usuario, setUsuario] = useState('admin');
-  const [pin, setPin] = useState('');
-  const [showPin, setShowPin] = useState(false);
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [backendStatus, setBackendStatus] = useState<{ checked: boolean; ok: boolean; message: string }>({
@@ -59,19 +58,14 @@ export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
     e.preventDefault();
     setError(null);
 
-    if (!usuario.trim()) {
-      setError('Por favor ingresa el nombre de usuario.');
-      return;
-    }
-
-    if (!pin || pin.length < 5) {
-      setError('Por favor ingresa tu PIN de 5 dígitos.');
+    if (!password.trim()) {
+      setError('Por favor ingresa la contraseña de usuario.');
       return;
     }
 
     setLoading(true);
     try {
-      const session = await loginWithPin(usuario.trim(), pin.trim());
+      const session = await loginWithUserPassword(password.trim());
       onLoginSuccess(session);
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Error al verificar credenciales con el backend';
@@ -101,8 +95,8 @@ export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
         <div className="rounded-2xl bg-white p-7 shadow-xl border border-stone-200">
           <div className="flex items-center justify-between pb-4 border-b border-stone-100 mb-5">
             <div>
-              <h2 className="text-sm font-semibold text-stone-900">Iniciar Sesión</h2>
-              <p className="text-xs text-stone-500">Acceso mediante PIN de Google Sheets</p>
+              <h2 className="text-sm font-semibold text-stone-900">Acceso al Sistema</h2>
+              <p className="text-xs text-stone-500">Módulos operativos Maquinarias y Propiedad</p>
             </div>
             <div className="flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-medium">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
@@ -122,67 +116,48 @@ export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label className="block text-xs font-medium text-stone-700 mb-1.5">
-                Usuario
-              </label>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-stone-400">
-                  <User className="h-4 w-4" />
-                </div>
-                <input
-                  type="text"
-                  value={usuario}
-                  onChange={(e) => setUsuario(e.target.value)}
-                  placeholder="admin"
-                  required
-                  className="block w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-stone-300 bg-stone-50/50 text-stone-900 placeholder:text-stone-400 focus:bg-white focus:border-emerald-600 focus:outline-none focus:ring-1 focus:ring-emerald-600 transition"
-                />
-              </div>
-            </div>
-
-            <div>
               <div className="flex items-center justify-between mb-1.5">
                 <label className="block text-xs font-medium text-stone-700">
-                  PIN de Acceso (5 dígitos)
+                  Contraseña de Usuario (CONTRASENA_USUARIO)
                 </label>
-                <span className="text-[10px] text-stone-400">Google Sheets</span>
+                <span className="text-[10px] text-stone-400">Hoja configuracion</span>
               </div>
               <div className="relative">
                 <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-stone-400">
                   <Lock className="h-4 w-4" />
                 </div>
                 <input
-                  type={showPin ? 'text' : 'password'}
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  maxLength={5}
-                  value={pin}
-                  onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 5))}
-                  placeholder=""
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Ingrese contraseña de usuario"
                   required
                   autoFocus
-                  className="block w-full pl-9 pr-10 py-2 tracking-widest font-mono text-sm rounded-lg border border-stone-300 bg-stone-50/50 text-stone-900 placeholder:text-stone-400 focus:bg-white focus:border-emerald-600 focus:outline-none focus:ring-1 focus:ring-emerald-600 transition"
+                  className="block w-full pl-9 pr-10 py-2.5 text-sm rounded-lg border border-stone-300 bg-stone-50/50 text-stone-900 placeholder:text-stone-400 focus:bg-white focus:border-emerald-600 focus:outline-none focus:ring-1 focus:ring-emerald-600 transition"
                 />
                 <button
                   type="button"
-                  onClick={() => setShowPin(!showPin)}
+                  onClick={() => setShowPassword(!showPassword)}
                   className="absolute inset-y-0 right-0 pr-3 flex items-center text-stone-400 hover:text-stone-600 cursor-pointer"
-                  title={showPin ? 'Ocultar PIN' : 'Ver PIN'}
+                  title={showPassword ? 'Ocultar contraseña' : 'Ver contraseña'}
                 >
-                  {showPin ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
+              <p className="text-[11px] text-stone-400 mt-1">
+                Permite registrar y consultar trabajos, gastos y servicios en Maquinarias y Propiedad.
+              </p>
             </div>
 
             <button
               type="submit"
               disabled={loading}
-              className="w-full flex items-center justify-center gap-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-medium py-2.5 text-sm shadow-sm transition active:scale-95 disabled:opacity-60 cursor-pointer"
+              className="w-full flex items-center justify-center gap-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-medium py-2.5 text-sm shadow-sm transition active:scale-95 disabled:opacity-60 cursor-pointer min-h-[44px]"
             >
               {loading ? (
                 <>
                   <RefreshCw className="h-4 w-4 animate-spin" />
-                  <span>Verificando PIN con Google Sheets...</span>
+                  <span>Verificando con Google Sheets...</span>
                 </>
               ) : (
                 <span>Ingresar al Sistema</span>

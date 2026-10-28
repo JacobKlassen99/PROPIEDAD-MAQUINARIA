@@ -53,15 +53,32 @@ export const ReportsView: React.FC<Props> = ({
     activeCampaign?.id || ''
   );
 
-  const formatMoney = (val: number | undefined | null, origMoneda: Currency = 'BOB') => {
-    const symbol = currency === 'BOB' ? 'Bs' : 'USD';
-    let num = typeof val === 'number' && !isNaN(val) ? val : 0;
-    const tasa = exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0 ? exchangeRate.tasaBobPerUsd : 6.96;
-    if (origMoneda === 'BOB' && currency === 'USD') {
-      num = num / tasa;
-    } else if (origMoneda === 'USD' && currency === 'BOB') {
-      num = num * tasa;
+  // Helper to convert any amount to the active view currency ('BOB' | 'USD') before summing
+  const toViewCurrency = (amount: number, itemMoneda: Currency | string = 'BOB', itemTc?: number): number => {
+    const num = typeof amount === 'number' && !isNaN(amount) ? amount : 0;
+    const itemCur: Currency = String(itemMoneda || 'BOB').toUpperCase().includes('USD') ? 'USD' : 'BOB';
+    if (itemCur === currency) return num;
+
+    const rate = (typeof itemTc === 'number' && itemTc > 0)
+      ? itemTc
+      : (exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0 ? exchangeRate.tasaBobPerUsd : 0);
+
+    if (rate <= 0) {
+      return num;
     }
+
+    if (itemCur === 'USD' && currency === 'BOB') {
+      return num * rate;
+    }
+    if (itemCur === 'BOB' && currency === 'USD') {
+      return num / rate;
+    }
+    return num;
+  };
+
+  const formatMoney = (val: number | undefined | null) => {
+    const symbol = currency === 'BOB' ? 'Bs' : 'USD';
+    const num = typeof val === 'number' && !isNaN(val) ? val : 0;
     return `${symbol} ${num.toLocaleString('es-BO', {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
@@ -79,30 +96,30 @@ export const ReportsView: React.FC<Props> = ({
     ? incomes.filter((i) => i.campanaId === selectedCampaignId)
     : incomes;
 
-  // Consolidado Real
+  // Consolidado Real (Conversión unificada a la moneda seleccionada antes de sumar)
   const extJobIncomes = filteredJobs
     .filter((j) => j.tipoTrabajo === 'tercero')
-    .reduce((sum, j) => sum + (Number(j.total) || 0), 0);
+    .reduce((sum, j) => sum + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio), 0);
 
   const intJobIncomes = filteredJobs
     .filter((j) => j.tipoTrabajo === 'propiedad')
-    .reduce((sum, j) => sum + (Number(j.total) || 0), 0);
+    .reduce((sum, j) => sum + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio), 0);
 
   const cropIncomes = filteredIncomes
     .filter((i) => i.modulo === 'propiedad' && !i.esTrabajoPropio)
-    .reduce((sum, i) => sum + (Number(i.total) || 0), 0);
+    .reduce((sum, i) => sum + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio), 0);
 
   const maqDirectExps = filteredExpenses
     .filter((e) => e.modulo === 'maquinarias')
-    .reduce((sum, e) => sum + (Number(e.total) || 0), 0);
+    .reduce((sum, e) => sum + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio), 0);
 
   const propDirectExps = filteredExpenses
     .filter((e) => e.modulo === 'propiedad' && !e.esTrabajoPropio)
-    .reduce((sum, e) => sum + (Number(e.total) || 0), 0);
+    .reduce((sum, e) => sum + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio), 0);
 
   const propMaqServiceExps = filteredExpenses
     .filter((e) => e.modulo === 'propiedad' && e.esTrabajoPropio)
-    .reduce((sum, e) => sum + (Number(e.total) || 0), 0);
+    .reduce((sum, e) => sum + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio), 0);
 
   // Consolidado real sin duplicar
   const consolidatedIncomes = extJobIncomes + cropIncomes;
@@ -136,8 +153,8 @@ export const ReportsView: React.FC<Props> = ({
           const mExps = filteredExpenses.filter((e) => e.maquinariaId === m.id);
           const hrs = mJobs.filter((j) => j.unidad === 'hora').reduce((s, j) => s + (Number(j.cantidad) || 0), 0);
           const ha = mJobs.filter((j) => j.unidad === 'hectarea').reduce((s, j) => s + (Number(j.cantidad) || 0), 0);
-          const inc = mJobs.reduce((s, j) => s + (Number(j.total) || 0), 0);
-          const exp = mExps.reduce((s, e) => s + (Number(e.total) || 0), 0);
+          const inc = mJobs.reduce((s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio), 0);
+          const exp = mExps.reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio), 0);
           return [m.nombre, m.tipo, `${m.tarifa}/${m.unidad}`, hrs.toFixed(1), ha.toFixed(1), inc.toFixed(2), exp.toFixed(2), (inc - exp).toFixed(2)];
         }),
       ];
@@ -145,9 +162,9 @@ export const ReportsView: React.FC<Props> = ({
       rows = [
         ['LOTE', 'HA', 'CULTIVO', 'INGRESOS COSECHA', 'GASTOS DIRECTOS', 'MAQUINARIA PROPIA', 'RESULTADO NETO'],
         ...lots.map((l) => {
-          const lIncs = filteredIncomes.filter((i) => i.loteId === l.id).reduce((s, i) => s + (Number(i.total) || 0), 0);
-          const lExpDir = filteredExpenses.filter((e) => e.loteId === l.id && !e.esTrabajoPropio).reduce((s, e) => s + (Number(e.total) || 0), 0);
-          const lExpMaq = filteredExpenses.filter((e) => e.loteId === l.id && e.esTrabajoPropio).reduce((s, e) => s + (Number(e.total) || 0), 0);
+          const lIncs = filteredIncomes.filter((i) => i.loteId === l.id).reduce((s, i) => s + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio), 0);
+          const lExpDir = filteredExpenses.filter((e) => e.loteId === l.id && !e.esTrabajoPropio).reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio), 0);
+          const lExpMaq = filteredExpenses.filter((e) => e.loteId === l.id && e.esTrabajoPropio).reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio), 0);
           const net = lIncs - (lExpDir + lExpMaq);
           return [l.nombre, String(l.superficieHectareas), l.cultivoActual || '', lIncs.toFixed(2), lExpDir.toFixed(2), lExpMaq.toFixed(2), net.toFixed(2)];
         }),
@@ -502,9 +519,13 @@ export const ReportsView: React.FC<Props> = ({
               const hrs = mJobs.filter((j) => j.unidad === 'hora').reduce((s, j) => s + (Number(j.cantidad) || 0), 0);
               const ha = mJobs.filter((j) => j.unidad === 'hectarea').reduce((s, j) => s + (Number(j.cantidad) || 0), 0);
 
-              const incTerceros = mJobs.filter((j) => j.tipoTrabajo === 'tercero').reduce((s, j) => s + (Number(j.total) || 0), 0);
-              const incPropiedad = mJobs.filter((j) => j.tipoTrabajo === 'propiedad').reduce((s, j) => s + (Number(j.total) || 0), 0);
-              const expDirect = mExps.reduce((s, e) => s + (Number(e.total) || 0), 0);
+              const incTerceros = mJobs
+                .filter((j) => j.tipoTrabajo === 'tercero')
+                .reduce((s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tc), 0);
+              const incPropiedad = mJobs
+                .filter((j) => j.tipoTrabajo === 'propiedad')
+                .reduce((s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tc), 0);
+              const expDirect = mExps.reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tc), 0);
               const net = incTerceros + incPropiedad - expDirect;
 
               return (
@@ -574,9 +595,13 @@ export const ReportsView: React.FC<Props> = ({
                   const hrs = mJobs.filter((j) => j.unidad === 'hora').reduce((s, j) => s + (Number(j.cantidad) || 0), 0);
                   const ha = mJobs.filter((j) => j.unidad === 'hectarea').reduce((s, j) => s + (Number(j.cantidad) || 0), 0);
 
-                  const incTerceros = mJobs.filter((j) => j.tipoTrabajo === 'tercero').reduce((s, j) => s + (Number(j.total) || 0), 0);
-                  const incPropiedad = mJobs.filter((j) => j.tipoTrabajo === 'propiedad').reduce((s, j) => s + (Number(j.total) || 0), 0);
-                  const expDirect = mExps.reduce((s, e) => s + (Number(e.total) || 0), 0);
+                  const incTerceros = mJobs
+                    .filter((j) => j.tipoTrabajo === 'tercero')
+                    .reduce((s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tc), 0);
+                  const incPropiedad = mJobs
+                    .filter((j) => j.tipoTrabajo === 'propiedad')
+                    .reduce((s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tc), 0);
+                  const expDirect = mExps.reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tc), 0);
                   const net = incTerceros + incPropiedad - expDirect;
 
                   return (
@@ -608,9 +633,15 @@ export const ReportsView: React.FC<Props> = ({
           {/* MOBILE VIEW: Vertical Cards */}
           <div className="block md:hidden space-y-2.5">
             {lots.map((l) => {
-              const lIncs = filteredIncomes.filter((i) => i.loteId === l.id).reduce((s, i) => s + (Number(i.total) || 0), 0);
-              const lExpDir = filteredExpenses.filter((e) => e.loteId === l.id && !e.esTrabajoPropio).reduce((s, e) => s + (Number(e.total) || 0), 0);
-              const lExpMaq = filteredExpenses.filter((e) => e.loteId === l.id && e.esTrabajoPropio).reduce((s, e) => s + (Number(e.total) || 0), 0);
+              const lIncs = filteredIncomes
+                .filter((i) => i.loteId === l.id)
+                .reduce((s, i) => s + toViewCurrency(Number(i.total) || 0, i.moneda, i.tc), 0);
+              const lExpDir = filteredExpenses
+                .filter((e) => e.loteId === l.id && !e.esTrabajoPropio)
+                .reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tc), 0);
+              const lExpMaq = filteredExpenses
+                .filter((e) => e.loteId === l.id && e.esTrabajoPropio)
+                .reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tc), 0);
               const totalGasto = lExpDir + lExpMaq;
               const net = lIncs - totalGasto;
 
@@ -676,9 +707,15 @@ export const ReportsView: React.FC<Props> = ({
               </thead>
               <tbody className="divide-y divide-stone-100">
                 {lots.map((l) => {
-                  const lIncs = filteredIncomes.filter((i) => i.loteId === l.id).reduce((s, i) => s + (Number(i.total) || 0), 0);
-                  const lExpDir = filteredExpenses.filter((e) => e.loteId === l.id && !e.esTrabajoPropio).reduce((s, e) => s + (Number(e.total) || 0), 0);
-                  const lExpMaq = filteredExpenses.filter((e) => e.loteId === l.id && e.esTrabajoPropio).reduce((s, e) => s + (Number(e.total) || 0), 0);
+                  const lIncs = filteredIncomes
+                    .filter((i) => i.loteId === l.id)
+                    .reduce((s, i) => s + toViewCurrency(Number(i.total) || 0, i.moneda, i.tc), 0);
+                  const lExpDir = filteredExpenses
+                    .filter((e) => e.loteId === l.id && !e.esTrabajoPropio)
+                    .reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tc), 0);
+                  const lExpMaq = filteredExpenses
+                    .filter((e) => e.loteId === l.id && e.esTrabajoPropio)
+                    .reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tc), 0);
                   const totalGasto = lExpDir + lExpMaq;
                   const net = lIncs - totalGasto;
 
@@ -717,9 +754,15 @@ export const ReportsView: React.FC<Props> = ({
               const cIncomes = incomes.filter((i) => i.campanaId === c.id);
               const cExpenses = expenses.filter((e) => e.campanaId === c.id);
 
-              const ext = cJobs.filter((j) => j.tipoTrabajo === 'tercero').reduce((s, j) => s + (Number(j.total) || 0), 0);
-              const crop = cIncomes.filter((i) => i.modulo === 'propiedad' && !i.esTrabajoPropio).reduce((s, i) => s + (Number(i.total) || 0), 0);
-              const exp = cExpenses.filter((e) => !e.esTrabajoPropio).reduce((s, e) => s + (Number(e.total) || 0), 0);
+              const ext = cJobs
+                .filter((j) => j.tipoTrabajo === 'tercero')
+                .reduce((s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tc), 0);
+              const crop = cIncomes
+                .filter((i) => i.modulo === 'propiedad' && !i.esTrabajoPropio)
+                .reduce((s, i) => s + toViewCurrency(Number(i.total) || 0, i.moneda, i.tc), 0);
+              const exp = cExpenses
+                .filter((e) => !e.esTrabajoPropio)
+                .reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tc), 0);
               const profit = ext + crop - exp;
 
               return (
@@ -782,9 +825,15 @@ export const ReportsView: React.FC<Props> = ({
                   const cIncomes = incomes.filter((i) => i.campanaId === c.id);
                   const cExpenses = expenses.filter((e) => e.campanaId === c.id);
 
-                  const ext = cJobs.filter((j) => j.tipoTrabajo === 'tercero').reduce((s, j) => s + (Number(j.total) || 0), 0);
-                  const crop = cIncomes.filter((i) => i.modulo === 'propiedad' && !i.esTrabajoPropio).reduce((s, i) => s + (Number(i.total) || 0), 0);
-                  const exp = cExpenses.filter((e) => !e.esTrabajoPropio).reduce((s, e) => s + (Number(e.total) || 0), 0);
+                  const ext = cJobs
+                    .filter((j) => j.tipoTrabajo === 'tercero')
+                    .reduce((s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tc), 0);
+                  const crop = cIncomes
+                    .filter((i) => i.modulo === 'propiedad' && !i.esTrabajoPropio)
+                    .reduce((s, i) => s + toViewCurrency(Number(i.total) || 0, i.moneda, i.tc), 0);
+                  const exp = cExpenses
+                    .filter((e) => !e.esTrabajoPropio)
+                    .reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tc), 0);
                   const profit = ext + crop - exp;
 
                   return (

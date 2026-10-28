@@ -92,7 +92,7 @@ export const AppsScriptModal: React.FC<Props> = ({ isOpen, onClose, statusInfo }
         <div className="flex items-center justify-between border-t border-stone-200 px-6 py-3.5 bg-stone-50">
           <div className="text-[11px] text-stone-500 flex items-center gap-1.5">
             <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-            <span>Google Sheets como base de datos única y usuario <code>admin</code> con PIN de 5 dígitos.</span>
+            <span>Doble contraseña: <code>CONTRASENA_USUARIO</code> y <code>CONTRASENA_ADMIN</code> en hoja <code>configuracion</code>.</span>
           </div>
           <button
             onClick={onClose}

@@ -140,27 +140,25 @@ export const Sidebar: React.FC<Props> = ({
           </div>
 
           {/* AUXILIARY SCREENS: ADMINISTRACIÓN */}
-          {isAdmin && (
-            <div>
-              <div className="px-3 mb-2 text-[10px] font-semibold tracking-wider text-stone-400 uppercase">
-                Administración
-              </div>
-              <div>
-                <button
-                  type="button"
-                  onClick={() => handleSelect('administracion')}
-                  className={`w-full flex items-center gap-3 px-3 py-2 text-xs font-medium rounded-lg transition cursor-pointer ${
-                    currentView === 'administracion'
-                      ? 'bg-stone-800 text-white font-semibold'
-                      : 'text-stone-300 hover:bg-stone-800/60 hover:text-white'
-                  }`}
-                >
-                  <Settings className="h-4 w-4 shrink-0 text-stone-400" />
-                  <span>Administración</span>
-                </button>
-              </div>
+          <div>
+            <div className="px-3 mb-2 text-[10px] font-semibold tracking-wider text-stone-400 uppercase">
+              Administración
             </div>
-          )}
+            <div>
+              <button
+                type="button"
+                onClick={() => handleSelect('administracion')}
+                className={`w-full flex items-center gap-3 px-3 py-2 text-xs font-medium rounded-lg transition cursor-pointer ${
+                  currentView === 'administracion'
+                    ? 'bg-stone-800 text-white font-semibold'
+                    : 'text-stone-300 hover:bg-stone-800/60 hover:text-white'
+                }`}
+              >
+                <Settings className="h-4 w-4 shrink-0 text-stone-400" />
+                <span>Administración</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 

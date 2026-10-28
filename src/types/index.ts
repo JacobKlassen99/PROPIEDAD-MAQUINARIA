@@ -56,6 +56,7 @@ export interface MachineryJob {
   tarifa: number;
   moneda: Currency;
   tipoCambio: number;
+  tc?: number;
   total: number;
   observacion?: string;
   linkedMovimientoId?: string;
@@ -76,6 +77,7 @@ export interface Expense {
   precio: number;
   moneda: Currency;
   tipoCambio: number;
+  tc?: number;
   total: number;
   observacion?: string;
   esTrabajoPropio?: boolean;
@@ -97,6 +99,7 @@ export interface Income {
   precio: number;
   moneda: Currency;
   tipoCambio: number;
+  tc?: number;
   total: number;
   observacion?: string;
   esTrabajoPropio?: boolean;
@@ -112,6 +115,7 @@ export interface ItemConfig {
   icono?: string;
   unidad?: string;
   precioPredeterminado?: number;
+  precio?: number;
   moneda: Currency;
   activo?: boolean;
 }

@@ -38,27 +38,19 @@ export const BottomNav: React.FC<BottomNavProps> = ({
       label: 'Propiedad',
       icon: Trees,
     },
-    ...(isAdmin
-      ? [
-          {
-            id: 'administracion' as MainView,
-            label: 'Admin',
-            icon: Settings,
-          },
-        ]
-      : []),
+    {
+      id: 'administracion' as MainView,
+      label: 'Admin',
+      icon: Settings,
+    },
   ];
 
   return (
     <nav
-      aria-label="Navegación móvil inferior"
-      className="fixed bottom-0 inset-x-0 z-40 bg-stone-900/95 backdrop-blur-md border-t border-stone-800 lg:hidden pb-[env(safe-area-inset-bottom)] shadow-[0_-4px_12px_rgba(0,0,0,0.3)]"
+      aria-label="Navegación inferior"
+      className="fixed bottom-0 inset-x-0 z-40 bg-white/95 backdrop-blur-xl border-t border-slate-200/80 lg:hidden pb-[max(env(safe-area-inset-bottom),0.35rem)] shadow-[0_-2px_12px_rgba(0,0,0,0.06)]"
     >
-      <div
-        className={`grid ${
-          isAdmin ? 'grid-cols-4' : 'grid-cols-3'
-        } items-center h-14 max-w-md mx-auto px-1`}
-      >
+      <div className="grid grid-cols-4 items-center h-16 max-w-lg mx-auto px-2">
         {navItems.map((item) => {
           const Icon = item.icon;
           const isActive = currentView === item.id;
@@ -67,22 +59,24 @@ export const BottomNav: React.FC<BottomNavProps> = ({
               key={item.id}
               type="button"
               onClick={() => onNavigate(item.id)}
-              className={`relative flex flex-col items-center justify-center h-full py-1 text-center transition cursor-pointer select-none min-h-[48px] ${
+              className={`flex flex-col items-center justify-center h-full py-1 text-center transition-all cursor-pointer select-none active:scale-95 ${
                 isActive
-                  ? 'text-emerald-400 font-bold'
-                  : 'text-stone-400 hover:text-stone-200 font-medium'
+                  ? 'text-emerald-700 font-bold'
+                  : 'text-slate-500 hover:text-slate-800 font-medium'
               }`}
             >
-              {/* Active top indicator pill */}
-              {isActive && (
-                <span className="absolute top-0 inset-x-3 h-0.5 bg-emerald-400 rounded-full" />
-              )}
-              <Icon
-                className={`h-5 w-5 shrink-0 transition-transform ${
-                  isActive ? 'scale-110 text-emerald-400 stroke-[2.4]' : 'stroke-[1.8]'
+              <div
+                className={`p-1 rounded-full transition-colors ${
+                  isActive ? 'bg-emerald-100/70 text-emerald-700' : 'text-slate-500'
                 }`}
-              />
-              <span className="text-[10px] tracking-tight leading-none mt-1 truncate max-w-[64px]">
+              >
+                <Icon
+                  className={`h-6 w-6 shrink-0 transition-transform ${
+                    isActive ? 'stroke-[2.5]' : 'stroke-[1.8]'
+                  }`}
+                />
+              </div>
+              <span className={`text-xs tracking-tight mt-0.5 truncate max-w-[76px] ${isActive ? 'font-bold text-emerald-800' : 'text-slate-600'}`}>
                 {item.label}
               </span>
             </button>

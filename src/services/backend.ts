@@ -19,7 +19,7 @@ import {
  * Connects directly to Google Apps Script / Google Sheets.
  */
 
-const GAS_DIRECT_URL = 'https://script.google.com/macros/s/AKfycbyKl_Rx_xLs3dzNkNb_Fosf0txpebqEyQtA1QyAXgrKTWZFIV7n3BreSZe8dNWdwgQI2w/exec';
+const GAS_DIRECT_URL = 'https://script.google.com/macros/s/AKfycbwiFRh5R1k5ZxxFD67Fl0xcmIA1NVbx9XOg2gtjbvyYgAFoprbVB8foMTnUpPvMY0tf/exec';
 const PROXY_URL = '/api/gas';
 
 // In-flight request deduplication map
@@ -50,25 +50,129 @@ export function getActiveSession(): UserSession | null {
   return activeSession;
 }
 
-export function checkIsAdmin(session: UserSession | any): boolean {
-  if (!session) return false;
+const ADMIN_TOKEN_KEY = 'myp_admin_token';
+let inMemoryAdminToken: string | null = null;
+try {
+  inMemoryAdminToken = localStorage.getItem(ADMIN_TOKEN_KEY);
+} catch {
+  inMemoryAdminToken = null;
+}
 
-  if (session.esAdmin === true || session.isAdmin === true) {
-    return true;
+export function getAdminToken(): string | null {
+  try {
+    return localStorage.getItem(ADMIN_TOKEN_KEY) || inMemoryAdminToken;
+  } catch {
+    return inMemoryAdminToken;
   }
+}
 
-  const rawRol = session.rol ?? session.role ?? session.perfil ?? session.nivel ?? '';
-  if (rawRol) {
-    const normalizedRol = String(rawRol).trim().toLowerCase();
-    return (
-      normalizedRol === 'admin' ||
-      normalizedRol === 'administrador'
-    );
+let verifiedAdminTokenInSession: string | null = null;
+
+export function isAdminAuthorizationVerifiedInSession(): boolean {
+  const currentToken = getAdminToken();
+  return !!currentToken && verifiedAdminTokenInSession === currentToken;
+}
+
+export function setAdminToken(token: string | null): void {
+  inMemoryAdminToken = token;
+  if (!token) {
+    verifiedAdminTokenInSession = null;
   }
+  try {
+    if (token) {
+      localStorage.setItem(ADMIN_TOKEN_KEY, token);
+    } else {
+      localStorage.removeItem(ADMIN_TOKEN_KEY);
+    }
+  } catch {
+    // Ignore storage quota or access errors
+  }
+}
 
-  // Fallback if rol attribute is omitted in backend session payload
-  const rawUser = String(session.usuario ?? session.username ?? '').trim().toLowerCase();
-  return rawUser === 'admin';
+export function hasAdminAuthorization(): boolean {
+  return !!getAdminToken();
+}
+
+let inMemoryExchangeRate: number = 0;
+
+export function setConfiguredExchangeRate(rate: number): void {
+  if (typeof rate === 'number' && rate > 0) {
+    inMemoryExchangeRate = rate;
+  }
+}
+
+export function getConfiguredExchangeRate(): number {
+  return inMemoryExchangeRate;
+}
+
+export function resolveEffectiveExchangeRate(candidateRate?: any): number {
+  const parsed = parseDecimalNumber(candidateRate);
+  if (parsed > 0) return parsed;
+  const inMem = getConfiguredExchangeRate();
+  if (inMem > 0) return inMem;
+  throw new Error(
+    'Tipo de cambio no configurado en Google Sheets. Por favor configure el tipo de cambio en Administración -> Configuración -> Tipo de cambio antes de registrar operaciones.'
+  );
+}
+
+export function checkIsAdmin(_session?: UserSession | any): boolean {
+  // Seguridad administrativa estricta: nunca conceder acceso por texto, rol local o username
+  return hasAdminAuthorization();
+}
+
+export function getLocalDateString(dateInput: Date | string = new Date()): string {
+  const d = dateInput instanceof Date ? dateInput : new Date(dateInput);
+  if (isNaN(d.getTime())) {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  }
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Format any date string (ISO, YYYY-MM-DD, etc.) into DD/MM/AAAA cleanly
+ * without timezone offset shifts.
+ */
+export function formatDateDDMMAAAA(dateInput?: string | Date | null): string {
+  if (!dateInput) return '';
+  if (dateInput instanceof Date) {
+    if (isNaN(dateInput.getTime())) return '';
+    const day = String(dateInput.getDate()).padStart(2, '0');
+    const month = String(dateInput.getMonth() + 1).padStart(2, '0');
+    const year = dateInput.getFullYear();
+    return `${day}/${month}/${year}`;
+  }
+  const str = String(dateInput).trim();
+  // Match YYYY-MM-DD anywhere in the string (including ISO 2026-10-23T...)
+  const matchYMD = str.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (matchYMD) {
+    const [, year, month, day] = matchYMD;
+    return `${day.padStart(2, '0')}/${month.padStart(2, '0')}/${year}`;
+  }
+  // Match DD/MM/YYYY
+  const matchDMY = str.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (matchDMY) {
+    const [, day, month, year] = matchDMY;
+    return `${day.padStart(2, '0')}/${month.padStart(2, '0')}/${year}`;
+  }
+  return str;
+}
+
+/**
+ * Identify internal technical machine/entity codes like MAQ-48BCF9E8FA9149 or UUIDs
+ * so they can be hidden from seniors and regular users in favor of friendly names and types.
+ */
+export function isTechnicalId(str?: string | null): boolean {
+  if (!str) return false;
+  const trimmed = String(str).trim();
+  if (/^MAQ[-_]?[A-Z0-9]{6,}/i.test(trimmed)) return true;
+  if (/^[a-f0-9]{8}-[a-f0-9]{4}/i.test(trimmed)) return true;
+  if (/^(m_|maq_|job_|exp_|inc_|lot_)[a-z0-9]+/i.test(trimmed)) return true;
+  if (/^[A-Z0-9]{12,}$/.test(trimmed)) return true;
+  return false;
 }
 
 export function setActiveSession(session: UserSession | null) {
@@ -114,23 +218,41 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
 
   const requestPromise = (async () => {
     let body: Record<string, any>;
+    const currentAdminToken = getAdminToken();
 
     if (action === 'auth.login') {
-      // EXACT contract for auth.login: never include token, credentials strictly inside data
+      // Contract for auth.login: never include tokens, credentials inside data
       body = {
         action: 'auth.login',
         data: {
-          usuario: payload.usuario,
-          pin: payload.pin,
+          usuario: payload.usuario || 'usuario',
+          pin: payload.pin || payload.password || payload.contrasena,
+          password: payload.password || payload.contrasena || payload.pin,
+          contrasena: payload.contrasena || payload.password || payload.pin,
+        },
+      };
+    } else if (action === 'auth.admin.authorize') {
+      // Contract for auth.admin.authorize: validates CONTRASENA_ADMIN
+      body = {
+        action: 'auth.admin.authorize',
+        ...(activeSession?.token ? { token: activeSession.token } : {}),
+        data: {
+          password: payload.password || payload.contrasena || payload.contrasenaAdmin,
+          contrasena: payload.contrasena || payload.password || payload.contrasenaAdmin,
+          contrasenaAdmin: payload.contrasenaAdmin || payload.password || payload.contrasena,
         },
       };
     } else {
-      // Protected or general actions: token at root level, parameters inside data
+      // General or administrative actions: attach user token & admin token
       body = {
-        action,
         ...(activeSession?.token ? { token: activeSession.token } : {}),
-        data: payload,
+        ...(currentAdminToken ? { tokenAdmin: currentAdminToken, adminToken: currentAdminToken } : {}),
+        data: {
+          ...payload,
+          ...(currentAdminToken ? { tokenAdmin: currentAdminToken, adminToken: currentAdminToken } : {}),
+        },
         ...payload,
+        action,
       };
     }
 
@@ -174,12 +296,24 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
     }
 
     if (!data.ok) {
-      // Check for expired or missing session
+      // Check for expired or missing user session
       if (data.error === 'Se requiere iniciar sesion' || data.error === 'Sesion vencida o revocada') {
         if (action !== 'auth.login' && action !== 'health') {
           setActiveSession(null);
         }
       }
+
+      // Check for expired or revoked administrative token or changed CONTRASENA_ADMIN
+      const errStr = String(data.error || '').toLowerCase();
+      if (
+        errStr.includes('autorización de administrador') ||
+        errStr.includes('autorizacion de administrador') ||
+        errStr.includes('token administrativo') ||
+        errStr.includes('credencial administrativa')
+      ) {
+        setAdminToken(null);
+      }
+
       throw new Error(data.error || `Error en la acción ${action}`);
     }
 
@@ -210,16 +344,117 @@ export async function checkBackendHealth(): Promise<BackendHealthResponse> {
 }
 
 // -------------------------------------------------------------
-// 2. Authentication (PIN login)
+// 2. Authentication: Doble Contraseña (Usuario y Administrador)
 // -------------------------------------------------------------
 
-export async function loginWithPin(usuario: string, pin: string): Promise<UserSession> {
-  const result = await callGAS<UserSession>('auth.login', { usuario, pin });
+/**
+ * Iniciar sesión con CONTRASENA_USUARIO
+ * Da acceso a los módulos operativos MAQUINARIAS y PROPIEDAD.
+ */
+export async function loginWithUserPassword(password: string): Promise<UserSession> {
+  if (!password || !password.trim()) {
+    throw new Error('Ingrese la contraseña de usuario.');
+  }
+
+  const result = await callGAS<UserSession>('auth.login', {
+    usuario: 'usuario',
+    pin: password.trim(),
+    password: password.trim(),
+    contrasena: password.trim(),
+  });
+
   if (!result || !result.token) {
     throw new Error('La autenticación en Apps Script no retornó un token válido');
   }
+
   setActiveSession(result);
   return result;
+}
+
+/**
+ * Compatible con la llamada anterior de loginWithPin
+ */
+export async function loginWithPin(usuario: string, pin: string): Promise<UserSession> {
+  return loginWithUserPassword(pin || usuario);
+}
+
+/**
+ * Autorizar este dispositivo como Administrador mediante CONTRASENA_ADMIN
+ * Emite un tokenAdmin que se guarda en localStorage de este equipo.
+ */
+export async function authorizeAdminDevice(password: string): Promise<{ tokenAdmin: string }> {
+  if (!password || !password.trim()) {
+    throw new Error('Ingrese la contraseña de administrador.');
+  }
+
+  const result = await callGAS<{ tokenAdmin?: string; token?: string; expira?: string }>(
+    'auth.admin.authorize',
+    {
+      password: password.trim(),
+      contrasena: password.trim(),
+      contrasenaAdmin: password.trim(),
+    }
+  );
+
+  const tokenAdmin = result?.tokenAdmin || result?.token;
+  if (!tokenAdmin) {
+    throw new Error('No se recibió la credencial administrativa del backend');
+  }
+
+  setAdminToken(tokenAdmin);
+  return { tokenAdmin };
+}
+
+/**
+ * Verificar si el tokenAdmin guardado en este dispositivo sigue siendo válido en Google Apps Script
+ */
+export async function verifyAdminAuthorization(): Promise<boolean> {
+  const currentToken = getAdminToken();
+  if (!currentToken) {
+    verifiedAdminTokenInSession = null;
+    return false;
+  }
+
+  if (verifiedAdminTokenInSession === currentToken) {
+    return true;
+  }
+
+  try {
+    const res = await callGAS<{ valid: boolean; ok?: boolean }>(
+      'auth.admin.verify',
+      { tokenAdmin: currentToken, token: currentToken },
+      false
+    );
+    if (res?.valid === false || res?.ok === false) {
+      setAdminToken(null);
+      verifiedAdminTokenInSession = null;
+      return false;
+    }
+    verifiedAdminTokenInSession = currentToken;
+    return true;
+  } catch {
+    // Si falla la comunicación con el servidor, no conceder acceso administrativo
+    setAdminToken(null);
+    verifiedAdminTokenInSession = null;
+    return false;
+  }
+}
+
+/**
+ * Revocar la autorización administrativa de este dispositivo en Apps Script y eliminarla de localStorage
+ */
+export async function revokeAdminAuthorization(): Promise<void> {
+  const currentToken = getAdminToken();
+  try {
+    if (currentToken) {
+      await callGAS('auth.admin.revoke', { tokenAdmin: currentToken, token: currentToken });
+    }
+  } catch {
+    // Continuar con la revocación local aun si falló la red
+  } finally {
+    setAdminToken(null);
+    clearMemoryCache();
+  }
 }
 
 export async function logout(): Promise<void> {
@@ -567,8 +802,16 @@ export async function updateMachine(id: string, machine: Partial<Machine>): Prom
 }
 
 export async function deleteMachine(id: string): Promise<void> {
-  const payload = { id, deleted: true, action: 'delete' };
-  await callGAS('machine.save', payload);
+  const payload = { id, maquinariaId: id, deleted: true };
+  let res: any;
+  try {
+    res = await callGAS<any>('machine.delete', payload);
+  } catch {
+    res = await callGAS<any>('machine.save', payload);
+  }
+  if (res && res.ok === false) {
+    throw new Error(res.error || 'No se pudo eliminar la maquinaria en el servidor.');
+  }
   clearMemoryCache();
 }
 
@@ -680,7 +923,7 @@ export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise
   const tarifaNum = parseDecimalNumber(job.tarifa);
   const totalNum = parseDecimalNumber(job.total) || cantNum * tarifaNum;
   const gasMoneda = (job.moneda === 'USD' ? 'USD' : 'BS');
-  const tcNum = parseDecimalNumber(job.tipoCambio) || 6.96;
+  const tcNum = resolveEffectiveExchangeRate(job.tipoCambio);
   const gasDestino = job.tipoTrabajo === 'propiedad' ? 'PROPIEDAD' : 'TERCERO';
 
   const jobData = {
@@ -730,7 +973,7 @@ export async function updateMachineryJob(id: string, job: Partial<MachineryJob>)
   const cantNum = parseDecimalNumber(job.cantidad);
   const tarifaNum = parseDecimalNumber(job.tarifa);
   const gasMoneda = job.moneda ? (job.moneda === 'USD' ? 'USD' : 'BS') : undefined;
-  const tcNum = job.tipoCambio ? (parseDecimalNumber(job.tipoCambio) || 6.96) : 6.96;
+  const tcNum = job.tipoCambio !== undefined ? resolveEffectiveExchangeRate(job.tipoCambio) : (getConfiguredExchangeRate() > 0 ? getConfiguredExchangeRate() : undefined);
   const { id: _, ...restJob } = job as any;
 
   const jobData = {
@@ -743,8 +986,7 @@ export async function updateMachineryJob(id: string, job: Partial<MachineryJob>)
     ...(cantNum ? { cantidad: cantNum } : {}),
     ...(tarifaNum ? { tarifa: tarifaNum, precio: tarifaNum, precioUnitario: tarifaNum } : {}),
     ...(gasMoneda ? { moneda: gasMoneda } : {}),
-    tc: tcNum,
-    tipoCambio: tcNum,
+    ...(tcNum ? { tc: tcNum, tipoCambio: tcNum } : {}),
   };
 
   const payload = {
@@ -763,8 +1005,13 @@ export async function updateMachineryJob(id: string, job: Partial<MachineryJob>)
 }
 
 export async function deleteMachineryJob(id: string): Promise<void> {
-  const payload = { id, deleted: true, action: 'delete' };
-  await callGAS('work.save', payload);
+  const payload = { id, jobId: id, deleted: true, action: 'delete' };
+  try {
+    await callGAS('work.delete', payload);
+  } catch (err: any) {
+    console.warn('[deleteMachineryJob] work.delete failed, trying deleteMachineryJob fallback:', err?.message);
+    await callGAS('deleteMachineryJob', payload);
+  }
   clearMemoryCache();
 }
 
@@ -811,7 +1058,7 @@ export async function getExpenses(campanaId?: string, modulo?: 'maquinarias' | '
         unidad: String(e.unidad || ''),
         precio: prec,
         moneda: mon,
-        tipoCambio: parseDecimalNumber(e.tc ?? e.tipoCambio ?? 6.96),
+        tipoCambio: parseDecimalNumber(e.tc ?? e.tipoCambio ?? getConfiguredExchangeRate() ?? 0),
         total: tot,
         observacion: String(e.observaciones || e.observacion || ''),
         esTrabajoPropio: Boolean(e.esTrabajoPropio || e.trabajoId),
@@ -835,7 +1082,7 @@ export async function createExpense(expense: Omit<Expense, 'id'>): Promise<Expen
   const totalNum = parseDecimalNumber(expense.total) || cantNum * precioNum;
   const gasModulo: 'MAQUINARIAS' | 'PROPIEDAD' = expense.modulo === 'propiedad' ? 'PROPIEDAD' : 'MAQUINARIAS';
   const gasMoneda = (expense.moneda === 'USD' ? 'USD' : 'BS');
-  const tcNum = parseDecimalNumber(expense.tipoCambio) || 6.96;
+  const tcNum = resolveEffectiveExchangeRate(expense.tipoCambio);
 
   const payload: Record<string, any> = {
     modulo: gasModulo,
@@ -870,9 +1117,66 @@ export async function createExpense(expense: Omit<Expense, 'id'>): Promise<Expen
   };
 }
 
+export async function updateExpense(id: string, expense: Partial<Expense>): Promise<Expense> {
+  const cantNum = expense.cantidad !== undefined ? (parseDecimalNumber(expense.cantidad) || 1) : undefined;
+  const precioNum = expense.precio !== undefined ? parseDecimalNumber(expense.precio) : undefined;
+  const gasMoneda = expense.moneda ? (expense.moneda === 'USD' ? 'USD' : 'BS') : undefined;
+  const tcNum = expense.tipoCambio !== undefined ? resolveEffectiveExchangeRate(expense.tipoCambio) : undefined;
+  const totalNum =
+    expense.total !== undefined
+      ? parseDecimalNumber(expense.total)
+      : (cantNum !== undefined && precioNum !== undefined ? cantNum * precioNum : undefined);
+
+  const payload: Record<string, any> = {
+    id,
+    movimientoId: id,
+    modulo: 'PROPIEDAD',
+    clase: 'GASTO',
+    tipo: 'gasto',
+    ...(expense.fecha ? { fecha: expense.fecha } : {}),
+    ...(expense.campanaId ? { campanaId: expense.campanaId } : {}),
+    ...(expense.itemGasto ? { descripcion: expense.itemGasto, item: expense.itemGasto, itemGasto: expense.itemGasto } : {}),
+    ...(cantNum !== undefined ? { cantidad: cantNum } : {}),
+    ...(expense.unidad ? { unidad: expense.unidad } : {}),
+    ...(precioNum !== undefined ? { precioUnitario: precioNum, precio: precioNum } : {}),
+    ...(totalNum !== undefined ? { importe: totalNum, total: totalNum } : {}),
+    ...(gasMoneda ? { moneda: gasMoneda } : {}),
+    ...(tcNum !== undefined ? { tc: tcNum, tipoCambio: tcNum } : {}),
+    ...(expense.observacion !== undefined ? { observaciones: expense.observacion, observacion: expense.observacion } : {}),
+    ...(expense.loteId ? { loteId: expense.loteId } : {}),
+  };
+
+  let res: any;
+  try {
+    res = await callGAS<any>('updateExpense', payload);
+  } catch {
+    try {
+      res = await callGAS<any>('movement.update', payload);
+    } catch {
+      res = await callGAS<any>('movement.save', payload);
+    }
+  }
+
+  if (res && res.ok === false) {
+    throw new Error(res.error || 'No se pudo actualizar el gasto en Google Sheets.');
+  }
+
+  clearMemoryCache();
+  return {
+    ...expense as any,
+    id,
+    total: totalNum ?? (expense.total || 0),
+  };
+}
+
 export async function deleteExpense(id: string): Promise<void> {
-  const payload = { id, tipo: 'gasto', clase: 'GASTO', deleted: true, action: 'delete' };
-  await callGAS('movement.save', payload);
+  const payload = { id, movimientoId: id, tipo: 'gasto', clase: 'GASTO', deleted: true, action: 'delete' };
+  try {
+    await callGAS('movement.delete', payload);
+  } catch (err: any) {
+    console.warn('[deleteExpense] movement.delete failed, trying deleteExpense fallback:', err?.message);
+    await callGAS('deleteExpense', payload);
+  }
   clearMemoryCache();
 }
 
@@ -918,7 +1222,7 @@ export async function getIncomes(campanaId?: string, modulo?: 'maquinarias' | 'p
         unidad: String(i.unidad || ''),
         precio: prec,
         moneda: mon,
-        tipoCambio: parseDecimalNumber(i.tc ?? i.tipoCambio ?? 6.96),
+        tipoCambio: parseDecimalNumber(i.tc ?? i.tipoCambio ?? getConfiguredExchangeRate() ?? 0),
         total: tot,
         observacion: String(i.observaciones || i.observacion || ''),
         esTrabajoPropio: Boolean(i.esTrabajoPropio || i.trabajoId),
@@ -942,7 +1246,7 @@ export async function createIncome(income: Omit<Income, 'id'>): Promise<Income> 
   const totalNum = parseDecimalNumber(income.total) || cantNum * precioNum;
   const gasModulo: 'MAQUINARIAS' | 'PROPIEDAD' = income.modulo === 'maquinarias' ? 'MAQUINARIAS' : 'PROPIEDAD';
   const gasMoneda = (income.moneda === 'USD' ? 'USD' : 'BS');
-  const tcNum = parseDecimalNumber(income.tipoCambio) || 6.96;
+  const tcNum = resolveEffectiveExchangeRate(income.tipoCambio);
 
   const payload: Record<string, any> = {
     modulo: gasModulo,
@@ -977,9 +1281,66 @@ export async function createIncome(income: Omit<Income, 'id'>): Promise<Income> 
   };
 }
 
+export async function updateIncome(id: string, income: Partial<Income>): Promise<Income> {
+  const cantNum = income.cantidad !== undefined ? (parseDecimalNumber(income.cantidad) || 0) : undefined;
+  const precioNum = income.precio !== undefined ? parseDecimalNumber(income.precio) : undefined;
+  const gasMoneda = income.moneda ? (income.moneda === 'USD' ? 'USD' : 'BS') : undefined;
+  const tcNum = income.tipoCambio !== undefined ? resolveEffectiveExchangeRate(income.tipoCambio) : undefined;
+  const totalNum =
+    income.total !== undefined
+      ? parseDecimalNumber(income.total)
+      : (cantNum !== undefined && precioNum !== undefined ? cantNum * precioNum : undefined);
+
+  const payload: Record<string, any> = {
+    id,
+    movimientoId: id,
+    modulo: 'PROPIEDAD',
+    clase: 'INGRESO',
+    tipo: 'ingreso',
+    ...(income.fecha ? { fecha: income.fecha } : {}),
+    ...(income.campanaId ? { campanaId: income.campanaId } : {}),
+    ...(income.concepto ? { descripcion: income.concepto, concepto: income.concepto, item: income.concepto } : {}),
+    ...(cantNum !== undefined ? { cantidad: cantNum } : {}),
+    ...(income.unidad ? { unidad: income.unidad } : {}),
+    ...(precioNum !== undefined ? { precioUnitario: precioNum, precio: precioNum } : {}),
+    ...(totalNum !== undefined ? { importe: totalNum, total: totalNum } : {}),
+    ...(gasMoneda ? { moneda: gasMoneda } : {}),
+    ...(tcNum !== undefined ? { tc: tcNum, tipoCambio: tcNum } : {}),
+    ...(income.observacion !== undefined ? { observaciones: income.observacion, observacion: income.observacion } : {}),
+    ...(income.loteId ? { loteId: income.loteId } : {}),
+  };
+
+  let res: any;
+  try {
+    res = await callGAS<any>('updateIncome', payload);
+  } catch {
+    try {
+      res = await callGAS<any>('movement.update', payload);
+    } catch {
+      res = await callGAS<any>('movement.save', payload);
+    }
+  }
+
+  if (res && res.ok === false) {
+    throw new Error(res.error || 'No se pudo actualizar el ingreso en Google Sheets.');
+  }
+
+  clearMemoryCache();
+  return {
+    ...income as any,
+    id,
+    total: totalNum ?? (income.total || 0),
+  };
+}
+
 export async function deleteIncome(id: string): Promise<void> {
-  const payload = { id, tipo: 'ingreso', clase: 'INGRESO', deleted: true, action: 'delete' };
-  await callGAS('movement.save', payload);
+  const payload = { id, movimientoId: id, tipo: 'ingreso', clase: 'INGRESO', deleted: true, action: 'delete' };
+  try {
+    await callGAS('movement.delete', payload);
+  } catch (err: any) {
+    console.warn('[deleteIncome] movement.delete failed, trying deleteIncome fallback:', err?.message);
+    await callGAS('deleteIncome', payload);
+  }
   clearMemoryCache();
 }
 
@@ -990,9 +1351,9 @@ export async function deleteIncome(id: string): Promise<void> {
 export async function getItemsConfig(useCache = true): Promise<ItemConfig[]> {
   try {
     const res = await callGAS<any>('catalog.list', {}, useCache);
-    const rawItems = extractArrayFromResponse(res, ['items', 'itemsConfig', 'conceptos']);
-    if (rawItems.length > 0) {
-      return rawItems.map(normalizeItemConfig);
+    const rawItems = extractArrayFromResponse(res, ['items', 'itemsConfig', 'conceptos', 'rubros', 'catalog']);
+    if (rawItems && rawItems.length > 0) {
+      return rawItems.filter(Boolean).map(normalizeItemConfig);
     }
   } catch {
     // fallback
@@ -1000,8 +1361,8 @@ export async function getItemsConfig(useCache = true): Promise<ItemConfig[]> {
 
   try {
     const res = await callGAS<any>('getItemsConfig', {}, useCache);
-    const rawItems = extractArrayFromResponse(res, ['items', 'itemsConfig', 'result']);
-    return rawItems.map(normalizeItemConfig);
+    const rawItems = extractArrayFromResponse(res, ['items', 'itemsConfig', 'result', 'conceptos']);
+    return (rawItems || []).filter(Boolean).map(normalizeItemConfig);
   } catch {
     return [];
   }
@@ -1011,7 +1372,7 @@ export async function saveItemConfig(item: Partial<ItemConfig> & { nombre: strin
   const gasModulo = (item.modulo || (item.tipo === 'gasto_maquinaria' ? 'MAQUINARIAS' : 'PROPIEDAD')).toUpperCase();
   const gasClase = (item.clase || (item.tipo === 'ingreso_propiedad' ? 'INGRESO' : 'GASTO')).toUpperCase();
   const gasMoneda = (item.moneda === 'USD' ? 'USD' : 'BS');
-  const precioNum = parseDecimalNumber(item.precioPredeterminado);
+  const precioNum = parseDecimalNumber(item.precioPredeterminado ?? item.precio);
 
   const payload: Record<string, any> = {
     modulo: gasModulo,
@@ -1105,7 +1466,7 @@ export async function createAsset(asset: Omit<Asset, 'id' | 'valorAcumulado' | '
 
   const valNum = parseDecimalNumber(asset.valorInicial);
   const gasMoneda = (asset.moneda === 'USD' ? 'USD' : 'BS');
-  const tcNum = 6.96;
+  const tcNum = resolveEffectiveExchangeRate();
 
   const payload = {
     tipo: gasTipo,
@@ -1147,29 +1508,98 @@ export async function addAssetImprovement(
 
 export async function getExchangeRateConfig(useCache = true): Promise<ExchangeRateConfig> {
   try {
-    const res = await callGAS<any>('catalog.list', {}, useCache);
-    if (res && res.exchangeRate) return res.exchangeRate;
-    if (res && typeof res.tasaBobPerUsd === 'number') {
+    const res = await callGAS<any>('fx.get', {}, useCache);
+    const tasa = parseDecimalNumber(res?.tasaBobPerUsd ?? res?.tasa ?? res?.tc ?? res?.rate);
+    if (tasa > 0) {
+      setConfiguredExchangeRate(tasa);
       return {
-        tasaBobPerUsd: res.tasaBobPerUsd,
-        fuente: res.fuente || 'manual',
-        fechaActualizacion: res.fechaActualizacion || new Date().toISOString().slice(0, 10),
-        nota: res.nota,
+        tasaBobPerUsd: tasa,
+        fuente: res?.fuente || 'manual',
+        fechaActualizacion: res?.fechaActualizacion || res?.fecha || getLocalDateString(),
+        nota: res?.nota || '',
       };
     }
   } catch {
-    // fallback for read-only
+    // fallback to catalog.list
   }
-  return callGAS<ExchangeRateConfig>('getExchangeRateConfig', {}, useCache).catch(() => ({
-    tasaBobPerUsd: 6.96,
+
+  try {
+    const res = await callGAS<any>('catalog.list', {}, useCache);
+    if (res && res.exchangeRate) {
+      const parsedRate = parseDecimalNumber(res.exchangeRate.tasaBobPerUsd ?? res.exchangeRate.tasa);
+      if (parsedRate > 0) setConfiguredExchangeRate(parsedRate);
+      return res.exchangeRate;
+    }
+    const tasa = parseDecimalNumber(res?.tasaBobPerUsd ?? res?.exchangeRate?.tasaBobPerUsd ?? res?.tasa);
+    if (tasa > 0) {
+      setConfiguredExchangeRate(tasa);
+      return {
+        tasaBobPerUsd: tasa,
+        fuente: res?.fuente || 'manual',
+        fechaActualizacion: res?.fechaActualizacion || res?.exchangeRate?.fechaActualizacion || getLocalDateString(),
+        nota: res?.nota || '',
+      };
+    }
+  } catch {
+    // fallback
+  }
+
+  const existingRate = getConfiguredExchangeRate();
+  return {
+    tasaBobPerUsd: existingRate > 0 ? existingRate : 0,
     fuente: 'manual' as const,
-    fechaActualizacion: new Date().toISOString().slice(0, 10),
-  }));
+    fechaActualizacion: getLocalDateString(),
+  };
 }
 
-export async function saveExchangeRateConfig(config: { tasaBobPerUsd: number; nota?: string }): Promise<ExchangeRateConfig> {
-  const payload = { key: 'exchangeRate', ...config, config };
-  const res = await callGAS<ExchangeRateConfig>('config.set', payload);
+export async function saveExchangeRateConfig(config: { tasaBobPerUsd: number; nota?: string; fecha?: string }): Promise<ExchangeRateConfig> {
+  const tcNum = parseDecimalNumber(config.tasaBobPerUsd);
+  if (tcNum <= 0) {
+    throw new Error('El tipo de cambio debe ser un número positivo mayor a 0.');
+  }
+
+  const localDateStr = config.fecha ? getLocalDateString(config.fecha) : getLocalDateString();
+
+  const payload = {
+    tasa: tcNum,
+    tasaBobPerUsd: tcNum,
+    tc: tcNum,
+    rate: tcNum,
+    fecha: localDateStr,
+    fechaActualizacion: localDateStr,
+    fecha_actualizacion: localDateStr,
+    date: localDateStr,
+    nota: config.nota || 'Configurado manualmente por el administrador',
+  };
+
+  let res: any;
+  try {
+    res = await callGAS<any>('fx.set', payload);
+  } catch (err: any) {
+    throw new Error(`Error en el backend al guardar el tipo de cambio vía fx.set: ${err?.message || 'Error de comunicación'}`);
+  }
+
   clearMemoryCache();
-  return res;
+
+  const returnedTasa = parseDecimalNumber(
+    res?.tasaBobPerUsd ?? res?.tasa ?? res?.tc ?? res?.rate ?? tcNum
+  );
+
+  const finalTasa = returnedTasa || tcNum;
+  setConfiguredExchangeRate(finalTasa);
+
+  return {
+    tasaBobPerUsd: finalTasa,
+    fuente: res?.fuente || 'manual',
+    fechaActualizacion: res?.fechaActualizacion || res?.fecha || localDateStr,
+    nota: res?.nota || config.nota || '',
+  };
+}
+
+// -------------------------------------------------------------
+// 12. Financial Reports (Acción administrativa report.get)
+// -------------------------------------------------------------
+
+export async function getFinancialReports(campanaId?: string, useCache = true): Promise<any> {
+  return callGAS<any>('report.get', { campanaId }, useCache);
 }

@@ -13,6 +13,7 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { Campaign, Machine, Lot, MachineryJob } from '../types';
+import { formatDateDDMMAAAA } from '../services/backend';
 
 interface Props {
   activeCampaign: Campaign | null;
@@ -29,10 +30,11 @@ export const DashboardView: React.FC<Props> = ({
   jobs,
   onNavigate,
 }) => {
-  // Filter jobs for active campaign
-  const campaignJobs = activeCampaign
+  // Filter jobs for active campaign and sort newest to oldest
+  const campaignJobs = (activeCampaign
     ? jobs.filter((j) => j.campanaId === activeCampaign.id)
-    : jobs;
+    : jobs
+  ).slice().sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
 
   // Operational aggregates
   const totalHours = campaignJobs
@@ -192,7 +194,7 @@ export const DashboardView: React.FC<Props> = ({
             <div className="flex items-center gap-2.5 min-w-0">
               <History className="h-4.5 w-4.5 text-emerald-700 shrink-0" />
               <span className="text-xs font-bold text-stone-800 group-hover:text-emerald-900 truncate">
-                Consultar historial de trabajos
+                Movimientos de trabajos
               </span>
             </div>
             <ArrowRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 shrink-0 ml-1" />
@@ -207,7 +209,7 @@ export const DashboardView: React.FC<Props> = ({
             <div className="flex items-center gap-2.5 min-w-0">
               <LandPlot className="h-4.5 w-4.5 text-emerald-700 shrink-0" />
               <span className="text-xs font-bold text-stone-800 group-hover:text-emerald-900 truncate">
-                Consultar lotes registrados
+                Mis lotes
               </span>
             </div>
             <ArrowRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 shrink-0 ml-1" />
@@ -222,7 +224,7 @@ export const DashboardView: React.FC<Props> = ({
             <div className="flex items-center gap-2.5 min-w-0">
               <Trees className="h-4.5 w-4.5 text-emerald-700 shrink-0" />
               <span className="text-xs font-bold text-stone-800 group-hover:text-emerald-900 truncate">
-                Consultar actividad agrícola
+                Consultar movimientos
               </span>
             </div>
             <ArrowRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 shrink-0 ml-1" />
@@ -257,7 +259,7 @@ export const DashboardView: React.FC<Props> = ({
               {campaignJobs.slice(0, 6).map((job) => (
                 <div key={job.id} className="p-3 rounded-xl border border-stone-200 bg-stone-50/70 text-xs space-y-1">
                   <div className="flex justify-between items-center">
-                    <span className="font-bold text-stone-900">{job.fecha} &bull; {job.maquinariaNombre || 'Maquinaria'}</span>
+                    <span className="font-bold text-stone-900">{formatDateDDMMAAAA(job.fecha)} &bull; {job.maquinariaNombre || 'Maquinaria'}</span>
                     <span className={`px-2 py-0.5 text-[10px] font-bold rounded ${job.tipoTrabajo === 'propiedad' ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'}`}>
                       {job.tipoTrabajo === 'propiedad' ? 'Propiedad' : 'Terceros'}
                     </span>
@@ -290,7 +292,7 @@ export const DashboardView: React.FC<Props> = ({
                 <tbody className="divide-y divide-stone-100">
                   {campaignJobs.slice(0, 6).map((job) => (
                     <tr key={job.id} className="hover:bg-stone-50">
-                      <td className="py-2 px-3 text-stone-600 whitespace-nowrap">{job.fecha}</td>
+                      <td className="py-2 px-3 text-stone-600 whitespace-nowrap">{formatDateDDMMAAAA(job.fecha)}</td>
                       <td className="py-2 px-3 font-bold text-stone-900">{job.maquinariaNombre || 'Maquinaria'}</td>
                       <td className="py-2 px-3">
                         <span className={`px-2 py-0.5 text-[10px] font-bold rounded ${job.tipoTrabajo === 'propiedad' ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'}`}>

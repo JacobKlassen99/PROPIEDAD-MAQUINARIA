@@ -5,9 +5,10 @@ import {
   CircleMinus,
   LandPlot,
   Tractor,
-  ChartColumnIncreasing,
   History,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   ArrowLeft,
   Trash2,
   Check,
@@ -20,6 +21,8 @@ import {
   Wheat,
   Receipt,
   Layers,
+  Edit3,
+  Sparkles,
 } from 'lucide-react';
 import {
   Campaign,
@@ -33,9 +36,13 @@ import {
 } from '../types';
 import {
   createExpense,
+  updateExpense,
   deleteExpense,
   createIncome,
+  updateIncome,
   deleteIncome,
+  formatDateDDMMAAAA,
+  isTechnicalId,
 } from '../services/backend';
 
 interface Props {
@@ -56,8 +63,26 @@ type PropertyScreen =
   | 'gasto'
   | 'lotes'
   | 'maquinaria_recibida'
-  | 'resultados'
   | 'historial';
+
+interface MovementItem {
+  id: string;
+  tipo: 'ingreso' | 'gasto_directo' | 'maquinaria_recibida';
+  fecha: string;
+  loteId?: string;
+  loteNombre: string;
+  titulo: string;
+  detalle: string;
+  monto: number;
+  moneda: Currency;
+  tipoCambio?: number;
+  cantidad?: number;
+  unidad?: string;
+  precioUnitario?: number;
+  observacion?: string;
+  esTrabajoPropio?: boolean;
+  trabajoId?: string;
+}
 
 export const PropertyView: React.FC<Props> = ({
   activeCampaign,
@@ -65,6 +90,7 @@ export const PropertyView: React.FC<Props> = ({
   expenses,
   incomes,
   jobs,
+  itemsConfig = [],
   currency,
   exchangeRate,
   onRefreshData,
@@ -74,9 +100,29 @@ export const PropertyView: React.FC<Props> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // Search & Filters for Historial
+  // Search & Filters for Movimientos
   const [historialSearch, setHistorialSearch] = useState('');
   const [historialFilter, setHistorialFilter] = useState<'todos' | 'ingresos' | 'gastos' | 'maquinaria'>('todos');
+
+  // Accordion state for Mis lotes (only 1 lot expanded at a time)
+  const [expandedLotId, setExpandedLotId] = useState<string | null>(null);
+
+  // State for Delete confirmation modal
+  const [itemToDelete, setItemToDelete] = useState<{ id: string; tipo: 'ingreso' | 'gasto'; titulo: string } | null>(null);
+  const [deletingItem, setDeletingItem] = useState(false);
+
+  // State for Edit modal (Manual Incomes and Expenses)
+  const [editingMovement, setEditingMovement] = useState<MovementItem | null>(null);
+  const [editFecha, setEditFecha] = useState('');
+  const [editLotId, setEditLotId] = useState('');
+  const [editConcepto, setEditConcepto] = useState('');
+  const [editCantidad, setEditCantidad] = useState<number | ''>(1);
+  const [editUnidad, setEditUnidad] = useState('');
+  const [editPrecio, setEditPrecio] = useState<number | ''>('');
+  const [editMoneda, setEditMoneda] = useState<Currency>('BOB');
+  const [editTc, setEditTc] = useState<number | ''>('');
+  const [editObs, setEditObs] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
 
   // Form State for Agricultural Expense
   const [expFecha, setExpFecha] = useState(new Date().toISOString().slice(0, 10));
@@ -98,28 +144,88 @@ export const PropertyView: React.FC<Props> = ({
   const [incMoneda, setIncMoneda] = useState<Currency>('BOB');
   const [incObs, setIncObs] = useState('');
 
-  const formatMoney = (val: number | undefined | null, origMoneda: Currency = 'BOB') => {
-    const symbol = currency === 'BOB' ? 'Bs' : 'USD';
-    let num = typeof val === 'number' && !isNaN(val) ? val : 0;
-    const tasa = exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0 ? exchangeRate.tasaBobPerUsd : 6.96;
-    if (origMoneda === 'BOB' && currency === 'USD') {
-      num = num / tasa;
-    } else if (origMoneda === 'USD' && currency === 'BOB') {
-      num = num * tasa;
-    }
-    return `${symbol} ${num.toLocaleString('es-BO', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })}`;
-  };
-
   const propertyExpenses = (expenses || []).filter((e) => e.modulo === 'propiedad');
   const propertyIncomes = incomes || [];
   const linkedPropertyJobs = (jobs || []).filter((j) => j.tipoTrabajo === 'propiedad');
 
+  const propertyExpenseItems = (itemsConfig || []).filter(
+    (item) =>
+      item.activo !== false &&
+      ((item.modulo === 'PROPIEDAD' && item.clase === 'GASTO') ||
+        item.tipo === 'gasto_propiedad')
+  );
+
+  const propertyIncomeItems = (itemsConfig || []).filter(
+    (item) =>
+      item.activo !== false &&
+      ((item.modulo === 'PROPIEDAD' && item.clase === 'INGRESO') ||
+        item.tipo === 'ingreso_propiedad')
+  );
+
+  // Build combined chronological movements for the Historial
+  const allMovements: MovementItem[] = [
+    ...propertyIncomes.map((i) => ({
+      id: i.id,
+      tipo: 'ingreso' as const,
+      fecha: i.fecha,
+      loteId: i.loteId,
+      loteNombre: i.loteNombre || (lots.find((l) => l.id === i.loteId)?.nombre) || 'Lote',
+      titulo: i.concepto,
+      detalle: `${i.cantidad} ${i.unidad || ''} ${i.precio ? `@ ${i.moneda === 'USD' ? 'USD' : 'Bs'} ${i.precio}` : ''} ${i.observacion ? `• ${i.observacion}` : ''}`.trim(),
+      monto: i.total,
+      moneda: (i.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
+      tipoCambio: i.tipoCambio || i.tc || exchangeRate?.tasaBobPerUsd,
+      cantidad: i.cantidad,
+      unidad: i.unidad,
+      precioUnitario: i.precio,
+      observacion: i.observacion,
+      esTrabajoPropio: false,
+    })),
+    ...propertyExpenses.map((e) => {
+      const isJobLinked = Boolean(e.esTrabajoPropio || e.trabajoId);
+      return {
+        id: e.id,
+        tipo: (isJobLinked ? 'maquinaria_recibida' : 'gasto_directo') as 'gasto_directo' | 'maquinaria_recibida',
+        fecha: e.fecha,
+        loteId: e.loteId,
+        loteNombre: e.loteNombre || (lots.find((l) => l.id === e.loteId)?.nombre) || 'Lote',
+        titulo: e.itemGasto,
+        detalle: `${e.cantidad} ${e.unidad || ''} ${e.precio ? `@ ${e.moneda === 'USD' ? 'USD' : 'Bs'} ${e.precio}` : ''} ${e.observacion ? `• ${e.observacion}` : ''}`.trim(),
+        monto: e.total,
+        moneda: (e.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
+        tipoCambio: e.tipoCambio || e.tc || exchangeRate?.tasaBobPerUsd,
+        cantidad: e.cantidad,
+        unidad: e.unidad,
+        precioUnitario: e.precio,
+        observacion: e.observacion,
+        esTrabajoPropio: isJobLinked,
+        trabajoId: e.trabajoId,
+      };
+    }),
+    ...linkedPropertyJobs
+      .filter((j) => !propertyExpenses.some((e) => e.trabajoId === j.id))
+      .map((j) => ({
+        id: j.id,
+        tipo: 'maquinaria_recibida' as const,
+        fecha: j.fecha,
+        loteId: j.loteId,
+        loteNombre: j.loteNombre || (lots.find((l) => l.id === j.loteId)?.nombre) || 'Lote',
+        titulo: `Labor: ${j.maquinariaNombre || 'Maquinaria'}`,
+        detalle: `${j.cantidad} ${j.unidad}s @ ${j.moneda === 'USD' ? 'USD' : 'Bs'} ${j.tarifa}/${j.unidad} ${j.observacion ? `• ${j.observacion}` : ''}`.trim(),
+        monto: j.total,
+        moneda: (j.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
+        tipoCambio: j.tipoCambio || j.tc || exchangeRate?.tasaBobPerUsd,
+        cantidad: j.cantidad,
+        unidad: j.unidad,
+        precioUnitario: j.tarifa,
+        observacion: j.observacion,
+        esTrabajoPropio: true,
+        trabajoId: j.id,
+      })),
+  ].sort((a, b) => (b.fecha > a.fecha ? 1 : -1));
+
   // Total movements count
-  const totalMovementsCount =
-    propertyIncomes.length + propertyExpenses.length + linkedPropertyJobs.length;
+  const totalMovementsCount = allMovements.length;
 
   const handleExpenseSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -225,25 +331,115 @@ export const PropertyView: React.FC<Props> = ({
     }
   };
 
-  const handleDeleteExp = async (id: string) => {
-    if (!window.confirm('¿Confirmas eliminar este gasto agrícola?')) return;
+  // Open Edit Modal for a manual expense or income
+  const handleOpenEditMovement = (m: MovementItem) => {
+    setEditingMovement(m);
+    setEditFecha(m.fecha || new Date().toISOString().slice(0, 10));
+    setEditLotId(m.loteId || '');
+    setEditConcepto(m.titulo || '');
+    setEditCantidad(typeof m.cantidad === 'number' && !isNaN(m.cantidad) ? m.cantidad : 1);
+    setEditUnidad(m.unidad || (m.tipo === 'ingreso' ? 'toneladas' : 'unidades'));
+    setEditPrecio(
+      typeof m.precioUnitario === 'number' && !isNaN(m.precioUnitario)
+        ? m.precioUnitario
+        : m.monto && m.cantidad
+        ? m.monto / m.cantidad
+        : ''
+    );
+    setEditMoneda(m.moneda || 'BOB');
+    setEditTc(m.tipoCambio || exchangeRate?.tasaBobPerUsd || 6.96);
+    setEditObs(m.observacion || '');
+  };
+
+  const handleSaveEditMovement = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingMovement) return;
+    setErrorMsg(null);
+    setSuccessMsg(null);
+
+    const cantNum = Number(editCantidad);
+    const precioNum = Number(editPrecio);
+    if (isNaN(cantNum) || cantNum <= 0) {
+      setErrorMsg('La cantidad debe ser mayor a 0.');
+      return;
+    }
+    if (isNaN(precioNum) || precioNum < 0) {
+      setErrorMsg('El precio unitario no puede ser negativo.');
+      return;
+    }
+    const totalCalc = cantNum * precioNum;
+    const tcNum = Number(editTc) > 0 ? Number(editTc) : (exchangeRate?.tasaBobPerUsd || 6.96);
+    const lotObj = lots.find((l) => l.id === editLotId);
+
+    setSavingEdit(true);
     try {
-      await deleteExpense(id);
-      setSuccessMsg('Gasto agrícola eliminado.');
+      if (editingMovement.tipo === 'gasto_directo') {
+        await updateExpense(editingMovement.id, {
+          fecha: editFecha,
+          loteId: editLotId || undefined,
+          loteNombre: lotObj?.nombre || undefined,
+          itemGasto: editConcepto.trim(),
+          cantidad: cantNum,
+          unidad: editUnidad.trim(),
+          precio: precioNum,
+          moneda: editMoneda,
+          tipoCambio: tcNum,
+          total: totalCalc,
+          observacion: editObs.trim(),
+        });
+        setSuccessMsg('Gasto agrícola actualizado en Google Sheets.');
+      } else if (editingMovement.tipo === 'ingreso') {
+        await updateIncome(editingMovement.id, {
+          fecha: editFecha,
+          loteId: editLotId || undefined,
+          loteNombre: lotObj?.nombre || undefined,
+          concepto: editConcepto.trim(),
+          cantidad: cantNum,
+          unidad: editUnidad.trim(),
+          precio: precioNum,
+          moneda: editMoneda,
+          tipoCambio: tcNum,
+          total: totalCalc,
+          observacion: editObs.trim(),
+        });
+        setSuccessMsg('Ingreso de cosecha actualizado en Google Sheets.');
+      }
+
+      setEditingMovement(null);
       onRefreshData();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar');
+      setErrorMsg(err instanceof Error ? err.message : 'Error al actualizar el registro');
+    } finally {
+      setSavingEdit(false);
     }
   };
 
-  const handleDeleteInc = async (id: string) => {
-    if (!window.confirm('¿Confirmas eliminar este registro de ingreso?')) return;
+  const handlePromptDeleteExp = (id: string, titulo: string) => {
+    setItemToDelete({ id, tipo: 'gasto', titulo });
+  };
+
+  const handlePromptDeleteInc = (id: string, titulo: string) => {
+    setItemToDelete({ id, tipo: 'ingreso', titulo });
+  };
+
+  const handleConfirmDeleteItem = async () => {
+    if (!itemToDelete) return;
+    setDeletingItem(true);
+    setErrorMsg(null);
     try {
-      await deleteIncome(id);
-      setSuccessMsg('Ingreso eliminado.');
+      if (itemToDelete.tipo === 'gasto') {
+        await deleteExpense(itemToDelete.id);
+        setSuccessMsg('Gasto agrícola eliminado de Google Sheets.');
+      } else {
+        await deleteIncome(itemToDelete.id);
+        setSuccessMsg('Ingreso de cosecha eliminado de Google Sheets.');
+      }
+      setItemToDelete(null);
       onRefreshData();
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar');
+    } finally {
+      setDeletingItem(false);
     }
   };
 
@@ -256,53 +452,6 @@ export const PropertyView: React.FC<Props> = ({
     typeof expCantidad === 'number' && typeof expPrecio === 'number'
       ? expCantidad * expPrecio
       : 0;
-
-  // Build combined chronological movements for the Historial
-  interface MovementItem {
-    id: string;
-    tipo: 'ingreso' | 'gasto_directo' | 'maquinaria_recibida';
-    fecha: string;
-    loteNombre: string;
-    titulo: string;
-    detalle: string;
-    monto: number;
-    moneda: Currency;
-  }
-
-  const allMovements: MovementItem[] = [
-    ...propertyIncomes.map((i) => ({
-      id: i.id,
-      tipo: 'ingreso' as const,
-      fecha: i.fecha,
-      loteNombre: i.loteNombre || 'Lote',
-      titulo: i.concepto,
-      detalle: `${i.cantidad} ${i.unidad} ${i.precio ? `@ ${i.moneda} ${i.precio}` : ''} ${i.observacion ? `• ${i.observacion}` : ''}`.trim(),
-      monto: i.total,
-      moneda: i.moneda,
-    })),
-    ...propertyExpenses.map((e) => ({
-      id: e.id,
-      tipo: (e.esTrabajoPropio ? 'maquinaria_recibida' : 'gasto_directo') as 'gasto_directo' | 'maquinaria_recibida',
-      fecha: e.fecha,
-      loteNombre: e.loteNombre || 'Lote',
-      titulo: e.itemGasto,
-      detalle: `${e.cantidad} ${e.unidad} ${e.observacion ? `• ${e.observacion}` : ''}`.trim(),
-      monto: e.total,
-      moneda: e.moneda,
-    })),
-    ...linkedPropertyJobs
-      .filter((j) => !propertyExpenses.some((e) => e.trabajoId === j.id))
-      .map((j) => ({
-        id: j.id,
-        tipo: 'maquinaria_recibida' as const,
-        fecha: j.fecha,
-        loteNombre: j.loteNombre || 'Lote',
-        titulo: `Labor: ${j.maquinariaNombre}`,
-        detalle: `${j.cantidad} ${j.unidad}s @ ${j.moneda} ${j.tarifa}/${j.unidad} ${j.observacion ? `• ${j.observacion}` : ''}`.trim(),
-        monto: j.total,
-        moneda: j.moneda,
-      })),
-  ].sort((a, b) => (b.fecha > a.fecha ? 1 : -1));
 
   const filteredMovements = allMovements.filter((m) => {
     if (historialFilter === 'ingresos' && m.tipo !== 'ingreso') return false;
@@ -319,28 +468,34 @@ export const PropertyView: React.FC<Props> = ({
   });
 
   return (
-    <div className="w-full max-w-full space-y-4 sm:space-y-6">
-      {/* Module Title Header */}
-      <div className="flex flex-col gap-1 border-b border-stone-200 pb-3">
-        <div className="flex items-center gap-2">
-          <div className="flex h-7 w-7 sm:h-8 sm:w-8 items-center justify-center rounded-lg bg-emerald-700 text-white shrink-0">
-            <Trees className="h-4 w-4" />
-          </div>
-          <h1 className="text-base sm:text-lg font-bold text-stone-900 tracking-tight truncate">
-            PROPIEDAD
-          </h1>
+    <div className="w-full max-w-full space-y-4">
+      {/* iOS Subscreen Navigation Bar */}
+      {currentScreen !== 'main' && (
+        <div className="flex items-center justify-between bg-white rounded-2xl px-4 py-3 border border-slate-200/80 shadow-xs">
+          <button
+            type="button"
+            onClick={() => setCurrentScreen('main')}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-emerald-800 bg-emerald-50 hover:bg-emerald-100 active:bg-emerald-200 font-bold text-sm transition cursor-pointer min-h-[44px]"
+          >
+            <ArrowLeft className="h-5 w-5" />
+            <span>Volver</span>
+          </button>
+          <span className="text-sm font-bold text-slate-800">
+            {currentScreen === 'ingreso' && 'Registrar Ingreso'}
+            {currentScreen === 'gasto' && 'Registrar Gasto'}
+            {currentScreen === 'lotes' && 'Mis lotes'}
+            {currentScreen === 'maquinaria_recibida' && 'Trabajos de maquinaria'}
+            {currentScreen === 'historial' && 'Movimientos'}
+          </span>
         </div>
-        <p className="text-xs text-stone-500">
-          Lotes agrícolas, cosechas, insumos y costos de maquinaria recibida
-        </p>
-      </div>
+      )}
 
       {/* Global Notifications */}
       {errorMsg && (
-        <div className="w-full rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-start justify-between gap-2">
+        <div className="w-full rounded-2xl border border-red-200 bg-red-50 p-4 text-xs text-red-800 flex items-start justify-between gap-2 shadow-xs">
           <div className="flex items-start gap-2 min-w-0">
             <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
-            <span className="break-words">{errorMsg}</span>
+            <span className="break-words font-medium">{errorMsg}</span>
           </div>
           <button
             type="button"
@@ -353,10 +508,10 @@ export const PropertyView: React.FC<Props> = ({
       )}
 
       {successMsg && (
-        <div className="w-full rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800 flex items-center justify-between gap-2">
+        <div className="w-full rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-xs text-emerald-800 flex items-center justify-between gap-2 shadow-xs">
           <div className="flex items-center gap-2 min-w-0">
             <Check className="h-4 w-4 text-emerald-600 shrink-0" />
-            <span className="break-words">{successMsg}</span>
+            <span className="break-words font-medium">{successMsg}</span>
           </div>
           <button
             type="button"
@@ -369,158 +524,116 @@ export const PropertyView: React.FC<Props> = ({
       )}
 
       {/* ============================================================ */}
-      {/* VISTA PRINCIPAL (MAIN): REGISTRAR Y CONSULTAR SEPARADOS       */}
+      {/* VISTA PRINCIPAL (MAIN): ORDEN EXACTO SOLICITADO             */}
+      {/* 1. Movimientos                                              */}
+      {/* 2. Registrar Ingreso (verde) y Registrar Gasto (rojo)      */}
+      {/* 3. Mis lotes (unificado con el resumen)                    */}
+      {/* 4. Trabajos de maquinaria                                   */}
       {/* ============================================================ */}
       {currentScreen === 'main' && (
-        <div className="space-y-6">
-          {/* SECCIÓN A: REGISTRAR NUEVO MOVIMIENTO */}
-          <div className="space-y-3">
-            <h2 className="text-xs font-bold tracking-wider text-stone-600 uppercase">
-              REGISTRAR NUEVO MOVIMIENTO
-            </h2>
-
-            {/* Dos botones grandes: INGRESO (verde) y GASTO (rojo) */}
-            <div className="grid grid-cols-2 gap-3 w-full">
-              {/* Botón INGRESO */}
-              <button
-                type="button"
-                onClick={() => setCurrentScreen('ingreso')}
-                className="w-full min-h-[76px] sm:min-h-[84px] p-3 sm:p-4 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white shadow-sm flex flex-col items-center justify-center gap-1.5 transition cursor-pointer select-none border border-emerald-700"
-              >
-                <div className="flex items-center justify-center gap-1.5">
-                  <CirclePlus className="h-5 w-5 sm:h-6 sm:w-6 text-white shrink-0" />
-                  <span className="text-sm sm:text-base font-bold tracking-wider uppercase">
-                    INGRESO
-                  </span>
-                </div>
-                <span className="text-[11px] text-emerald-100 font-medium text-center leading-tight">
-                  Cosecha o venta
-                </span>
-              </button>
-
-              {/* Botón GASTO */}
-              <button
-                type="button"
-                onClick={() => setCurrentScreen('gasto')}
-                className="w-full min-h-[76px] sm:min-h-[84px] p-3 sm:p-4 rounded-2xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white shadow-sm flex flex-col items-center justify-center gap-1.5 transition cursor-pointer select-none border border-rose-700"
-              >
-                <div className="flex items-center justify-center gap-1.5">
-                  <CircleMinus className="h-5 w-5 sm:h-6 sm:w-6 text-white shrink-0" />
-                  <span className="text-sm sm:text-base font-bold tracking-wider uppercase">
-                    GASTO
-                  </span>
-                </div>
-                <span className="text-[11px] text-rose-100 font-medium text-center leading-tight">
-                  Insumos del lote
-                </span>
-              </button>
+        <div className="space-y-4">
+          {/* 1. MOVIMIENTOS (TARJETA DESTACADA) */}
+          <button
+            type="button"
+            onClick={() => setCurrentScreen('historial')}
+            className="w-full bg-white border border-slate-200/80 hover:border-emerald-300 rounded-2xl p-4 sm:p-5 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[76px]"
+          >
+            <div className="flex items-center gap-3.5 min-w-0">
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700 border border-emerald-100 shrink-0">
+                <History className="h-6 w-6" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
+                  Movimientos
+                </h3>
+                <p className="text-xs text-slate-500 leading-snug mt-0.5">
+                  Ingresos, cosechas y gastos ({totalMovementsCount} registros)
+                </p>
+              </div>
             </div>
+            <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
+          </button>
+
+          {/* 2. REGISTRAR INGRESO Y REGISTRAR GASTO */}
+          <div className="grid grid-cols-2 gap-3 w-full">
+            {/* Botón INGRESO */}
+            <button
+              type="button"
+              onClick={() => setCurrentScreen('ingreso')}
+              className="w-full min-h-[82px] sm:min-h-[90px] p-4 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white shadow-xs flex flex-col items-center justify-center gap-1.5 transition cursor-pointer select-none"
+            >
+              <div className="flex items-center justify-center gap-2">
+                <CirclePlus className="h-6 w-6 text-white shrink-0" />
+                <span className="text-base sm:text-lg font-bold tracking-tight">
+                  Ingreso
+                </span>
+              </div>
+              <span className="text-xs text-emerald-100 font-medium text-center">
+                Cosecha o venta
+              </span>
+            </button>
+
+            {/* Botón GASTO */}
+            <button
+              type="button"
+              onClick={() => setCurrentScreen('gasto')}
+              className="w-full min-h-[82px] sm:min-h-[90px] p-4 rounded-2xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white shadow-xs flex flex-col items-center justify-center gap-1.5 transition cursor-pointer select-none"
+            >
+              <div className="flex items-center justify-center gap-2">
+                <CircleMinus className="h-6 w-6 text-white shrink-0" />
+                <span className="text-base sm:text-lg font-bold tracking-tight">
+                  Gasto
+                </span>
+              </div>
+              <span className="text-xs text-rose-100 font-medium text-center">
+                Insumos del lote
+              </span>
+            </button>
           </div>
 
-          {/* SEPARADOR */}
-          <div className="border-t border-stone-200 pt-2" />
-
-          {/* SECCIÓN B: CONSULTAR REGISTROS (4 OPCIONES INDEPENDIENTES) */}
-          <div className="space-y-3">
-            <h2 className="text-xs font-bold tracking-wider text-stone-600 uppercase">
-              CONSULTAR REGISTROS
-            </h2>
-
-            <div className="space-y-2.5">
-              {/* Opción A: Lotes registrados */}
-              <button
-                type="button"
-                onClick={() => setCurrentScreen('lotes')}
-                className="w-full bg-white border border-stone-200 hover:border-emerald-300 rounded-2xl p-3.5 sm:p-4 flex items-center justify-between gap-3 shadow-2xs hover:bg-stone-50 active:bg-stone-100 transition cursor-pointer text-left min-h-[64px]"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="flex h-11 w-11 sm:h-12 sm:w-12 items-center justify-center rounded-xl bg-emerald-50 text-emerald-800 shrink-0">
-                    <LandPlot className="h-5 w-5 sm:h-6 sm:w-6" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-sm font-bold text-stone-900 leading-snug truncate">
-                      Lotes registrados
-                    </h3>
-                    <p className="text-xs text-stone-500 leading-snug mt-0.5 break-words">
-                      Superficies, cultivos y estado agronómico ({lots.length} lotes)
-                    </p>
-                  </div>
-                </div>
-                <ChevronRight className="h-5 w-5 text-stone-400 shrink-0" />
-              </button>
-
-              {/* Opción B: Gastos de maquinaria recibida (con distintivo rojo sutil de gasto) */}
-              <button
-                type="button"
-                onClick={() => setCurrentScreen('maquinaria_recibida')}
-                className="w-full bg-white border border-stone-200 hover:border-rose-300 rounded-2xl p-3.5 sm:p-4 flex items-center justify-between gap-3 shadow-2xs hover:bg-stone-50 active:bg-stone-100 transition cursor-pointer text-left min-h-[64px]"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="flex h-11 w-11 sm:h-12 sm:w-12 items-center justify-center rounded-xl bg-rose-50 text-rose-700 border border-rose-200/60 shrink-0">
-                    <Tractor className="h-5 w-5 sm:h-6 sm:w-6" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-sm font-bold text-stone-900 leading-snug truncate">
-                        Gastos de maquinaria recibida
-                      </h3>
-                      <span className="text-[10px] font-bold text-rose-800 bg-rose-100/80 px-2 py-0.5 rounded shrink-0 hidden sm:inline-block">
-                        Gasto automático
-                      </span>
-                    </div>
-                    <p className="text-xs text-stone-500 leading-snug mt-0.5 break-words">
-                      Trabajos internos recibidos desde Maquinarias ({linkedPropertyJobs.length} registros)
-                    </p>
-                  </div>
-                </div>
-                <ChevronRight className="h-5 w-5 text-stone-400 shrink-0" />
-              </button>
-
-              {/* Opción C: Actividad por lote */}
-              <button
-                type="button"
-                onClick={() => setCurrentScreen('resultados')}
-                className="w-full bg-white border border-stone-200 hover:border-emerald-300 rounded-2xl p-3.5 sm:p-4 flex items-center justify-between gap-3 shadow-2xs hover:bg-stone-50 active:bg-stone-100 transition cursor-pointer text-left min-h-[64px]"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="flex h-11 w-11 sm:h-12 sm:w-12 items-center justify-center rounded-xl bg-emerald-50 text-emerald-800 shrink-0">
-                    <ChartColumnIncreasing className="h-5 w-5 sm:h-6 sm:w-6" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-sm font-bold text-stone-900 leading-snug truncate">
-                      Actividad por lote
-                    </h3>
-                    <p className="text-xs text-stone-500 leading-snug mt-0.5 break-words">
-                      Labores realizadas, cosechas e insumos aplicados ({lots.length} lotes)
-                    </p>
-                  </div>
-                </div>
-                <ChevronRight className="h-5 w-5 text-stone-400 shrink-0" />
-              </button>
-
-              {/* Opción D: Historial de movimientos */}
-              <button
-                type="button"
-                onClick={() => setCurrentScreen('historial')}
-                className="w-full bg-white border border-stone-200 hover:border-emerald-300 rounded-2xl p-3.5 sm:p-4 flex items-center justify-between gap-3 shadow-2xs hover:bg-stone-50 active:bg-stone-100 transition cursor-pointer text-left min-h-[64px]"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="flex h-11 w-11 sm:h-12 sm:w-12 items-center justify-center rounded-xl bg-emerald-50 text-emerald-800 shrink-0">
-                    <History className="h-5 w-5 sm:h-6 sm:w-6" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-sm font-bold text-stone-900 leading-snug truncate">
-                      Historial de movimientos
-                    </h3>
-                    <p className="text-xs text-stone-500 leading-snug mt-0.5 break-words">
-                      Ingresos y gastos agrícolas de la campaña ({totalMovementsCount} registros)
-                    </p>
-                  </div>
-                </div>
-                <ChevronRight className="h-5 w-5 text-stone-400 shrink-0" />
-              </button>
+          {/* 3. MIS LOTES (UNIFICADO) */}
+          <button
+            type="button"
+            onClick={() => setCurrentScreen('lotes')}
+            className="w-full bg-white border border-slate-200/80 hover:border-emerald-300 rounded-2xl p-4 sm:p-5 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[72px]"
+          >
+            <div className="flex items-center gap-3.5 min-w-0">
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700 border border-emerald-100 shrink-0">
+                <LandPlot className="h-6 w-6" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
+                  Mis lotes
+                </h3>
+                <p className="text-xs text-slate-500 leading-snug mt-0.5">
+                  Superficies, labores, cosechas y balance ({lots.length} lotes)
+                </p>
+              </div>
             </div>
-          </div>
+            <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
+          </button>
+
+          {/* 4. TRABAJOS DE MAQUINARIA */}
+          <button
+            type="button"
+            onClick={() => setCurrentScreen('maquinaria_recibida')}
+            className="w-full bg-white border border-slate-200/80 hover:border-amber-300 rounded-2xl p-4 sm:p-5 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[72px]"
+          >
+            <div className="flex items-center gap-3.5 min-w-0">
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-50 text-amber-700 border border-amber-100 shrink-0">
+                <Tractor className="h-6 w-6" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
+                  Trabajos de maquinaria
+                </h3>
+                <p className="text-xs text-slate-500 leading-snug mt-0.5">
+                  Labores recibidas en lotes ({linkedPropertyJobs.length} labores)
+                </p>
+              </div>
+            </div>
+            <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
+          </button>
         </div>
       )}
 
@@ -529,16 +642,10 @@ export const PropertyView: React.FC<Props> = ({
       {/* ============================================================ */}
       {currentScreen === 'ingreso' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-end gap-2">
-            <span className="text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-lg">
-              Ingreso Agrícola
-            </span>
-          </div>
-
           <div className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-5 shadow-xs">
             <div className="pb-3 border-b border-stone-100 mb-4">
-              <h2 className="text-sm font-bold text-stone-900 flex items-center gap-2">
-                <Wheat className="h-4 w-4 text-emerald-700" />
+              <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
+                <Wheat className="h-5 w-5 text-emerald-700" />
                 <span>Registrar Ingreso Agrícola</span>
               </h2>
               <p className="text-xs text-stone-500 mt-0.5">
@@ -549,7 +656,7 @@ export const PropertyView: React.FC<Props> = ({
             <form onSubmit={handleIncomeSubmit} className="space-y-4">
               {/* Lote */}
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                <label className="block text-xs font-bold text-stone-700 mb-1">
                   Lote de Origen <span className="text-red-500">*</span>
                 </label>
                 <select
@@ -569,7 +676,7 @@ export const PropertyView: React.FC<Props> = ({
 
               {/* Concepto / Producto */}
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                <label className="block text-xs font-bold text-stone-700 mb-1">
                   Concepto / Producto <span className="text-red-500">*</span>
                 </label>
                 <select
@@ -577,19 +684,29 @@ export const PropertyView: React.FC<Props> = ({
                   onChange={(e) => setIncConcepto(e.target.value)}
                   className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[44px]"
                 >
-                  <option value="Venta Cosecha Soya">Venta Cosecha Soya</option>
-                  <option value="Venta Cosecha Maíz">Venta Cosecha Maíz</option>
-                  <option value="Venta Cosecha Trigo">Venta Cosecha Trigo</option>
-                  <option value="Venta Cosecha Sorgo">Venta Cosecha Sorgo</option>
-                  <option value="Venta Cosecha Girasol">Venta Cosecha Girasol</option>
-                  <option value="Venta de Semilla">Venta de Semilla</option>
-                  <option value="Otros Ingresos del Lote">Otros Ingresos del Lote</option>
+                  {propertyIncomeItems.length > 0 ? (
+                    propertyIncomeItems.map((item) => (
+                      <option key={item.id || item.nombre} value={item.nombre}>
+                        {item.nombre}
+                      </option>
+                    ))
+                  ) : (
+                    <>
+                      <option value="Venta Cosecha Soya">Venta Cosecha Soya</option>
+                      <option value="Venta Cosecha Maíz">Venta Cosecha Maíz</option>
+                      <option value="Venta Cosecha Trigo">Venta Cosecha Trigo</option>
+                      <option value="Venta Cosecha Sorgo">Venta Cosecha Sorgo</option>
+                      <option value="Venta Cosecha Girasol">Venta Cosecha Girasol</option>
+                      <option value="Venta de Semilla">Venta de Semilla</option>
+                      <option value="Otros Ingresos del Lote">Otros Ingresos del Lote</option>
+                    </>
+                  )}
                 </select>
               </div>
 
               {/* Fecha */}
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                <label className="block text-xs font-bold text-stone-700 mb-1">
                   Fecha <span className="text-red-500">*</span>
                 </label>
                 <div className="relative">
@@ -607,7 +724,7 @@ export const PropertyView: React.FC<Props> = ({
               {/* Cantidad y Unidad */}
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  <label className="block text-xs font-bold text-stone-700 mb-1">
                     Cantidad <span className="text-red-500">*</span>
                   </label>
                   <input
@@ -623,7 +740,7 @@ export const PropertyView: React.FC<Props> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Unidad</label>
+                  <label className="block text-xs font-bold text-stone-700 mb-1">Unidad</label>
                   <select
                     value={incUnidad}
                     onChange={(e) => setIncUnidad(e.target.value)}
@@ -640,7 +757,7 @@ export const PropertyView: React.FC<Props> = ({
               {/* Precio y Moneda */}
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  <label className="block text-xs font-bold text-stone-700 mb-1">
                     Precio Unitario <span className="text-red-500">*</span>
                   </label>
                   <input
@@ -656,7 +773,7 @@ export const PropertyView: React.FC<Props> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Moneda</label>
+                  <label className="block text-xs font-bold text-stone-700 mb-1">Moneda</label>
                   <select
                     value={incMoneda}
                     onChange={(e) => setIncMoneda(e.target.value as Currency)}
@@ -668,166 +785,126 @@ export const PropertyView: React.FC<Props> = ({
                 </div>
               </div>
 
-              {/* Total Calculado */}
-              <div className="bg-emerald-50/80 p-3.5 rounded-xl border border-emerald-200/70 flex items-center justify-between">
-                <div>
-                  <span className="text-[11px] text-emerald-800 block uppercase font-bold">
-                    Total Ingreso
-                  </span>
-                  <span className="text-[10px] text-stone-500">
-                    {incCantidad || 0} {incUnidad} &times; {incMoneda} {incPrecio || 0}
-                  </span>
-                </div>
-                <span className="text-base sm:text-lg font-black text-emerald-950 font-mono">
-                  {formatMoney(incCalculatedTotal, incMoneda)}
-                </span>
-              </div>
-
               {/* Observación */}
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Observaciones <span className="text-stone-400 font-normal">(Opcional)</span>
-                </label>
+                <label className="block text-xs font-bold text-stone-700 mb-1">Observaciones</label>
                 <textarea
                   rows={2}
+                  placeholder="Comprador, silo de acopio, condiciones de entrega..."
                   value={incObs}
                   onChange={(e) => setIncObs(e.target.value)}
-                  placeholder="Silo de acopio, comprador, número de liquidación..."
                   className="w-full text-xs p-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none"
                 />
               </div>
 
-              {/* Botón Guardar */}
-              <button
-                type="submit"
-                disabled={saving}
-                className="w-full flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold py-3 text-xs shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[46px]"
-              >
-                <CirclePlus className="h-4 w-4" />
-                <span>{saving ? 'Guardando...' : 'Guardar Ingreso Agrícola'}</span>
-              </button>
-            </form>
-          </div>
+              {/* Total Calculado en Moneda Original */}
+              <div className="flex items-center justify-between p-3.5 rounded-xl bg-emerald-50 border border-emerald-200">
+                <span className="text-xs font-bold text-emerald-900">Total Ingreso ({incMoneda}):</span>
+                <span className="text-base font-extrabold text-emerald-900 font-mono">
+                  {incMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                  {incCalculatedTotal.toLocaleString('es-BO', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
 
-          {/* Lista de ingresos recientes */}
-          <div className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-5 shadow-xs space-y-3">
-            <h3 className="text-xs font-bold text-stone-900 uppercase tracking-wider">
-              Ingresos de Cosecha ({propertyIncomes.length})
-            </h3>
-
-            <div className="space-y-2">
-              {propertyIncomes.map((i) => (
-                <div
-                  key={i.id}
-                  className="rounded-xl border border-stone-200 bg-stone-50/70 p-3 flex items-center justify-between gap-3 text-xs"
+              {/* Botones */}
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-600 py-3.5 text-sm font-bold text-white shadow-xs hover:bg-emerald-700 active:bg-emerald-800 transition disabled:opacity-50 cursor-pointer min-h-[46px]"
                 >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-bold text-stone-900">{i.concepto}</span>
-                      <span className="text-[11px] text-stone-500 font-normal">({i.fecha})</span>
-                    </div>
-                    <p className="text-[11px] text-stone-600 mt-0.5 truncate">
-                      Lote: <strong className="text-emerald-900">{i.loteNombre || 'Lote'}</strong> &bull; {i.cantidad} {i.unidad}
-                    </p>
-                    {i.observacion && (
-                      <p className="text-[11px] text-stone-500 italic mt-0.5 break-words">
-                        {i.observacion}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span className="font-semibold text-emerald-800 text-xs bg-emerald-50 px-2 py-1 rounded-md border border-emerald-200/60">
-                      Cosecha registrada
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteInc(i.id)}
-                      className="p-1.5 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                      title="Eliminar ingreso"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-
-              {propertyIncomes.length === 0 && (
-                <p className="text-xs text-stone-400 text-center py-4">
-                  No hay ingresos de cosecha registrados en esta campaña.
-                </p>
-              )}
-            </div>
+                  <Plus className="h-5 w-5" />
+                  <span>{saving ? 'Guardando...' : 'Guardar Ingreso'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCurrentScreen('main')}
+                  className="px-4 py-3.5 rounded-xl border border-stone-300 bg-stone-50 hover:bg-stone-100 text-stone-700 text-sm font-semibold cursor-pointer min-h-[46px]"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
 
       {/* ============================================================ */}
-      {/* FORMULARIO: REGISTRAR GASTO AGRÍCOLA DIRECTO                 */}
+      {/* FORMULARIO: REGISTRAR GASTO AGRÍCOLA                         */}
       {/* ============================================================ */}
       {currentScreen === 'gasto' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-end gap-2">
-            <span className="text-xs font-bold text-rose-800 bg-rose-50 border border-rose-200 px-2.5 py-1 rounded-lg">
-              Gasto Agrícola
-            </span>
-          </div>
-
           <div className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-5 shadow-xs">
             <div className="pb-3 border-b border-stone-100 mb-4">
-              <h2 className="text-sm font-bold text-stone-900 flex items-center gap-2">
-                <Receipt className="h-4 w-4 text-rose-700" />
+              <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
+                <Receipt className="h-5 w-5 text-rose-700" />
                 <span>Registrar Gasto Agrícola</span>
               </h2>
               <p className="text-xs text-stone-500 mt-0.5">
-                Semillas, agroquímicos, fertilizantes, jornales manuales u otros insumos del lote.
+                Insumos directos asignados a un lote: semillas, fertilizantes, defensivos, etc.
               </p>
             </div>
 
             <form onSubmit={handleExpenseSubmit} className="space-y-4">
               {/* Lote */}
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Lote Asignado <span className="text-red-500">*</span>
+                <label className="block text-xs font-bold text-stone-700 mb-1">
+                  Lote Destino <span className="text-red-500">*</span>
                 </label>
                 <select
                   required
                   value={expLotId}
                   onChange={(e) => setExpLotId(e.target.value)}
-                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none font-bold text-emerald-950 min-h-[44px]"
+                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none font-bold text-rose-950 min-h-[44px]"
                 >
                   <option value="">-- Seleccionar Lote --</option>
                   {lots.map((l) => (
                     <option key={l.id} value={l.id}>
-                      {l.nombre} ({l.superficieHectareas} ha &bull; {l.cultivoActual || 'Sin cultivo'})
+                      {l.nombre} ({l.superficieHectareas} ha)
                     </option>
                   ))}
                 </select>
               </div>
 
-              {/* Rubro / Insumo */}
+              {/* Ítem / Rubro */}
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Rubro / Insumo <span className="text-red-500">*</span>
+                <label className="block text-xs font-bold text-stone-700 mb-1">
+                  Insumo o Concepto de Gasto <span className="text-red-500">*</span>
                 </label>
                 <select
                   value={expItem}
                   onChange={(e) => setExpItem(e.target.value)}
                   className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none font-semibold min-h-[44px]"
                 >
-                  <option value="Semillas">Semillas e Inoculantes</option>
-                  <option value="Agroquímicos">Agroquímicos / Defensivos (Fungicidas, Herbicidas, Insecticidas)</option>
-                  <option value="Fertilizantes">Fertilizantes y Enmiendas</option>
-                  <option value="Mano de Obra">Mano de Obra / Jornales Manuales</option>
-                  <option value="Riego">Riego y Agua</option>
-                  <option value="Flete">Flete y Logística de Cosecha</option>
-                  <option value="Otros Gastos">Otros Gastos Agrícolas</option>
+                  {propertyExpenseItems.length > 0 ? (
+                    propertyExpenseItems.map((item) => (
+                      <option key={item.id || item.nombre} value={item.nombre}>
+                        {item.nombre}
+                      </option>
+                    ))
+                  ) : (
+                    <>
+                      <option value="Semillas">Semillas</option>
+                      <option value="Fertilizante Urea">Fertilizante Urea</option>
+                      <option value="Fertilizante Fosfato">Fertilizante Fosfato</option>
+                      <option value="Herbicida">Herbicida</option>
+                      <option value="Insecticida">Insecticida</option>
+                      <option value="Fungicida">Fungicida</option>
+                      <option value="Inoculante">Inoculante</option>
+                      <option value="Mano de obra lote">Mano de obra lote</option>
+                      <option value="Análisis de suelo">Análisis de suelo</option>
+                      <option value="Otros insumos">Otros insumos</option>
+                    </>
+                  )}
                 </select>
               </div>
 
               {/* Fecha */}
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                <label className="block text-xs font-bold text-stone-700 mb-1">
                   Fecha <span className="text-red-500">*</span>
                 </label>
                 <div className="relative">
@@ -845,7 +922,7 @@ export const PropertyView: React.FC<Props> = ({
               {/* Cantidad y Unidad */}
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  <label className="block text-xs font-bold text-stone-700 mb-1">
                     Cantidad <span className="text-red-500">*</span>
                   </label>
                   <input
@@ -854,28 +931,32 @@ export const PropertyView: React.FC<Props> = ({
                     step="any"
                     required
                     min="0.01"
-                    placeholder="1"
+                    placeholder="1.0"
                     value={expCantidad}
                     onChange={(e) => setExpCantidad(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none min-h-[44px]"
+                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none font-semibold min-h-[44px]"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Unidad</label>
-                  <input
-                    type="text"
+                  <label className="block text-xs font-bold text-stone-700 mb-1">Unidad</label>
+                  <select
                     value={expUnidad}
                     onChange={(e) => setExpUnidad(e.target.value)}
-                    placeholder="kg, litros, bolsas, jornales..."
                     className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none min-h-[44px]"
-                  />
+                  >
+                    <option value="kg">Kilogramos (kg)</option>
+                    <option value="litros">Litros (l)</option>
+                    <option value="bolsas">Bolsas</option>
+                    <option value="toneladas">Toneladas (t)</option>
+                    <option value="unidades">Unidades</option>
+                  </select>
                 </div>
               </div>
 
               {/* Precio y Moneda */}
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  <label className="block text-xs font-bold text-stone-700 mb-1">
                     Precio Unitario <span className="text-red-500">*</span>
                   </label>
                   <input
@@ -891,7 +972,7 @@ export const PropertyView: React.FC<Props> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Moneda</label>
+                  <label className="block text-xs font-bold text-stone-700 mb-1">Moneda</label>
                   <select
                     value={expMoneda}
                     onChange={(e) => setExpMoneda(e.target.value as Currency)}
@@ -903,450 +984,439 @@ export const PropertyView: React.FC<Props> = ({
                 </div>
               </div>
 
-              {/* Total Calculado */}
-              <div className="bg-rose-50/80 p-3.5 rounded-xl border border-rose-200/70 flex items-center justify-between">
-                <div>
-                  <span className="text-[11px] text-rose-800 block uppercase font-bold">
-                    Total Gasto Lote
-                  </span>
-                  <span className="text-[10px] text-stone-500">
-                    {expCantidad || 1} &times; {expMoneda} {expPrecio || 0}
-                  </span>
-                </div>
-                <span className="text-base sm:text-lg font-black text-rose-950 font-mono">
-                  {formatMoney(expCalculatedTotal, expMoneda)}
-                </span>
-              </div>
-
               {/* Observación */}
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Observaciones <span className="text-stone-400 font-normal">(Opcional)</span>
-                </label>
+                <label className="block text-xs font-bold text-stone-700 mb-1">Observaciones</label>
                 <textarea
                   rows={2}
+                  placeholder="Dosis aplicada, proveedor, factura o remisión..."
                   value={expObs}
                   onChange={(e) => setExpObs(e.target.value)}
-                  placeholder="Proveedor, dosis aplicada, factura..."
                   className="w-full text-xs p-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none"
                 />
               </div>
 
-              {/* Botón Guardar */}
-              <button
-                type="submit"
-                disabled={saving}
-                className="w-full flex items-center justify-center gap-2 rounded-xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold py-3 text-xs shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[46px]"
-              >
-                <CircleMinus className="h-4 w-4" />
-                <span>{saving ? 'Guardando...' : 'Guardar Gasto Agrícola'}</span>
-              </button>
-            </form>
-          </div>
+              {/* Total Calculado en Moneda Original */}
+              <div className="flex items-center justify-between p-3.5 rounded-xl bg-rose-50 border border-rose-200">
+                <span className="text-xs font-bold text-rose-900">Total Gasto ({expMoneda}):</span>
+                <span className="text-base font-extrabold text-rose-900 font-mono">
+                  {expMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                  {expCalculatedTotal.toLocaleString('es-BO', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
 
-          {/* Lista de gastos agrícolas recientes */}
-          <div className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-5 shadow-xs space-y-3">
-            <h3 className="text-xs font-bold text-stone-900 uppercase tracking-wider">
-              Gastos Agrícolas ({propertyExpenses.length})
-            </h3>
-
-            <div className="space-y-2">
-              {propertyExpenses.map((exp) => (
-                <div
-                  key={exp.id}
-                  className="rounded-xl border border-stone-200 bg-stone-50/70 p-3 flex items-center justify-between gap-3 text-xs"
+              {/* Botones */}
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-rose-600 py-3.5 text-sm font-bold text-white shadow-xs hover:bg-rose-700 active:bg-rose-800 transition disabled:opacity-50 cursor-pointer min-h-[46px]"
                 >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-bold text-stone-900">{exp.itemGasto}</span>
-                      <span className="text-[11px] text-stone-500 font-normal">({exp.fecha})</span>
-                    </div>
-                    <p className="text-[11px] text-stone-600 mt-0.5 truncate">
-                      Lote: <strong className="text-stone-800">{exp.loteNombre || 'Lote'}</strong> &bull; {exp.cantidad} {exp.unidad}
-                    </p>
-                    {exp.observacion && (
-                      <p className="text-[11px] text-stone-500 italic mt-0.5 break-words">
-                        {exp.observacion}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span className="font-mono font-bold text-rose-800 text-sm">
-                      {formatMoney(exp.total, exp.moneda)}
-                    </span>
-                    {!exp.esTrabajoPropio && (
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteExp(exp.id)}
-                        className="p-1.5 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                        title="Eliminar gasto"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
-
-              {propertyExpenses.length === 0 && (
-                <p className="text-xs text-stone-400 text-center py-4">
-                  No hay gastos agrícolas registrados en esta campaña.
-                </p>
-              )}
-            </div>
+                  <Plus className="h-5 w-5" />
+                  <span>{saving ? 'Guardando...' : 'Guardar Gasto'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCurrentScreen('main')}
+                  className="px-4 py-3.5 rounded-xl border border-stone-300 bg-stone-50 hover:bg-stone-100 text-stone-700 text-sm font-semibold cursor-pointer min-h-[46px]"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
 
       {/* ============================================================ */}
-      {/* CONSULTA A: LOTES REGISTRADOS (SOLO LECTURA)                 */}
+      {/* 3. MIS LOTES (UNIFICADO CON EL RESUMEN POR LOTE - ACCORDION) */}
       {/* ============================================================ */}
       {currentScreen === 'lotes' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-end gap-2">
-            <span className="text-xs font-bold text-stone-700 bg-stone-100 px-2.5 py-1 rounded-lg">
+          <div className="flex items-center justify-between bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">Mis lotes</h2>
+              <p className="text-xs text-slate-500">
+                Superficie total:{' '}
+                <strong className="text-emerald-700">
+                  {lots
+                    .reduce((sum, l) => sum + (Number(l.superficieHectareas) || 0), 0)
+                    .toFixed(1)}{' '}
+                  hectáreas
+                </strong>
+              </p>
+            </div>
+            <span className="text-xs font-bold text-slate-700 bg-slate-100 px-3 py-1.5 rounded-xl">
               {lots.length} lotes
             </span>
           </div>
 
-          <div className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-5 shadow-xs space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-stone-100">
-              <div>
-                <h2 className="text-sm font-bold text-stone-900">
-                  Lotes Registrados en la Propiedad
-                </h2>
-                <p className="text-xs text-stone-500 mt-0.5">
-                  Superficie total:{' '}
-                  <strong className="text-emerald-900">
-                    {lots
-                      .reduce((sum, l) => sum + (Number(l.superficieHectareas) || 0), 0)
-                      .toFixed(1)}{' '}
-                    hectáreas
-                  </strong>
-                </p>
-              </div>
+          <div className="bg-emerald-50/70 p-3.5 rounded-2xl border border-emerald-200/70 text-xs text-emerald-900 leading-relaxed flex items-center gap-2.5">
+            <Sparkles className="h-4 w-4 text-emerald-700 shrink-0" />
+            <span>
+              Toca cualquier lote para desplegar su detalle completo: labores de maquinaria, cosechas, insumos y cálculos económicos.
+            </span>
+          </div>
 
-              <div className="text-[11px] text-stone-500 bg-stone-50 px-3 py-1.5 rounded-xl border border-stone-200">
-                Administración de lotes: <strong className="text-stone-800">Administración → Lotes</strong>
-              </div>
-            </div>
+          {/* Listado de Lotes con Acordeón Expandible */}
+          <div className="space-y-3">
+            {lots.map((lot) => {
+              const isExpanded = expandedLotId === lot.id;
+              const lotMachineryJobs = linkedPropertyJobs.filter((j) => j.loteId === lot.id);
+              const lotIncomes = propertyIncomes.filter((i) => i.loteId === lot.id);
+              const lotExpensesDirect = propertyExpenses.filter(
+                (e) => e.loteId === lot.id && !e.esTrabajoPropio && !e.trabajoId
+              );
 
-            {/* Listado de tarjetas de lotes (Mobile First, Cero desplazamiento horizontal) */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
-              {lots.map((lot) => {
-                return (
-                  <div
-                    key={lot.id}
-                    className="rounded-2xl border border-stone-200 bg-stone-50/70 p-4 hover:bg-stone-50 hover:border-emerald-300 transition flex flex-col justify-between space-y-3"
+              const hrs = lotMachineryJobs
+                .filter((j) => j.unidad === 'hora' || (j.unidad as string) === 'h')
+                .reduce((sum, j) => sum + (Number(j.cantidad) || 0), 0);
+              const ha = lotMachineryJobs
+                .filter((j) => j.unidad === 'hectarea' || (j.unidad as string) === 'ha')
+                .reduce((sum, j) => sum + (Number(j.cantidad) || 0), 0);
+
+              return (
+                <div
+                  key={lot.id}
+                  className="rounded-2xl border border-slate-200/80 bg-white shadow-xs overflow-hidden transition"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setExpandedLotId(isExpanded ? null : lot.id)}
+                    className="w-full p-4 flex items-center justify-between text-left cursor-pointer hover:bg-slate-50 active:bg-slate-100 min-h-[64px]"
                   >
-                    <div>
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0 flex-1">
-                          <h4 className="text-sm font-bold text-stone-900 truncate">{lot.nombre}</h4>
-                          <p className="text-xs font-semibold text-emerald-800">
-                            {lot.superficieHectareas} Hectáreas
-                          </p>
-                        </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="text-base font-bold text-slate-900">
+                          {lot.nombre}
+                        </h3>
                         {lot.cultivoActual && (
-                          <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded font-semibold shrink-0">
+                          <span className="text-[11px] bg-emerald-50 text-emerald-800 border border-emerald-200/60 px-2.5 py-0.5 rounded-lg font-semibold shrink-0">
                             {lot.cultivoActual}
                           </span>
                         )}
                       </div>
-
-                      {lot.ubicacion && (
-                        <p className="text-[11px] text-stone-600 mt-2">
-                          <span className="text-stone-400">Ubicación:</span> {lot.ubicacion}
-                        </p>
-                      )}
-
-                      {lot.observaciones && (
-                        <p className="text-[11px] text-stone-500 italic mt-1 bg-white p-2 rounded-lg border border-stone-200/60 break-words">
-                          {lot.observaciones}
-                        </p>
+                      <p className="text-xs font-semibold text-emerald-700 mt-1">
+                        {lot.superficieHectareas} Hectáreas
+                        {lot.ubicacion && (
+                          <span className="text-slate-500 font-normal ml-2">&bull; {lot.ubicacion}</span>
+                        )}
+                      </p>
+                    </div>
+                    <div className="text-slate-400 p-2 shrink-0">
+                      {isExpanded ? (
+                        <ChevronUp className="h-5 w-5 text-emerald-700" />
+                      ) : (
+                        <ChevronDown className="h-5 w-5" />
                       )}
                     </div>
-                  </div>
-                );
-              })}
+                  </button>
 
-              {lots.length === 0 && (
-                <div className="col-span-full py-12 text-center text-xs text-stone-400">
-                  No hay lotes registrados aún. Puedes darlos de alta en el módulo de Administración → Lotes.
+                  {/* Detalle Acordeón Completo del Lote */}
+                  {isExpanded && (
+                    <div className="px-4 pb-5 pt-2 border-t border-slate-100 space-y-3.5 bg-slate-50/60 text-xs">
+                      {/* 1. Datos Agronómicos */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 bg-white p-3 rounded-xl border border-slate-200/60">
+                        <div>
+                          <span className="text-[11px] text-slate-400 block font-semibold">SUPERFICIE</span>
+                          <span className="font-bold text-slate-900 text-sm">{lot.superficieHectareas} ha</span>
+                        </div>
+                        <div>
+                          <span className="text-[11px] text-slate-400 block font-semibold">CULTIVO ACTUAL</span>
+                          <span className="font-bold text-emerald-800 text-sm">{lot.cultivoActual || 'Sin cultivo'}</span>
+                        </div>
+                        {lot.ubicacion && (
+                          <div className="col-span-full">
+                            <span className="text-[11px] text-slate-400 block font-semibold">UBICACIÓN</span>
+                            <span className="text-slate-700">{lot.ubicacion}</span>
+                          </div>
+                        )}
+                        {lot.observaciones && (
+                          <div className="col-span-full">
+                            <span className="text-[11px] text-slate-400 block font-semibold">NOTAS AGRONÓMICAS</span>
+                            <span className="text-slate-600 italic">{lot.observaciones}</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 2. Trabajos de Maquinaria Recibidos */}
+                      <div className="bg-white p-3.5 rounded-xl border border-slate-200/60 space-y-2">
+                        <div className="flex items-center justify-between pb-1 border-b border-slate-100">
+                          <span className="font-bold text-slate-900 text-xs flex items-center gap-1.5">
+                            <Tractor className="h-4 w-4 text-amber-600" />
+                            <span>Trabajos de Maquinaria ({lotMachineryJobs.length})</span>
+                          </span>
+                          <span className="font-mono font-bold text-amber-900 text-[11px]">
+                            {hrs > 0 ? `${hrs.toFixed(1)} h` : ''}
+                            {hrs > 0 && ha > 0 ? ' / ' : ''}
+                            {ha > 0 ? `${ha.toFixed(1)} ha` : ''}
+                            {hrs === 0 && ha === 0 ? '0 h' : ''}
+                          </span>
+                        </div>
+
+                        {lotMachineryJobs.length > 0 ? (
+                          <div className="space-y-1.5 pt-1">
+                            {lotMachineryJobs.map((j) => (
+                              <div
+                                key={j.id}
+                                className="flex items-center justify-between p-2 rounded-lg bg-amber-50/50 border border-amber-100/70"
+                              >
+                                <div className="min-w-0">
+                                  <span className="font-bold text-slate-800 block truncate">
+                                    {j.maquinariaNombre}
+                                  </span>
+                                  <span className="text-[11px] text-slate-500">
+                                    {formatDateDDMMAAAA(j.fecha)} &bull; {j.cantidad} {j.unidad}
+                                  </span>
+                                </div>
+                                <span className="font-bold font-mono text-rose-700 shrink-0 ml-2">
+                                  {j.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                                  {j.total.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-slate-400 italic pt-1">
+                            Sin labores de maquinaria en esta campaña.
+                          </p>
+                        )}
+                      </div>
+
+                      {/* 3. Cosechas e Ingresos del Lote */}
+                      <div className="bg-white p-3.5 rounded-xl border border-slate-200/60 space-y-2">
+                        <div className="flex items-center justify-between pb-1 border-b border-slate-100">
+                          <span className="font-bold text-slate-900 text-xs flex items-center gap-1.5">
+                            <Wheat className="h-4 w-4 text-emerald-600" />
+                            <span>Cosechas e Ingresos ({lotIncomes.length})</span>
+                          </span>
+                          <span className="font-mono font-bold text-emerald-800 text-[11px]">
+                            {lotIncomes.reduce((acc, i) => acc + (Number(i.cantidad) || 0), 0).toFixed(1)} t
+                          </span>
+                        </div>
+
+                        {lotIncomes.length > 0 ? (
+                          <div className="space-y-1.5 pt-1">
+                            {lotIncomes.map((i) => (
+                              <div
+                                key={i.id}
+                                className="flex items-center justify-between p-2 rounded-lg bg-emerald-50/50 border border-emerald-100/70"
+                              >
+                                <div className="min-w-0">
+                                  <span className="font-bold text-slate-800 block truncate">{i.concepto}</span>
+                                  <span className="text-[11px] text-slate-500">
+                                    {formatDateDDMMAAAA(i.fecha)} &bull; {i.cantidad} {i.unidad}
+                                  </span>
+                                </div>
+                                <span className="font-bold font-mono text-emerald-700 shrink-0 ml-2">
+                                  + {i.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                                  {i.total.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-slate-400 italic pt-1">
+                            Sin ingresos o cosechas registradas aún.
+                          </p>
+                        )}
+                      </div>
+
+                      {/* 4. Gastos e Insumos Directos */}
+                      <div className="bg-white p-3.5 rounded-xl border border-slate-200/60 space-y-2">
+                        <div className="flex items-center justify-between pb-1 border-b border-slate-100">
+                          <span className="font-bold text-slate-900 text-xs flex items-center gap-1.5">
+                            <Receipt className="h-4 w-4 text-rose-600" />
+                            <span>Insumos y Gastos Directos ({lotExpensesDirect.length})</span>
+                          </span>
+                        </div>
+
+                        {lotExpensesDirect.length > 0 ? (
+                          <div className="space-y-1.5 pt-1">
+                            {lotExpensesDirect.map((e) => (
+                              <div
+                                key={e.id}
+                                className="flex items-center justify-between p-2 rounded-lg bg-rose-50/40 border border-rose-100/70"
+                              >
+                                <div className="min-w-0">
+                                  <span className="font-bold text-slate-800 block truncate">{e.itemGasto}</span>
+                                  <span className="text-[11px] text-slate-500">
+                                    {formatDateDDMMAAAA(e.fecha)} &bull; {e.cantidad} {e.unidad}
+                                  </span>
+                                </div>
+                                <span className="font-bold font-mono text-rose-700 shrink-0 ml-2">
+                                  - {e.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                                  {e.total.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-slate-400 italic pt-1">
+                            Sin insumos directos registrados en este lote.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+              );
+            })}
+
+            {lots.length === 0 && (
+              <div className="py-12 text-center text-xs text-slate-400 bg-white rounded-2xl border border-slate-200/80">
+                No hay lotes registrados aún.
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {/* ============================================================ */}
-      {/* CONSULTA B: GASTOS DE MAQUINARIA RECIBIDA (VINCULADOS)       */}
+      {/* 4. TRABAJOS DE MAQUINARIA RECIBIDOS EN PROPIEDAD             */}
       {/* ============================================================ */}
       {currentScreen === 'maquinaria_recibida' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-end gap-2">
-            <span className="text-xs font-bold text-amber-900 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
-              {linkedPropertyJobs.length} labores recibidas
-            </span>
-          </div>
-
-          <div className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-5 shadow-xs space-y-4">
-            <div className="pb-3 border-b border-stone-100">
-              <div className="flex items-center gap-2">
-                <div className="p-2 rounded-xl bg-rose-50 text-rose-700 border border-rose-200/60 shrink-0">
-                  <Tractor className="h-5 w-5" />
-                </div>
-                <div>
-                  <h2 className="text-sm font-bold text-stone-900">
-                    Gastos de Maquinaria Recibida
-                  </h2>
-                  <p className="text-xs text-stone-500 mt-0.5">
-                    Labores de tractores y equipos asignadas a lotes de la propiedad.
-                  </p>
-                </div>
-              </div>
-
-              {/* Distintivo de no duplicación manual */}
-              <div className="mt-3 bg-amber-50/80 p-3 rounded-xl border border-amber-200/70 text-xs text-amber-900 leading-relaxed">
-                <strong>Gasto registrado automáticamente:</strong> Estos costos provienen de trabajos realizados por tu propia maquinaria en los lotes. Para modificar o anular un registro, debes gestionarlo directamente desde el módulo <strong>Maquinarias</strong>.
-              </div>
-            </div>
-
-            {/* VISTA MÓVIL: Tarjetas Verticales Compactas */}
-            <div className="block md:hidden space-y-2.5">
-              {linkedPropertyJobs.map((j) => (
-                <div
-                  key={j.id}
-                  className="rounded-xl border border-stone-200 bg-stone-50/70 p-3.5 space-y-2"
-                >
-                  <div className="flex items-center justify-between border-b border-stone-200/60 pb-2">
-                    <span className="text-xs font-bold text-stone-900">
-                      {j.fecha} &mdash; {j.maquinariaNombre}
-                    </span>
-                    <span className="text-[10px] bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded font-bold">
-                      Maquinaria Propia
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-1 text-xs text-stone-700">
-                    <div>
-                      <span className="text-stone-500 text-[11px] block">Lote Destino:</span>
-                      <span className="font-bold text-emerald-900">{j.loteNombre || 'Lote'}</span>
-                    </div>
-                    <div>
-                      <span className="text-stone-500 text-[11px] block">Trabajo Realizado:</span>
-                      <span className="font-semibold font-mono">
-                        {j.cantidad} {j.unidad}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="text-xs text-stone-600">
-                    <span className="text-stone-500 text-[11px]">Tarifa Aplicada: </span>
-                    <span className="font-mono">
-                      {j.moneda} {j.tarifa}/{j.unidad}
-                    </span>
-                  </div>
-
-                  {j.observacion && (
-                    <p className="text-[11px] text-stone-500 italic bg-white p-1.5 rounded border border-stone-200/60 break-words">
-                      {j.observacion}
-                    </p>
-                  )}
-
-                  <div className="flex items-center justify-between pt-2 border-t border-stone-200/60">
-                    <div>
-                      <span className="text-[10px] text-stone-500 block uppercase">Costo Asignado al Lote</span>
-                      <span className="text-sm font-bold text-rose-800 font-mono">
-                        {formatMoney(j.total, j.moneda)}
-                      </span>
-                    </div>
-                    <span className="text-[10px] text-stone-500 font-mono italic">
-                      Movimiento vinculado
-                    </span>
-                  </div>
-                </div>
-              ))}
-
-              {linkedPropertyJobs.length === 0 && (
-                <div className="py-10 text-center text-xs text-stone-400">
-                  No hay trabajos de maquinaria propia asignados a lotes en esta campaña.
-                </div>
-              )}
-            </div>
-
-            {/* VISTA ESCRITORIO: Tabla */}
-            <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-left text-xs border-collapse">
-                <thead>
-                  <tr className="border-b border-stone-200 bg-stone-50 text-stone-600">
-                    <th className="py-2.5 px-3 font-semibold">Fecha</th>
-                    <th className="py-2.5 px-3 font-semibold">Lote Destino</th>
-                    <th className="py-2.5 px-3 font-semibold">Maquinaria</th>
-                    <th className="py-2.5 px-3 font-semibold text-right">Horas / Ha</th>
-                    <th className="py-2.5 px-3 font-semibold text-right">Tarifa</th>
-                    <th className="py-2.5 px-3 font-semibold text-right">Costo para el Lote</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-stone-100">
-                  {linkedPropertyJobs.map((j) => (
-                    <tr key={j.id} className="hover:bg-stone-50">
-                      <td className="py-2 px-3 text-stone-600 whitespace-nowrap">{j.fecha}</td>
-                      <td className="py-2 px-3 font-bold text-emerald-900">{j.loteNombre || 'Lote'}</td>
-                      <td className="py-2 px-3 font-medium text-stone-900">{j.maquinariaNombre}</td>
-                      <td className="py-2 px-3 text-right font-mono">
-                        {j.cantidad} {j.unidad}
-                      </td>
-                      <td className="py-2 px-3 text-right font-mono">
-                        {j.moneda} {j.tarifa}
-                      </td>
-                      <td className="py-2 px-3 text-right font-bold text-rose-800 font-mono">
-                        {formatMoney(j.total, j.moneda)}
-                      </td>
-                    </tr>
-                  ))}
-                  {linkedPropertyJobs.length === 0 && (
-                    <tr>
-                      <td colSpan={6} className="py-10 text-center text-xs text-stone-400">
-                        No hay trabajos de maquinaria propia asignados a lotes en esta campaña.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ============================================================ */}
-      {/* CONSULTA C: RESULTADOS POR LOTE                              */}
-      {/* ============================================================ */}
-      {currentScreen === 'resultados' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-end gap-2">
-            <span className="text-xs font-bold text-stone-700 bg-stone-100 px-2.5 py-1 rounded-lg">
-              {lots.length} lotes analizados
-            </span>
-          </div>
-
-          <div className="space-y-4">
-            <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-xs">
-              <h2 className="text-sm font-bold text-stone-900">
-                Actividad por Lote
+          <div className="flex items-center justify-between bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">
+                Trabajos de maquinaria
               </h2>
-              <p className="text-xs text-stone-500 mt-0.5">
-                Labores de maquinaria recibidas, cosechas e insumos aplicados en cada lote.
+              <p className="text-xs text-slate-500">
+                Labores asignadas a lotes de la propiedad
               </p>
             </div>
+            <span className="text-xs font-bold text-amber-800 bg-amber-50 border border-amber-200/60 px-3 py-1.5 rounded-xl">
+              {linkedPropertyJobs.length} labores
+            </span>
+          </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {lots.map((lot) => {
-                const lotMachineryJobs = linkedPropertyJobs.filter((j) => j.loteId === lot.id);
-                const lotIncomes = propertyIncomes.filter((i) => i.loteId === lot.id);
-                const lotExpensesDirect = propertyExpenses.filter(
-                  (e) => e.loteId === lot.id && !e.esTrabajoPropio
-                );
+          <div className="bg-amber-50/80 p-3.5 rounded-2xl border border-amber-200/70 text-xs text-amber-900 leading-relaxed flex items-start gap-2.5">
+            <AlertCircle className="h-4 w-4 text-amber-700 shrink-0 mt-0.5" />
+            <span>
+              <strong>Costos automáticos:</strong> Estos trabajos provienen de labores realizadas por la maquinaria propia en los lotes. Para editar o eliminar un trabajo, debes gestionarlo desde la pestaña <strong>Maquinarias</strong>.
+            </span>
+          </div>
 
-                const hrs = lotMachineryJobs
-                  .filter((j) => j.unidad === 'hora')
-                  .reduce((sum, j) => sum + (Number(j.cantidad) || 0), 0);
-                const ha = lotMachineryJobs
-                  .filter((j) => j.unidad === 'hectarea')
-                  .reduce((sum, j) => sum + (Number(j.cantidad) || 0), 0);
-
-                return (
-                  <div
-                    key={lot.id}
-                    className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-5 shadow-xs space-y-3"
-                  >
-                    <div className="flex items-center justify-between pb-3 border-b border-stone-100">
-                      <div className="min-w-0">
-                        <h4 className="text-sm font-bold text-stone-900 truncate">{lot.nombre}</h4>
-                        <p className="text-[11px] text-stone-500 truncate">
-                          {lot.superficieHectareas} Hectáreas &bull; {lot.cultivoActual || 'Sin cultivo'}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="space-y-2 text-xs my-2">
-                      <div className="flex justify-between items-center text-stone-700 bg-stone-50 p-2 rounded-lg border border-stone-100">
-                        <span>Labores de Maquinaria:</span>
-                        <span className="font-bold text-stone-900 font-mono">
-                          {lotMachineryJobs.length} ({hrs > 0 ? `${hrs.toFixed(1)} h` : ''}{hrs > 0 && ha > 0 ? ' / ' : ''}{ha > 0 ? `${ha.toFixed(1)} ha` : ''}{hrs === 0 && ha === 0 ? '0 h' : ''})
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center text-stone-700 bg-stone-50 p-2 rounded-lg border border-stone-100">
-                        <span>Cosechas Registradas:</span>
-                        <span className="font-bold text-emerald-900 font-mono">
-                          {lotIncomes.length} registro{lotIncomes.length !== 1 ? 's' : ''}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center text-stone-700 bg-stone-50 p-2 rounded-lg border border-stone-100">
-                        <span>Insumos / Gastos Directos:</span>
-                        <span className="font-bold text-stone-900 font-mono">
-                          {lotExpensesDirect.length} insumo{lotExpensesDirect.length !== 1 ? 's' : ''}
-                        </span>
-                      </div>
-                    </div>
+          <div className="space-y-3">
+            {linkedPropertyJobs.map((j) => (
+              <div
+                key={j.id}
+                className="rounded-2xl border border-slate-200/80 bg-white p-4 space-y-2.5 shadow-xs"
+              >
+                <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-800">
+                      {formatDateDDMMAAAA(j.fecha)}
+                    </span>
+                    <span className="text-[11px] font-bold text-slate-900 bg-slate-100 px-2 py-0.5 rounded-md">
+                      {j.maquinariaNombre}
+                    </span>
                   </div>
-                );
-              })}
-
-              {lots.length === 0 && (
-                <div className="col-span-full py-12 text-center text-xs text-stone-400 bg-white rounded-2xl border border-stone-200">
-                  No hay lotes configurados en la propiedad.
+                  <span className="text-[10px] bg-amber-100 text-amber-900 font-bold px-2 py-0.5 rounded-md">
+                    Maq. Propia
+                  </span>
                 </div>
-              )}
-            </div>
+
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div>
+                    <span className="text-slate-400 text-[11px] block">Lote Destino:</span>
+                    <span className="font-bold text-emerald-800 text-sm">
+                      {j.loteNombre || 'Lote'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 text-[11px] block">Labor Realizada:</span>
+                    <span className="font-bold text-slate-800 text-sm">
+                      {j.cantidad} {j.unidad}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="text-xs text-slate-500">
+                  Tarifa: <span className="font-semibold text-slate-700">{j.moneda === 'USD' ? 'USD' : 'Bs'} {j.tarifa}/{j.unidad}</span>
+                </div>
+
+                {j.observacion && (
+                  <p className="text-xs text-slate-600 italic bg-slate-50 p-2 rounded-xl border border-slate-200/60 break-words">
+                    {j.observacion}
+                  </p>
+                )}
+
+                <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                  <span className="text-[11px] text-slate-500 uppercase font-semibold">
+                    Costo Asignado al Lote
+                  </span>
+                  <div className="text-right">
+                    <span className="text-base font-bold font-mono text-rose-700 block">
+                      - {j.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                      {j.total.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </span>
+                    {j.tipoCambio && j.tipoCambio > 0 && (
+                      <span className="text-[11px] text-slate-400 font-medium block">
+                        {j.moneda === 'USD'
+                          ? `equiv. Bs ${(j.total * j.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${j.tipoCambio})`
+                          : `equiv. USD ${(j.total / j.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${j.tipoCambio})`}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+
+            {linkedPropertyJobs.length === 0 && (
+              <div className="py-12 text-center text-xs text-slate-400 bg-white rounded-2xl border border-slate-200/80">
+                No hay trabajos de maquinaria propia asignados a lotes en esta campaña.
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {/* ============================================================ */}
-      {/* CONSULTA D: HISTORIAL DE MOVIMIENTOS                         */}
+      {/* 1. MOVIMIENTOS DE PROPIEDAD (HISTORIAL CON EDITAR Y ELIMINAR)*/}
       {/* ============================================================ */}
       {currentScreen === 'historial' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-end gap-2">
-            <span className="text-xs font-bold text-stone-700 bg-stone-100 px-2.5 py-1 rounded-lg">
-              {filteredMovements.length} movimientos
+          <div className="flex items-center justify-between bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">
+                Movimientos
+              </h2>
+              <p className="text-xs text-slate-500">
+                Ingresos, cosechas y gastos directos
+              </p>
+            </div>
+            <span className="text-xs font-bold text-slate-700 bg-slate-100 px-3 py-1.5 rounded-xl">
+              {filteredMovements.length} registros
             </span>
           </div>
 
-          <div className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-5 shadow-xs space-y-4">
-            <div>
-              <h2 className="text-sm font-bold text-stone-900">
-                Historial de Movimientos de la Propiedad
-              </h2>
-              <p className="text-xs text-stone-500 mt-0.5">
-                Ingresos agrícolas, gastos directos del lote y gastos de maquinaria propia vinculados.
-              </p>
-            </div>
-
+          <div className="rounded-2xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-xs space-y-4">
             {/* Filtros: Búsqueda y Pestañas de Tipo */}
-            <div className="space-y-2.5">
+            <div className="space-y-3">
               <div className="relative">
-                <Search className="absolute left-3 top-2.5 h-4 w-4 text-stone-400" />
+                <Search className="absolute left-3.5 top-3.5 h-4 w-4 text-slate-400" />
                 <input
                   type="text"
-                  placeholder="Buscar por lote, concepto, labor o detalle..."
+                  placeholder="Buscar por lote, concepto o detalle..."
                   value={historialSearch}
                   onChange={(e) => setHistorialSearch(e.target.value)}
-                  className="w-full text-xs pl-9 pr-3 py-2 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[40px]"
+                  className="w-full text-xs pl-10 pr-3 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
                 />
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 <button
                   type="button"
                   onClick={() => setHistorialFilter('todos')}
-                  className={`py-1.5 text-xs font-semibold rounded-lg transition cursor-pointer text-center truncate px-2 ${
+                  className={`py-2 px-3 text-xs font-semibold rounded-xl transition cursor-pointer text-center truncate min-h-[40px] ${
                     historialFilter === 'todos'
-                      ? 'bg-emerald-700 text-white shadow-2xs'
-                      : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                   }`}
                 >
                   Todos ({allMovements.length})
@@ -1354,10 +1424,10 @@ export const PropertyView: React.FC<Props> = ({
                 <button
                   type="button"
                   onClick={() => setHistorialFilter('ingresos')}
-                  className={`py-1.5 text-xs font-semibold rounded-lg transition cursor-pointer text-center truncate px-2 ${
+                  className={`py-2 px-3 text-xs font-semibold rounded-xl transition cursor-pointer text-center truncate min-h-[40px] ${
                     historialFilter === 'ingresos'
-                      ? 'bg-emerald-700 text-white shadow-2xs'
-                      : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                      ? 'bg-emerald-700 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                   }`}
                 >
                   Ingresos ({propertyIncomes.length})
@@ -1365,21 +1435,21 @@ export const PropertyView: React.FC<Props> = ({
                 <button
                   type="button"
                   onClick={() => setHistorialFilter('gastos')}
-                  className={`py-1.5 text-xs font-semibold rounded-lg transition cursor-pointer text-center truncate px-2 ${
+                  className={`py-2 px-3 text-xs font-semibold rounded-xl transition cursor-pointer text-center truncate min-h-[40px] ${
                     historialFilter === 'gastos'
-                      ? 'bg-rose-700 text-white shadow-2xs'
-                      : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                      ? 'bg-rose-700 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                   }`}
                 >
-                  Gastos directos ({propertyExpenses.length})
+                  Gastos directos ({propertyExpenses.filter((e) => !e.esTrabajoPropio && !e.trabajoId).length})
                 </button>
                 <button
                   type="button"
                   onClick={() => setHistorialFilter('maquinaria')}
-                  className={`py-1.5 text-xs font-semibold rounded-lg transition cursor-pointer text-center truncate px-2 ${
+                  className={`py-2 px-3 text-xs font-semibold rounded-xl transition cursor-pointer text-center truncate min-h-[40px] ${
                     historialFilter === 'maquinaria'
-                      ? 'bg-amber-700 text-white shadow-2xs'
-                      : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                      ? 'bg-amber-700 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                   }`}
                 >
                   Maquinaria ({linkedPropertyJobs.length})
@@ -1387,30 +1457,30 @@ export const PropertyView: React.FC<Props> = ({
               </div>
             </div>
 
-            {/* Listado Mobile-First (Cero desplazamiento horizontal) */}
-            <div className="space-y-2.5">
+            {/* Listado de movimientos */}
+            <div className="space-y-3">
               {filteredMovements.map((m) => (
                 <div
                   key={`${m.tipo}-${m.id}`}
-                  className="rounded-xl border border-stone-200 bg-stone-50/70 p-3.5 space-y-2"
+                  className="rounded-2xl border border-slate-200/80 bg-white p-4 space-y-2.5 shadow-xs"
                 >
-                  <div className="flex items-start justify-between gap-2 border-b border-stone-200/60 pb-2">
+                  <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-2">
                     <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-bold text-stone-900 truncate">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-bold text-slate-500 shrink-0">
+                          {formatDateDDMMAAAA(m.fecha)}
+                        </span>
+                        <h4 className="text-sm font-bold text-slate-900 truncate">
                           {m.titulo}
-                        </span>
-                        <span className="text-[11px] text-stone-500 font-normal shrink-0">
-                          ({m.fecha})
-                        </span>
+                        </h4>
                       </div>
-                      <span className="text-[11px] text-emerald-900 font-semibold block mt-0.5">
+                      <span className="text-xs text-emerald-800 font-semibold block mt-0.5">
                         Lote: {m.loteNombre}
                       </span>
                     </div>
 
                     <span
-                      className={`text-[10px] font-bold px-2 py-0.5 rounded shrink-0 ${
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded-md shrink-0 ${
                         m.tipo === 'ingreso'
                           ? 'bg-emerald-100 text-emerald-800'
                           : m.tipo === 'gasto_directo'
@@ -1419,7 +1489,7 @@ export const PropertyView: React.FC<Props> = ({
                       }`}
                     >
                       {m.tipo === 'ingreso'
-                        ? 'Ingreso'
+                        ? 'Ingreso Cosecha'
                         : m.tipo === 'gasto_directo'
                         ? 'Gasto Directo'
                         : 'Maq. Propia'}
@@ -1427,22 +1497,66 @@ export const PropertyView: React.FC<Props> = ({
                   </div>
 
                   {m.detalle && (
-                    <p className="text-[11px] text-stone-600 break-words">
+                    <p className="text-xs text-slate-600 break-words">
                       {m.detalle}
                     </p>
                   )}
 
-                  <div className="flex items-center justify-between pt-1 border-t border-stone-200/60">
-                    <span className="text-[10px] text-stone-500 uppercase">
-                      {m.tipo === 'ingreso' ? 'Estado' : 'Costo Imputado'}
-                    </span>
-                    {m.tipo === 'ingreso' ? (
-                      <span className="text-xs font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200/60">
-                        Cosecha registrada
+                  {/* Fila Inferior: Monto en moneda original + Botones Editar/Eliminar */}
+                  <div className="flex items-center justify-between pt-2 border-t border-slate-100 gap-2">
+                    <div>
+                      <span className="text-[10px] text-slate-400 uppercase font-semibold block">
+                        {m.tipo === 'ingreso' ? 'Total Ingreso' : 'Costo Asignado'}
                       </span>
-                    ) : (
-                      <span className="text-sm font-bold font-mono text-rose-800">
-                        - {formatMoney(m.monto, m.moneda)}
+                      <span
+                        className={`text-base font-bold font-mono ${
+                          m.tipo === 'ingreso' ? 'text-emerald-700' : 'text-rose-700'
+                        }`}
+                      >
+                        {m.tipo === 'ingreso' ? '+ ' : '- '}
+                        {m.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                        {m.monto.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                      {m.tipoCambio && m.tipoCambio > 0 && (
+                        <span className="text-[11px] text-slate-400 block font-medium">
+                          {m.moneda === 'USD'
+                            ? `equiv. Bs ${(m.monto * m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${m.tipoCambio})`
+                            : `equiv. USD ${(m.monto / m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${m.tipoCambio})`}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Botones Editar y Eliminar para movimientos manuales */}
+                    {(m.tipo === 'gasto_directo' || m.tipo === 'ingreso') && (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenEditMovement(m)}
+                          className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 active:bg-slate-300 transition cursor-pointer min-h-[40px]"
+                          title="Editar registro"
+                        >
+                          <Edit3 className="h-4 w-4 text-slate-600" />
+                          <span>Editar</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            m.tipo === 'gasto_directo'
+                              ? handlePromptDeleteExp(m.id, m.titulo)
+                              : handlePromptDeleteInc(m.id, m.titulo)
+                          }
+                          className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 active:bg-rose-200 transition cursor-pointer min-h-[40px]"
+                          title="Eliminar registro"
+                        >
+                          <Trash2 className="h-4 w-4 text-rose-600" />
+                          <span>Eliminar</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {m.tipo === 'maquinaria_recibida' && (
+                      <span className="text-[11px] text-slate-400 italic bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-100">
+                        Gestionar en Maquinarias
                       </span>
                     )}
                   </div>
@@ -1450,10 +1564,246 @@ export const PropertyView: React.FC<Props> = ({
               ))}
 
               {filteredMovements.length === 0 && (
-                <div className="py-8 text-center text-xs text-stone-400">
+                <div className="py-10 text-center text-xs text-slate-400">
                   No se encontraron movimientos registrados con los filtros seleccionados.
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* MODAL EDITAR MOVIMIENTO (INGRESO O GASTO MANUAL)             */}
+      {/* ============================================================ */}
+      {editingMovement && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl p-5 sm:p-6 max-w-lg w-full shadow-2xl border border-slate-100 space-y-4 max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  {editingMovement.tipo === 'gasto_directo' ? 'Editar Gasto Agrícola' : 'Editar Ingreso de Cosecha'}
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Actualiza los datos del registro en Google Sheets
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingMovement(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-100 transition cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditMovement} className="space-y-3.5 overflow-y-auto flex-1 pr-1">
+              {/* Fecha */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Fecha <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={editFecha}
+                  onChange={(e) => setEditFecha(e.target.value)}
+                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
+                />
+              </div>
+
+              {/* Lote */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Lote <span className="text-red-500">*</span>
+                </label>
+                <select
+                  required
+                  value={editLotId}
+                  onChange={(e) => setEditLotId(e.target.value)}
+                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[44px]"
+                >
+                  <option value="">-- Seleccionar Lote --</option>
+                  {lots.map((l) => (
+                    <option key={l.id} value={l.id}>
+                      {l.nombre} ({l.superficieHectareas} ha)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Concepto / Descripción */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Concepto / Descripción <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editConcepto}
+                  onChange={(e) => setEditConcepto(e.target.value)}
+                  placeholder="Ej. Semillas de Soya, Venta Cosecha..."
+                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
+                />
+              </div>
+
+              {/* Cantidad y Unidad */}
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Cantidad <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    required
+                    min="0.01"
+                    value={editCantidad}
+                    onChange={(e) => setEditCantidad(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[44px]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Unidad</label>
+                  <input
+                    type="text"
+                    value={editUnidad}
+                    onChange={(e) => setEditUnidad(e.target.value)}
+                    placeholder="kg, toneladas, bolsas..."
+                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
+                  />
+                </div>
+              </div>
+
+              {/* Precio Unitario y Moneda */}
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Precio Unitario <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    required
+                    min="0"
+                    value={editPrecio}
+                    onChange={(e) => setEditPrecio(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[44px]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Moneda</label>
+                  <select
+                    value={editMoneda}
+                    onChange={(e) => setEditMoneda(e.target.value as Currency)}
+                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
+                  >
+                    <option value="BOB">BOB (Bs)</option>
+                    <option value="USD">USD ($)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Tipo de Cambio */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Tipo de Cambio (Bs/$)
+                </label>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="any"
+                  value={editTc}
+                  onChange={(e) => setEditTc(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                  placeholder="6.96"
+                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
+                />
+              </div>
+
+              {/* Observaciones */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Observaciones</label>
+                <textarea
+                  rows={2}
+                  value={editObs}
+                  onChange={(e) => setEditObs(e.target.value)}
+                  placeholder="Notas adicionales..."
+                  className="w-full text-xs p-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none"
+                />
+              </div>
+
+              {/* Total Calculado en Moneda Original */}
+              <div className="flex items-center justify-between p-3 rounded-xl bg-slate-100 border border-slate-200">
+                <span className="text-xs font-bold text-slate-700">Total recalculado:</span>
+                <span className="text-base font-extrabold text-slate-900 font-mono">
+                  {editMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                  {(Number(editCantidad || 0) * Number(editPrecio || 0)).toLocaleString('es-BO', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
+
+              {/* Botones Guardar / Cancelar */}
+              <div className="grid grid-cols-2 gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={savingEdit}
+                  onClick={() => setEditingMovement(null)}
+                  className="w-full py-3 px-4 rounded-xl border border-slate-200 text-slate-700 font-bold text-xs hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer min-h-[46px]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingEdit}
+                  className="w-full py-3 px-4 rounded-xl bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 text-white font-bold text-xs shadow-xs transition cursor-pointer disabled:opacity-50 min-h-[46px] flex items-center justify-center gap-1.5"
+                >
+                  {savingEdit ? 'Guardando en servidor...' : 'Guardar Cambios'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* CUADRO DE CONFIRMACIÓN PROPIO DE REACT PARA ELIMINACIÓN       */}
+      {/* ============================================================ */}
+      {itemToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border border-slate-100 space-y-4 text-center">
+            <div className="w-14 h-14 rounded-full bg-rose-50 text-rose-600 flex items-center justify-center mx-auto">
+              <AlertCircle className="h-7 w-7" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-slate-900">¿Confirmar eliminación?</h3>
+              <p className="text-xs text-slate-600 mt-1">
+                Se eliminará definitivamente el registro de {itemToDelete.tipo === 'gasto' ? 'gasto agrícola' : 'ingreso de cosecha'}:
+              </p>
+              <p className="text-sm font-bold text-slate-800 mt-2 p-2.5 bg-slate-50 rounded-xl border border-slate-100 break-words">
+                {itemToDelete.titulo}
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <button
+                type="button"
+                disabled={deletingItem}
+                onClick={() => setItemToDelete(null)}
+                className="w-full py-3 px-4 rounded-xl border border-slate-200 text-slate-700 font-bold text-xs hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer min-h-[46px]"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={deletingItem}
+                onClick={handleConfirmDeleteItem}
+                className="w-full py-3 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold text-xs shadow-xs transition cursor-pointer disabled:opacity-50 min-h-[46px] flex items-center justify-center gap-1.5"
+              >
+                {deletingItem ? 'Eliminando...' : 'Confirmar'}
+              </button>
             </div>
           </div>
         </div>

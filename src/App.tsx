@@ -61,6 +61,10 @@ export default function App() {
     fechaActualizacion: new Date().toISOString().slice(0, 10),
   });
 
+  const [machineryKey, setMachineryKey] = useState(0);
+  const [propertyKey, setPropertyKey] = useState(0);
+  const [adminKey, setAdminKey] = useState(0);
+
   const [currency, setCurrency] = useState<Currency>('BOB');
   const [loading, setLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -115,7 +119,9 @@ export default function App() {
       if (incRes.status === 'fulfilled') setIncomes(incRes.value || []);
       if (itemsRes.status === 'fulfilled') setItemsConfig(itemsRes.value || []);
       if (assetsRes.status === 'fulfilled') setAssets(assetsRes.value || []);
-      if (rateRes.status === 'fulfilled') setExchangeRate(rateRes.value);
+      if (rateRes.status === 'fulfilled' && rateRes.value) {
+        setExchangeRate(rateRes.value);
+      }
     } catch (err: unknown) {
       setFetchError(err instanceof Error ? err.message : 'Error al sincronizar con Google Sheets');
     } finally {
@@ -143,14 +149,6 @@ export default function App() {
     setCurrency((prev) => (prev === 'BOB' ? 'USD' : 'BOB'));
   };
 
-  if (!session) {
-    return <LoginView onLoginSuccess={handleLoginSuccess} />;
-  }
-
-  const [machineryKey, setMachineryKey] = useState(0);
-  const [propertyKey, setPropertyKey] = useState(0);
-  const [adminKey, setAdminKey] = useState(0);
-
   const handleNavigate = (view: MainView) => {
     if (view === 'maquinarias') {
       setMachineryKey((prev) => prev + 1);
@@ -162,27 +160,31 @@ export default function App() {
     setCurrentView(view);
   };
 
+  if (!session) {
+    return <LoginView onLoginSuccess={handleLoginSuccess} />;
+  }
+
   const viewTitles: Record<MainView, { title: string; subtitle: string }> = {
     inicio: {
-      title: 'INICIO Y RESUMEN GENERAL',
-      subtitle: 'Visión consolidada de Maquinarias y Propiedad para la campaña activa',
+      title: 'Inicio',
+      subtitle: 'Resumen operativo',
     },
     maquinarias: {
-      title: 'MAQUINARIAS',
-      subtitle: 'Servicios a terceros, trabajos en propiedad, gastos y rendimiento de equipos',
+      title: 'Maquinarias',
+      subtitle: 'Movimientos de trabajos y equipos',
     },
     propiedad: {
-      title: 'PROPIEDAD',
-      subtitle: 'Lotes, gastos agrícolas, ingresos de cosecha y trabajos recibidos',
+      title: 'Propiedad',
+      subtitle: 'Movimientos, lotes y cosechas',
     },
     administracion: {
-      title: 'ADMINISTRACIÓN DEL SISTEMA',
-      subtitle: 'Configuración, reportes financieros y parámetros maestros',
+      title: 'Administración',
+      subtitle: 'Configuración y reportes',
     },
   };
 
   return (
-    <div className="min-h-screen bg-stone-100 text-stone-900 flex font-sans selection:bg-emerald-100 selection:text-emerald-900">
+    <div className="min-h-screen bg-[#F2F2F7] text-slate-900 flex font-sans selection:bg-emerald-100 selection:text-emerald-900">
       {/* Sidebar Navigation */}
       <Sidebar
         currentView={currentView}
@@ -211,7 +213,7 @@ export default function App() {
         />
 
         {/* View Body */}
-        <main className="flex-1 p-3 pb-24 sm:p-6 sm:pb-8 lg:p-8 max-w-7xl w-full mx-auto min-w-0">
+        <main className="flex-1 p-3 pb-28 sm:p-6 sm:pb-12 lg:p-8 max-w-5xl w-full mx-auto min-w-0">
           {currentView === 'inicio' && (
             <DashboardView
               activeCampaign={activeCampaign}
@@ -268,6 +270,7 @@ export default function App() {
               exchangeRate={exchangeRate}
               currency={currency}
               onRefreshData={() => loadData(false)}
+              onRevokeAuthorization={() => handleNavigate('inicio')}
             />
           )}
         </main>
