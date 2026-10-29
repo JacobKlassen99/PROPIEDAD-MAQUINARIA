@@ -111,6 +111,7 @@ export const PropertyView: React.FC<Props> = ({
   // Search & Filters for Movimientos
   const [historialSearch, setHistorialSearch] = useState('');
   const [historialFilter, setHistorialFilter] = useState<'todos' | 'ingresos' | 'gastos' | 'maquinaria'>('todos');
+  const [expandedMovementId, setExpandedMovementId] = useState<string | null>(null);
 
   // Accordion state for Mis lotes (only 1 lot expanded at a time)
   const [expandedLotId, setExpandedLotId] = useState<string | null>(null);
@@ -546,115 +547,144 @@ export const PropertyView: React.FC<Props> = ({
 
       {/* ============================================================ */}
       {/* VISTA PRINCIPAL (MAIN): ORDEN EXACTO SOLICITADO             */}
-      {/* 1. Movimientos                                              */}
-      {/* 2. Registrar Ingreso (verde) y Registrar Gasto (rojo)      */}
-      {/* 3. Mis lotes (unificado con el resumen)                    */}
-      {/* 4. Trabajos de maquinaria                                   */}
+      {/* ============================================================ */}
+      {/* VISTA PRINCIPAL (MAIN): ORDEN UNIFORME CON MAQUINARIAS      */}
       {/* ============================================================ */}
       {currentScreen === 'main' && (
-        <div className="space-y-4">
-          {/* 1. MOVIMIENTOS (TARJETA DESTACADA) */}
-          <button
-            type="button"
-            onClick={() => setCurrentScreen('historial')}
-            className="w-full bg-white border border-slate-200/80 hover:border-emerald-300 rounded-2xl p-4 sm:p-5 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[76px]"
-          >
-            <div className="flex items-center gap-3.5 min-w-0">
-              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700 border border-emerald-100 shrink-0">
-                <History className="h-6 w-6" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
-                  Movimientos
-                </h3>
-                <p className="text-xs text-slate-500 leading-snug mt-0.5">
-                  Ingresos, cosechas y gastos ({totalMovementsCount} registros)
-                </p>
-              </div>
+        <div className="space-y-5">
+          {/* SECCIÓN A: REGISTRAR MOVIMIENTO */}
+          <div className="space-y-2">
+            <h2 className="text-[11px] font-bold tracking-wider text-slate-500 uppercase px-1">
+              REGISTRAR MOVIMIENTO
+            </h2>
+
+            {/* Dos botones compactos estilo iOS: INGRESO (verde suave) y GASTO (rojo suave) */}
+            <div className="grid grid-cols-2 gap-3 w-full">
+              {/* Botón INGRESO */}
+              <button
+                type="button"
+                onClick={() => setCurrentScreen('ingreso')}
+                className="w-full min-h-[72px] sm:min-h-[76px] p-3 sm:p-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white shadow-xs border border-emerald-500/20 flex flex-col items-center justify-center gap-1 transition active:scale-[0.98] cursor-pointer select-none"
+              >
+                <div className="flex items-center justify-center gap-1.5">
+                  <CirclePlus className="h-5 w-5 text-emerald-100 shrink-0" />
+                  <span className="text-sm sm:text-base font-bold tracking-tight">
+                    Ingreso
+                  </span>
+                </div>
+                <span className="text-[11px] sm:text-xs text-emerald-100/90 font-medium text-center truncate max-w-full px-1">
+                  Cosecha o venta
+                </span>
+              </button>
+
+              {/* Botón GASTO */}
+              <button
+                type="button"
+                onClick={() => setCurrentScreen('gasto')}
+                className="w-full min-h-[72px] sm:min-h-[76px] p-3 sm:p-3.5 rounded-2xl bg-rose-500 hover:bg-rose-600 active:bg-rose-700 text-white shadow-xs border border-rose-400/20 flex flex-col items-center justify-center gap-1 transition active:scale-[0.98] cursor-pointer select-none"
+              >
+                <div className="flex items-center justify-center gap-1.5">
+                  <CircleMinus className="h-5 w-5 text-rose-100 shrink-0" />
+                  <span className="text-sm sm:text-base font-bold tracking-tight">
+                    Gasto
+                  </span>
+                </div>
+                <span className="text-[11px] sm:text-xs text-rose-100/90 font-medium text-center truncate max-w-full px-1">
+                  Insumos del lote
+                </span>
+              </button>
             </div>
-            <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
-          </button>
-
-          {/* 2. REGISTRAR INGRESO Y REGISTRAR GASTO */}
-          <div className="grid grid-cols-2 gap-3 w-full">
-            {/* Botón INGRESO */}
-            <button
-              type="button"
-              onClick={() => setCurrentScreen('ingreso')}
-              className="w-full min-h-[82px] sm:min-h-[90px] p-4 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white shadow-xs flex flex-col items-center justify-center gap-1.5 transition cursor-pointer select-none"
-            >
-              <div className="flex items-center justify-center gap-2">
-                <CirclePlus className="h-6 w-6 text-white shrink-0" />
-                <span className="text-base sm:text-lg font-bold tracking-tight">
-                  Ingreso
-                </span>
-              </div>
-              <span className="text-xs text-emerald-100 font-medium text-center">
-                Cosecha o venta
-              </span>
-            </button>
-
-            {/* Botón GASTO */}
-            <button
-              type="button"
-              onClick={() => setCurrentScreen('gasto')}
-              className="w-full min-h-[82px] sm:min-h-[90px] p-4 rounded-2xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white shadow-xs flex flex-col items-center justify-center gap-1.5 transition cursor-pointer select-none"
-            >
-              <div className="flex items-center justify-center gap-2">
-                <CircleMinus className="h-6 w-6 text-white shrink-0" />
-                <span className="text-base sm:text-lg font-bold tracking-tight">
-                  Gasto
-                </span>
-              </div>
-              <span className="text-xs text-rose-100 font-medium text-center">
-                Insumos del lote
-              </span>
-            </button>
           </div>
 
-          {/* 3. MIS LOTES (UNIFICADO) */}
-          <button
-            type="button"
-            onClick={() => setCurrentScreen('lotes')}
-            className="w-full bg-white border border-slate-200/80 hover:border-emerald-300 rounded-2xl p-4 sm:p-5 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[72px]"
-          >
-            <div className="flex items-center gap-3.5 min-w-0">
-              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700 border border-emerald-100 shrink-0">
-                <LandPlot className="h-6 w-6" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
-                  Mis lotes
-                </h3>
-                <p className="text-xs text-slate-500 leading-snug mt-0.5">
-                  Superficies, labores, cosechas y balance ({lots.length} lotes)
-                </p>
-              </div>
-            </div>
-            <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
-          </button>
+          {/* SECCIÓN B: CONSULTAR REGISTROS (1. Movimientos, 2. Mis lotes, 3. Trabajos de maquinaria) */}
+          <div className="space-y-2">
+            <h2 className="text-[11px] font-bold tracking-wider text-slate-500 uppercase px-1">
+              CONSULTAR REGISTROS
+            </h2>
 
-          {/* 4. TRABAJOS DE MAQUINARIA */}
-          <button
-            type="button"
-            onClick={() => setCurrentScreen('maquinaria_recibida')}
-            className="w-full bg-white border border-slate-200/80 hover:border-amber-300 rounded-2xl p-4 sm:p-5 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[72px]"
-          >
-            <div className="flex items-center gap-3.5 min-w-0">
-              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-50 text-amber-700 border border-amber-100 shrink-0">
-                <Tractor className="h-6 w-6" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
-                  Trabajos de maquinaria
-                </h3>
-                <p className="text-xs text-slate-500 leading-snug mt-0.5">
-                  Labores recibidas en lotes ({linkedPropertyJobs.length} labores)
-                </p>
-              </div>
+            <div className="space-y-2.5">
+              {/* Opción 1: Movimientos */}
+              <button
+                type="button"
+                onClick={() => setCurrentScreen('historial')}
+                className="w-full bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl p-3.5 sm:p-4 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:scale-[0.99] transition cursor-pointer text-left min-h-[68px]"
+              >
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-100/80 shrink-0">
+                    <History className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm sm:text-base font-bold text-slate-900 leading-snug">
+                        Movimientos
+                      </h3>
+                      <span className="text-xs font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full shrink-0">
+                        {totalMovementsCount}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-0.5 truncate">
+                      Ingresos, cosechas y gastos directos
+                    </p>
+                  </div>
+                </div>
+                <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
+              </button>
+
+              {/* Opción 2: Mis lotes */}
+              <button
+                type="button"
+                onClick={() => setCurrentScreen('lotes')}
+                className="w-full bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl p-3.5 sm:p-4 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:scale-[0.99] transition cursor-pointer text-left min-h-[68px]"
+              >
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-100/80 shrink-0">
+                    <LandPlot className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm sm:text-base font-bold text-slate-900 leading-snug">
+                        Mis lotes
+                      </h3>
+                      <span className="text-xs font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full shrink-0">
+                        {lots.length}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-0.5 truncate">
+                      Superficies, labores, cosechas y balance
+                    </p>
+                  </div>
+                </div>
+                <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
+              </button>
+
+              {/* Opción 3: Trabajos de maquinaria */}
+              <button
+                type="button"
+                onClick={() => setCurrentScreen('maquinaria_recibida')}
+                className="w-full bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl p-3.5 sm:p-4 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:scale-[0.99] transition cursor-pointer text-left min-h-[68px]"
+              >
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-amber-50 text-amber-700 border border-amber-100/80 shrink-0">
+                    <Tractor className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm sm:text-base font-bold text-slate-900 leading-snug">
+                        Trabajos de maquinaria
+                      </h3>
+                      <span className="text-xs font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full shrink-0">
+                        {linkedPropertyJobs.length}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-0.5 truncate">
+                      Labores recibidas en lotes
+                    </p>
+                  </div>
+                </div>
+                <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
+              </button>
             </div>
-            <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
-          </button>
+          </div>
         </div>
       )}
 
@@ -1398,42 +1428,44 @@ export const PropertyView: React.FC<Props> = ({
       {/* ============================================================ */}
       {currentScreen === 'historial' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs">
-            <div>
-              <h2 className="text-base font-bold text-slate-900">
-                Movimientos
-              </h2>
-              <p className="text-xs text-slate-500">
-                Ingresos, cosechas y gastos directos
-              </p>
+          <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200/90 shadow-xs space-y-3.5">
+            {/* Header info */}
+            <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="text-base sm:text-lg font-bold text-slate-900">
+                  Movimientos
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Ingresos, cosechas y gastos directos ({filteredMovements.length} registros)
+                </p>
+              </div>
+              <span className="text-xs font-bold text-slate-700 bg-slate-100 px-3 py-1.5 rounded-xl shrink-0">
+                {filteredMovements.length} registros
+              </span>
             </div>
-            <span className="text-xs font-bold text-slate-700 bg-slate-100 px-3 py-1.5 rounded-xl">
-              {filteredMovements.length} registros
-            </span>
-          </div>
 
-          <div className="rounded-2xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-xs space-y-4">
-            {/* Filtros: Búsqueda y Pestañas de Tipo */}
-            <div className="space-y-3">
+            {/* Filtros: Búsqueda y Pestañas Segmentadas iOS */}
+            <div className="space-y-2.5">
               <div className="relative">
-                <Search className="absolute left-3.5 top-3.5 h-4 w-4 text-slate-400" />
+                <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
                 <input
                   type="text"
                   placeholder="Buscar por lote, concepto o detalle..."
                   value={historialSearch}
                   onChange={(e) => setHistorialSearch(e.target.value)}
-                  className="w-full text-xs pl-10 pr-3 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
+                  className="w-full text-xs pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
                 />
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {/* Segmented Control iOS: Todos, Ingresos, Gastos directos, Maquinaria */}
+              <div className="flex p-1 bg-slate-100 rounded-xl gap-1 overflow-x-auto">
                 <button
                   type="button"
                   onClick={() => setHistorialFilter('todos')}
-                  className={`py-2 px-3 text-xs font-semibold rounded-xl transition cursor-pointer text-center truncate min-h-[40px] ${
+                  className={`flex-1 min-h-[38px] px-2 text-xs font-bold rounded-lg transition cursor-pointer text-center whitespace-nowrap ${
                     historialFilter === 'todos'
-                      ? 'bg-slate-900 text-white shadow-xs'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                      ? 'bg-white text-slate-900 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
                   Todos ({allMovements.length})
@@ -1441,10 +1473,10 @@ export const PropertyView: React.FC<Props> = ({
                 <button
                   type="button"
                   onClick={() => setHistorialFilter('ingresos')}
-                  className={`py-2 px-3 text-xs font-semibold rounded-xl transition cursor-pointer text-center truncate min-h-[40px] ${
+                  className={`flex-1 min-h-[38px] px-2 text-xs font-bold rounded-lg transition cursor-pointer text-center whitespace-nowrap ${
                     historialFilter === 'ingresos'
-                      ? 'bg-emerald-700 text-white shadow-xs'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                      ? 'bg-white text-emerald-800 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
                   Ingresos ({propertyIncomes.length})
@@ -1452,10 +1484,10 @@ export const PropertyView: React.FC<Props> = ({
                 <button
                   type="button"
                   onClick={() => setHistorialFilter('gastos')}
-                  className={`py-2 px-3 text-xs font-semibold rounded-xl transition cursor-pointer text-center truncate min-h-[40px] ${
+                  className={`flex-1 min-h-[38px] px-2 text-xs font-bold rounded-lg transition cursor-pointer text-center whitespace-nowrap ${
                     historialFilter === 'gastos'
-                      ? 'bg-rose-700 text-white shadow-xs'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                      ? 'bg-white text-rose-700 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
                   Gastos directos ({propertyExpenses.filter((e) => !e.esTrabajoPropio && !e.trabajoId).length})
@@ -1463,10 +1495,10 @@ export const PropertyView: React.FC<Props> = ({
                 <button
                   type="button"
                   onClick={() => setHistorialFilter('maquinaria')}
-                  className={`py-2 px-3 text-xs font-semibold rounded-xl transition cursor-pointer text-center truncate min-h-[40px] ${
+                  className={`flex-1 min-h-[38px] px-2 text-xs font-bold rounded-lg transition cursor-pointer text-center whitespace-nowrap ${
                     historialFilter === 'maquinaria'
-                      ? 'bg-amber-700 text-white shadow-xs'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                      ? 'bg-white text-amber-800 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
                   Maquinaria ({linkedPropertyJobs.length})
@@ -1474,125 +1506,179 @@ export const PropertyView: React.FC<Props> = ({
               </div>
             </div>
 
-            {/* Listado de movimientos */}
-            <div className="space-y-3">
-              {filteredMovements.map((m) => (
-                <div
-                  key={`${m.tipo}-${m.id}`}
-                  className="rounded-2xl border border-slate-200/80 bg-white p-4 space-y-2.5 shadow-xs"
-                >
-                  <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-2">
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 shadow-2xs border ${
-                        m.tipo === 'ingreso'
-                          ? 'bg-emerald-50 border-emerald-200/80'
-                          : m.tipo === 'gasto_directo'
-                          ? 'bg-rose-50 border-rose-200/80'
-                          : 'bg-amber-50 border-amber-200/80'
-                      }`}>
-                        <VisualIcon
-                          name={m.icono || (m.tipo === 'ingreso' ? 'granos' : m.tipo === 'gasto_directo' ? 'semillas' : 'tractor')}
-                          size="sm"
-                        />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs font-bold text-slate-500 shrink-0">
-                            {formatDateDDMMAAAA(m.fecha)}
-                          </span>
-                          <h4 className="text-sm font-bold text-slate-900 truncate">
-                            {m.titulo}
-                          </h4>
-                        </div>
-                        <span className="text-xs text-emerald-800 font-semibold block mt-0.5">
-                          Lote: {m.loteNombre}
-                        </span>
-                      </div>
-                    </div>
+            {/* Listado Compacto de Movimientos estilo iOS Card */}
+            <div className="space-y-2.5 pt-1">
+              {filteredMovements.map((m) => {
+                const isExpanded = expandedMovementId === m.id;
 
-                    <span
-                      className={`text-[10px] font-bold px-2 py-0.5 rounded-md shrink-0 ${
-                        m.tipo === 'ingreso'
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : m.tipo === 'gasto_directo'
-                          ? 'bg-rose-100 text-rose-800'
-                          : 'bg-amber-100 text-amber-900'
-                      }`}
+                return (
+                  <div
+                    key={`${m.tipo}-${m.id}`}
+                    className={`rounded-2xl border transition overflow-hidden ${
+                      isExpanded
+                        ? 'border-slate-300 bg-slate-50/70 shadow-xs'
+                        : 'border-slate-200/90 bg-white hover:border-slate-300 shadow-2xs'
+                    }`}
+                  >
+                    {/* Fila compacta clicable */}
+                    <button
+                      type="button"
+                      onClick={() => setExpandedMovementId(isExpanded ? null : m.id)}
+                      className="w-full p-3 sm:p-3.5 flex items-center justify-between gap-3 text-left transition cursor-pointer select-none"
                     >
-                      {m.tipo === 'ingreso'
-                        ? 'Ingreso Cosecha'
-                        : m.tipo === 'gasto_directo'
-                        ? 'Gasto Directo'
-                        : 'Maq. Propia'}
-                    </span>
-                  </div>
-
-                  {m.detalle && (
-                    <p className="text-xs text-slate-600 break-words">
-                      {m.detalle}
-                    </p>
-                  )}
-
-                  {/* Fila Inferior: Monto en moneda original + Botones Editar/Eliminar */}
-                  <div className="flex items-center justify-between pt-2 border-t border-slate-100 gap-2">
-                    <div>
-                      <span className="text-[10px] text-slate-400 uppercase font-semibold block">
-                        {m.tipo === 'ingreso' ? 'Total Ingreso' : 'Costo Asignado'}
-                      </span>
-                      <span
-                        className={`text-base font-bold font-mono ${
-                          m.tipo === 'ingreso' ? 'text-emerald-700' : 'text-rose-700'
-                        }`}
-                      >
-                        {m.tipo === 'ingreso' ? '+ ' : '- '}
-                        {m.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
-                        {m.monto.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </span>
-                      {m.tipoCambio && m.tipoCambio > 0 && (
-                        <span className="text-[11px] text-slate-400 block font-medium">
-                          {m.moneda === 'USD'
-                            ? `equiv. Bs ${(m.monto * m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${m.tipoCambio})`
-                            : `equiv. USD ${(m.monto / m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${m.tipoCambio})`}
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Botones Editar y Eliminar para movimientos manuales */}
-                    {(m.tipo === 'gasto_directo' || m.tipo === 'ingreso') && (
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => handleOpenEditMovement(m)}
-                          className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 active:bg-slate-300 transition cursor-pointer min-h-[40px]"
-                          title="Editar registro"
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <div
+                          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-2xs border ${
+                            m.tipo === 'ingreso'
+                              ? 'bg-emerald-50 border-emerald-200/80'
+                              : m.tipo === 'gasto_directo'
+                              ? 'bg-rose-50 border-rose-200/80'
+                              : 'bg-amber-50 border-amber-200/80'
+                          }`}
                         >
-                          <Edit3 className="h-4 w-4 text-slate-600" />
-                          <span>Editar</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            m.tipo === 'gasto_directo'
-                              ? handlePromptDeleteExp(m.id, m.titulo)
-                              : handlePromptDeleteInc(m.id, m.titulo)
-                          }
-                          className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 active:bg-rose-200 transition cursor-pointer min-h-[40px]"
-                          title="Eliminar registro"
-                        >
-                          <Trash2 className="h-4 w-4 text-rose-600" />
-                          <span>Eliminar</span>
-                        </button>
+                          <VisualIcon
+                            name={m.icono || (m.tipo === 'ingreso' ? 'granos' : m.tipo === 'gasto_directo' ? 'semillas' : 'tractor')}
+                            size="sm"
+                          />
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <h4 className="text-sm font-bold text-slate-900 truncate">
+                              {m.titulo}
+                            </h4>
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-md shrink-0 ${
+                                m.tipo === 'ingreso'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : m.tipo === 'gasto_directo'
+                                  ? 'bg-rose-100 text-rose-800'
+                                  : 'bg-amber-100 text-amber-900'
+                              }`}
+                            >
+                              {m.tipo === 'ingreso'
+                                ? 'Ingreso Cosecha'
+                                : m.tipo === 'gasto_directo'
+                                ? 'Gasto Directo'
+                                : 'Maq. Propia'}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2 text-xs text-slate-500 mt-0.5 flex-wrap">
+                            <span className="font-semibold text-slate-600">{formatDateDDMMAAAA(m.fecha)}</span>
+                            <span>&bull;</span>
+                            <span className="font-semibold text-emerald-800 truncate">Lote: {m.loteNombre}</span>
+                            {m.cantidad !== undefined && m.cantidad > 0 && (
+                              <>
+                                <span>&bull;</span>
+                                <span className="font-medium text-slate-600 truncate">{m.cantidad} {m.unidad || ''}</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <div className="text-right">
+                          <span
+                            className={`text-sm sm:text-base font-bold font-mono block ${
+                              m.tipo === 'ingreso' ? 'text-emerald-700' : 'text-rose-700'
+                            }`}
+                          >
+                            {m.tipo === 'ingreso' ? '+ ' : '- '}
+                            {m.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                            {m.monto.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <div className="text-slate-400 pl-1">
+                          {isExpanded ? (
+                            <ChevronUp className="h-4 w-4" />
+                          ) : (
+                            <ChevronDown className="h-4 w-4" />
+                          )}
+                        </div>
+                      </div>
+                    </button>
+
+                    {/* Desplegable de Detalles */}
+                    {isExpanded && (
+                      <div className="px-3.5 pb-3.5 pt-1 border-t border-slate-200/70 space-y-3 bg-white/60">
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 text-xs">
+                          <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                            <span className="text-[10px] uppercase font-bold text-slate-400 block">Tipo</span>
+                            <span className="font-semibold text-slate-700">
+                              {m.tipo === 'ingreso' ? 'Ingreso de cosecha' : m.tipo === 'gasto_directo' ? 'Gasto directo agrícola' : 'Labor maquinaria propia'}
+                            </span>
+                          </div>
+                          <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                            <span className="text-[10px] uppercase font-bold text-slate-400 block">Lote asignado</span>
+                            <span className="font-semibold text-slate-700">{m.loteNombre}</span>
+                          </div>
+                          <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                            <span className="text-[10px] uppercase font-bold text-slate-400 block">Cantidad y Unidad</span>
+                            <span className="font-semibold text-slate-700">
+                              {m.cantidad ? `${m.cantidad} ${m.unidad || ''}` : 'No especificada'}
+                            </span>
+                          </div>
+                          <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                            <span className="text-[10px] uppercase font-bold text-slate-400 block">Equivalencia Moneda</span>
+                            <span className="font-semibold text-slate-700">
+                              {m.tipoCambio && m.tipoCambio > 0 ? (
+                                m.moneda === 'USD'
+                                  ? `Bs ${(m.monto * m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                                  : `USD ${(m.monto / m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                              ) : (
+                                'TC no registrado'
+                              )}
+                            </span>
+                          </div>
+                        </div>
+
+                        {m.detalle && (
+                          <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100 text-xs">
+                            <span className="text-[10px] uppercase font-bold text-slate-400 block">Observación / Detalle</span>
+                            <p className="text-slate-700 mt-0.5 break-words font-medium">{m.detalle}</p>
+                          </div>
+                        )}
+
+                        {/* Botones de acción Editar y Eliminar */}
+                        <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-100">
+                          {(m.tipo === 'gasto_directo' || m.tipo === 'ingreso') && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenEditMovement(m)}
+                                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 active:bg-slate-300 transition cursor-pointer min-h-[38px]"
+                              >
+                                <Edit3 className="h-3.5 w-3.5 text-slate-600" />
+                                <span>Editar</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  m.tipo === 'gasto_directo'
+                                    ? handlePromptDeleteExp(m.id, m.titulo)
+                                    : handlePromptDeleteInc(m.id, m.titulo)
+                                }
+                                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 active:bg-rose-200 transition cursor-pointer min-h-[38px]"
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                                <span>Eliminar</span>
+                              </button>
+                            </>
+                          )}
+
+                          {m.tipo === 'maquinaria_recibida' && (
+                            <span className="text-xs text-slate-400 italic bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-100">
+                              Labor registrada en Maquinarias. Gestionar en el módulo de Maquinarias.
+                            </span>
+                          )}
+                        </div>
                       </div>
                     )}
-
-                    {m.tipo === 'maquinaria_recibida' && (
-                      <span className="text-[11px] text-slate-400 italic bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-100">
-                        Gestionar en Maquinarias
-                      </span>
-                    )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
 
               {filteredMovements.length === 0 && (
                 <div className="py-10 text-center text-xs text-slate-400">
@@ -1645,22 +1731,13 @@ export const PropertyView: React.FC<Props> = ({
 
               {/* Lote */}
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Lote <span className="text-red-500">*</span>
-                </label>
-                <select
+                <VisualLotPicker
+                  lots={lots}
+                  selectedLotId={editLotId}
+                  onSelect={(id) => setEditLotId(id)}
+                  label="Lote"
                   required
-                  value={editLotId}
-                  onChange={(e) => setEditLotId(e.target.value)}
-                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[44px]"
-                >
-                  <option value="">-- Seleccionar Lote --</option>
-                  {lots.map((l) => (
-                    <option key={l.id} value={l.id}>
-                      {l.nombre} ({l.superficieHectareas} ha)
-                    </option>
-                  ))}
-                </select>
+                />
               </div>
 
               {/* Concepto / Descripción */}

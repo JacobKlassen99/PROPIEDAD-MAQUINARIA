@@ -50,6 +50,7 @@ import {
   VisualMachinePicker,
   VisualJobTypePicker,
   VisualExpenseItemPicker,
+  VisualLotPicker,
 } from '../components/VisualEntityPicker';
 
 interface Props {
@@ -91,9 +92,13 @@ export const MachineryView: React.FC<Props> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // Search & type filter for Historial
+  // Search & type filter for Movimientos (Servicios y Gastos)
   const [searchTerm, setSearchTerm] = useState('');
-  const [historialFilter, setHistorialFilter] = useState<'todos' | 'terceros' | 'propiedad'>('todos');
+  const [historialFilter, setHistorialFilter] = useState<'todos' | 'servicios' | 'gastos'>('todos');
+  const [serviciosSubFilter, setServiciosSubFilter] = useState<'todos' | 'terceros' | 'propiedad'>('todos');
+  const [expandedMovementId, setExpandedMovementId] = useState<string | null>(null);
+  const [expenseToDelete, setExpenseToDelete] = useState<Expense | null>(null);
+  const [deletingExpense, setDeletingExpense] = useState(false);
 
   // Form State for Machinery Job
   const [selectedMachineId, setSelectedMachineId] = useState('');
@@ -458,27 +463,89 @@ export const MachineryView: React.FC<Props> = ({
         item.tipo === 'gasto_maquinaria')
   );
 
-  // Ordenar trabajos del más reciente al más antiguo
-  const sortedJobs = [...jobs].sort((a, b) => {
-    const da = a.fecha || '';
-    const db = b.fecha || '';
-    return db.localeCompare(da);
-  });
+  interface MachineryMovementItem {
+    id: string;
+    kind: 'servicio' | 'gasto';
+    tipoTrabajo?: 'tercero' | 'propiedad';
+    fecha: string;
+    titulo: string;
+    maquinariaNombre?: string;
+    destinoOCliente?: string;
+    cantidadTexto?: string;
+    total: number;
+    moneda: Currency;
+    tipoCambio?: number;
+    tarifaOPrecio?: number;
+    unidad?: string;
+    observacion?: string;
+    icono?: string;
+    rawJob?: MachineryJob;
+    rawExpense?: Expense;
+  }
 
-  const filteredJobs = sortedJobs.filter((j) => {
-    if (historialFilter === 'terceros' && j.tipoTrabajo !== 'tercero') return false;
-    if (historialFilter === 'propiedad' && j.tipoTrabajo !== 'propiedad') return false;
+  const allMachineryMovements: MachineryMovementItem[] = [
+    ...jobs.map((j) => ({
+      id: j.id,
+      kind: 'servicio' as const,
+      tipoTrabajo: j.tipoTrabajo,
+      fecha: j.fecha,
+      titulo: j.trabajoNombre || 'Labor de maquinaria',
+      maquinariaNombre: j.maquinariaNombre || 'Maquinaria',
+      destinoOCliente:
+        j.tipoTrabajo === 'propiedad'
+          ? (j.loteNombre ? `Lote: ${j.loteNombre}` : 'Lote propio')
+          : (j.cliente ? `Cliente: ${j.cliente}` : 'Cliente externo'),
+      cantidadTexto: `${j.cantidad} ${j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'h'}`,
+      total: j.total,
+      moneda: (j.moneda || 'BOB') as Currency,
+      tipoCambio: j.tipoCambio,
+      tarifaOPrecio: j.tarifa,
+      unidad: j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'hora',
+      observacion: j.observacion,
+      icono: j.icono || 'tractor',
+      rawJob: j,
+    })),
+    ...machineryExpenses.map((e) => ({
+      id: e.id,
+      kind: 'gasto' as const,
+      fecha: e.fecha,
+      titulo: e.itemGasto || 'Gasto',
+      maquinariaNombre: e.maquinariaNombre ? `Equipo: ${e.maquinariaNombre}` : 'Gasto general',
+      destinoOCliente: e.maquinariaNombre || 'General',
+      cantidadTexto: e.cantidad ? `${e.cantidad} ${e.unidad || ''}`.trim() : undefined,
+      total: e.total,
+      moneda: ((e.moneda as Currency) || 'BOB') as Currency,
+      tipoCambio: e.tipoCambio,
+      tarifaOPrecio: e.precio,
+      unidad: e.unidad,
+      observacion: e.observacion,
+      icono: e.icono || e.itemGasto || 'repuestos',
+      rawExpense: e,
+    })),
+  ].sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+
+  const filteredMachineryMovements = allMachineryMovements.filter((m) => {
+    // 1. Primary Filter: Todos, Servicios, Gastos
+    if (historialFilter === 'servicios' && m.kind !== 'servicio') return false;
+    if (historialFilter === 'gastos' && m.kind !== 'gasto') return false;
+
+    // 2. Sub-filter for Servicios
+    if (m.kind === 'servicio') {
+      if (serviciosSubFilter === 'terceros' && m.tipoTrabajo !== 'tercero') return false;
+      if (serviciosSubFilter === 'propiedad' && m.tipoTrabajo !== 'propiedad') return false;
+    }
+
+    // 3. Search Term
     if (!searchTerm) return true;
     const term = searchTerm.toLowerCase();
-    const formattedDate = formatDateDDMMAAAA(j.fecha).toLowerCase();
+    const formattedDate = formatDateDDMMAAAA(m.fecha).toLowerCase();
     return (
-      (j.maquinariaNombre && j.maquinariaNombre.toLowerCase().includes(term)) ||
-      (j.trabajoNombre && j.trabajoNombre.toLowerCase().includes(term)) ||
-      (j.cliente && j.cliente.toLowerCase().includes(term)) ||
-      (j.loteNombre && j.loteNombre.toLowerCase().includes(term)) ||
-      (j.observacion && j.observacion.toLowerCase().includes(term)) ||
+      m.titulo.toLowerCase().includes(term) ||
+      (m.maquinariaNombre && m.maquinariaNombre.toLowerCase().includes(term)) ||
+      (m.destinoOCliente && m.destinoOCliente.toLowerCase().includes(term)) ||
+      (m.observacion && m.observacion.toLowerCase().includes(term)) ||
       formattedDate.includes(term) ||
-      (j.fecha && j.fecha.includes(term))
+      (m.fecha && m.fecha.includes(term))
     );
   });
 
@@ -496,7 +563,7 @@ export const MachineryView: React.FC<Props> = ({
             <span>Volver</span>
           </button>
           <h2 className="text-base sm:text-lg font-bold text-slate-900 truncate">
-            {currentScreen === 'historial' && 'Movimientos de trabajos'}
+            {currentScreen === 'historial' && 'Movimientos'}
             {currentScreen === 'resumen' && 'Máquinas'}
             {currentScreen === 'gasto' && 'Registrar Gasto de Maquinaria'}
             {currentScreen === 'ingreso_opciones' && 'Tipo de Servicio'}
@@ -543,28 +610,28 @@ export const MachineryView: React.FC<Props> = ({
       {/* VISTA PRINCIPAL (MAIN): REGISTRAR Y CONSULTAR SEPARADOS       */}
       {/* ============================================================ */}
       {currentScreen === 'main' && (
-        <div className="space-y-6">
-          {/* SECCIÓN A: REGISTRAR */}
-          <div className="space-y-2.5">
-            <h2 className="text-xs font-bold tracking-wider text-slate-500 uppercase px-1">
-              Registrar nuevo movimiento
+        <div className="space-y-5">
+          {/* SECCIÓN A: REGISTRAR MOVIMIENTO */}
+          <div className="space-y-2">
+            <h2 className="text-[11px] font-bold tracking-wider text-slate-500 uppercase px-1">
+              REGISTRAR MOVIMIENTO
             </h2>
 
-            {/* Dos botones grandes: SERVICIO (verde) y GASTO (rojo) */}
+            {/* Dos botones compactos estilo iOS: SERVICIO (verde suave) y GASTO (rojo suave) */}
             <div className="grid grid-cols-2 gap-3 w-full">
               {/* Botón SERVICIO */}
               <button
                 type="button"
                 onClick={() => setCurrentScreen('ingreso_opciones')}
-                className="w-full min-h-[88px] sm:min-h-[96px] p-4 rounded-2xl bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 text-white shadow-sm flex flex-col items-center justify-center gap-1.5 transition active:scale-98 cursor-pointer select-none"
+                className="w-full min-h-[72px] sm:min-h-[76px] p-3 sm:p-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white shadow-xs border border-emerald-500/20 flex flex-col items-center justify-center gap-1 transition active:scale-[0.98] cursor-pointer select-none"
               >
-                <div className="flex items-center justify-center gap-2">
-                  <CirclePlus className="h-7 w-7 text-white shrink-0" />
-                  <span className="text-base sm:text-lg font-bold tracking-wide">
-                    SERVICIO
+                <div className="flex items-center justify-center gap-1.5">
+                  <CirclePlus className="h-5 w-5 text-emerald-100 shrink-0" />
+                  <span className="text-sm sm:text-base font-bold tracking-tight">
+                    Servicio
                   </span>
                 </div>
-                <span className="text-xs text-emerald-100 font-medium text-center">
+                <span className="text-[11px] sm:text-xs text-emerald-100/90 font-medium text-center truncate max-w-full px-1">
                   Servicio o labor
                 </span>
               </button>
@@ -573,80 +640,80 @@ export const MachineryView: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={() => setCurrentScreen('gasto')}
-                className="w-full min-h-[88px] sm:min-h-[96px] p-4 rounded-2xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white shadow-sm flex flex-col items-center justify-center gap-1.5 transition active:scale-98 cursor-pointer select-none"
+                className="w-full min-h-[72px] sm:min-h-[76px] p-3 sm:p-3.5 rounded-2xl bg-rose-500 hover:bg-rose-600 active:bg-rose-700 text-white shadow-xs border border-rose-400/20 flex flex-col items-center justify-center gap-1 transition active:scale-[0.98] cursor-pointer select-none"
               >
-                <div className="flex items-center justify-center gap-2">
-                  <CircleMinus className="h-7 w-7 text-white shrink-0" />
-                  <span className="text-base sm:text-lg font-bold tracking-wide">
-                    GASTO
+                <div className="flex items-center justify-center gap-1.5">
+                  <CircleMinus className="h-5 w-5 text-rose-100 shrink-0" />
+                  <span className="text-sm sm:text-base font-bold tracking-tight">
+                    Gasto
                   </span>
                 </div>
-                <span className="text-xs text-rose-100 font-medium text-center">
+                <span className="text-[11px] sm:text-xs text-rose-100/90 font-medium text-center truncate max-w-full px-1">
                   Combustible y repuestos
                 </span>
               </button>
             </div>
           </div>
 
-          {/* SECCIÓN B: CONSULTAR REGISTROS (1. Movimientos de trabajos, 2. Máquinas) */}
-          <div className="space-y-2.5">
-            <h2 className="text-xs font-bold tracking-wider text-slate-500 uppercase px-1">
-              Consultar registros
+          {/* SECCIÓN B: CONSULTAR REGISTROS (1. Movimientos, 2. Máquinas) */}
+          <div className="space-y-2">
+            <h2 className="text-[11px] font-bold tracking-wider text-slate-500 uppercase px-1">
+              CONSULTAR REGISTROS
             </h2>
 
-            <div className="space-y-3">
-              {/* Opción 1 (PRIMERA): Movimientos de trabajos */}
+            <div className="space-y-2.5">
+              {/* Opción 1: Movimientos */}
               <button
                 type="button"
                 onClick={() => setCurrentScreen('historial')}
-                className="w-full bg-white border border-slate-200/90 hover:border-emerald-500 rounded-2xl p-4 sm:p-5 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:scale-98 transition cursor-pointer text-left min-h-[76px]"
+                className="w-full bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl p-3.5 sm:p-4 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:scale-[0.99] transition cursor-pointer text-left min-h-[68px]"
               >
-                <div className="flex items-center gap-4 min-w-0">
-                  <div className="flex h-13 w-13 items-center justify-center rounded-2xl bg-emerald-100/80 text-emerald-800 shrink-0">
-                    <ClipboardList className="h-7 w-7" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug break-words">
-                        Movimientos de trabajos
-                      </h3>
-                      <span className="text-xs font-bold bg-emerald-100 text-emerald-800 px-2.5 py-0.5 rounded-full shrink-0">
-                        {jobs.length}
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      Consultar y editar registros de labores y servicios
-                    </p>
-                  </div>
-                </div>
-                <ChevronRight className="h-6 w-6 text-slate-400 shrink-0" />
-              </button>
-
-              {/* Opción 2 (SEGUNDA): Máquinas */}
-              <button
-                type="button"
-                onClick={() => setCurrentScreen('resumen')}
-                className="w-full bg-white border border-slate-200/90 hover:border-emerald-500 rounded-2xl p-4 sm:p-5 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:scale-98 transition cursor-pointer text-left min-h-[76px]"
-              >
-                <div className="flex items-center gap-4 min-w-0">
-                  <div className="flex h-13 w-13 items-center justify-center rounded-2xl bg-slate-100 text-slate-800 shrink-0">
-                    <Tractor className="h-7 w-7" />
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-100/80 shrink-0">
+                    <ClipboardList className="h-5 w-5" />
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug truncate">
+                      <h3 className="text-sm sm:text-base font-bold text-slate-900 leading-snug">
+                        Movimientos
+                      </h3>
+                      <span className="text-xs font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full shrink-0">
+                        {allMachineryMovements.length}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-0.5 truncate">
+                      Labores en propiedad, servicios y gastos
+                    </p>
+                  </div>
+                </div>
+                <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
+              </button>
+
+              {/* Opción 2: Máquinas */}
+              <button
+                type="button"
+                onClick={() => setCurrentScreen('resumen')}
+                className="w-full bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl p-3.5 sm:p-4 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:scale-[0.99] transition cursor-pointer text-left min-h-[68px]"
+              >
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100 text-slate-700 border border-slate-200/80 shrink-0">
+                    <Tractor className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm sm:text-base font-bold text-slate-900 leading-snug truncate">
                         Máquinas
                       </h3>
-                      <span className="text-xs font-bold bg-slate-200 text-slate-700 px-2.5 py-0.5 rounded-full shrink-0">
+                      <span className="text-xs font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full shrink-0">
                         {machines.length}
                       </span>
                     </div>
-                    <p className="text-xs text-slate-500 mt-0.5">
+                    <p className="text-xs text-slate-500 mt-0.5 truncate">
                       Horas, hectáreas y rendimiento por equipo
                     </p>
                   </div>
                 </div>
-                <ChevronRight className="h-6 w-6 text-slate-400 shrink-0" />
+                <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
               </button>
             </div>
           </div>
@@ -944,25 +1011,14 @@ export const MachineryView: React.FC<Props> = ({
             </div>
 
             <form onSubmit={(e) => handleJobSubmit(e, 'propiedad')} className="space-y-4">
-              {/* Lote (Obligatorio) */}
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Lote de Destino <span className="text-red-500">*</span>
-                </label>
-                <select
-                  required
-                  value={selectedLotId}
-                  onChange={(e) => setSelectedLotId(e.target.value)}
-                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-bold text-emerald-950 min-h-[44px]"
-                >
-                  <option value="">-- Seleccionar Lote Obligatorio --</option>
-                  {lots.map((l) => (
-                    <option key={l.id} value={l.id}>
-                      {l.nombre} ({l.superficieHectareas} ha &bull; {l.cultivoActual || 'Sin cultivo'})
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {/* Lote (Obligatorio) con selector visual estilo iOS */}
+              <VisualLotPicker
+                lots={lots}
+                selectedLotId={selectedLotId}
+                onSelect={(id) => setSelectedLotId(id)}
+                label="Lote de Destino"
+                required
+              />
 
               {/* Maquinaria con selector visual e icono */}
               <VisualMachinePicker
@@ -1359,187 +1415,312 @@ export const MachineryView: React.FC<Props> = ({
       )}
 
       {/* ============================================================ */}
-      {/* CONSULTA: MOVIMIENTOS DE TRABAJOS                           */}
+      {/* CONSULTA: MOVIMIENTOS (SERVICIOS Y GASTOS)                   */}
       {/* ============================================================ */}
       {currentScreen === 'historial' && (
         <div className="space-y-4">
-          <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200/90 shadow-xs space-y-4">
+          <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200/90 shadow-xs space-y-3.5">
             {/* Header info */}
             <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-3">
               <div>
                 <h3 className="text-base sm:text-lg font-bold text-slate-900">
-                  Movimientos de trabajos
+                  Movimientos
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Labores en propiedad y servicios a clientes externos ({filteredJobs.length} registros)
+                  Labores en propiedad, servicios y gastos ({filteredMachineryMovements.length} registros)
                 </p>
               </div>
+              <span className="text-xs font-bold text-slate-700 bg-slate-100 px-3 py-1.5 rounded-xl shrink-0">
+                {filteredMachineryMovements.length} registros
+              </span>
             </div>
 
-            {/* Filtros: Búsqueda y Pestañas de Tipo */}
+            {/* Filtros: Búsqueda y Pestañas Segmentadas iOS */}
             <div className="space-y-2.5">
               <div className="relative">
-                <Search className="absolute left-3.5 top-3 h-5 w-5 text-slate-400" />
+                <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
                 <input
                   type="text"
-                  placeholder="Buscar por equipo, cliente, lote o labor..."
+                  placeholder="Buscar por equipo, concepto, cliente o lote..."
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full text-sm pl-11 pr-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[46px]"
+                  className="w-full text-xs pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
                 />
               </div>
 
-              {/* Segmented Control iOS */}
+              {/* Filtro Principal Segmentado: Todos, Servicios, Gastos */}
               <div className="flex p-1 bg-slate-100 rounded-xl gap-1">
                 <button
                   type="button"
                   onClick={() => setHistorialFilter('todos')}
-                  className={`flex-1 min-h-[42px] text-xs sm:text-sm font-bold rounded-lg transition cursor-pointer text-center ${
+                  className={`flex-1 min-h-[38px] text-xs font-bold rounded-lg transition cursor-pointer text-center ${
                     historialFilter === 'todos'
-                      ? 'bg-white text-slate-900 shadow-sm'
+                      ? 'bg-white text-slate-900 shadow-2xs'
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  Todos ({jobs.length})
+                  Todos ({allMachineryMovements.length})
                 </button>
                 <button
                   type="button"
-                  onClick={() => setHistorialFilter('terceros')}
-                  className={`flex-1 min-h-[42px] text-xs sm:text-sm font-bold rounded-lg transition cursor-pointer text-center ${
-                    historialFilter === 'terceros'
-                      ? 'bg-white text-blue-800 shadow-sm'
+                  onClick={() => setHistorialFilter('servicios')}
+                  className={`flex-1 min-h-[38px] text-xs font-bold rounded-lg transition cursor-pointer text-center ${
+                    historialFilter === 'servicios'
+                      ? 'bg-white text-emerald-800 shadow-2xs'
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  Para otros ({externalJobs.length})
+                  Servicios ({jobs.length})
                 </button>
                 <button
                   type="button"
-                  onClick={() => setHistorialFilter('propiedad')}
-                  className={`flex-1 min-h-[42px] text-xs sm:text-sm font-bold rounded-lg transition cursor-pointer text-center ${
-                    historialFilter === 'propiedad'
-                      ? 'bg-white text-emerald-800 shadow-sm'
+                  onClick={() => setHistorialFilter('gastos')}
+                  className={`flex-1 min-h-[38px] text-xs font-bold rounded-lg transition cursor-pointer text-center ${
+                    historialFilter === 'gastos'
+                      ? 'bg-white text-rose-700 shadow-2xs'
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  En propiedad ({propertyJobs.length})
+                  Gastos ({machineryExpenses.length})
                 </button>
               </div>
+
+              {/* Sub-filtro de Servicios: Para otros vs En propiedad */}
+              {(historialFilter === 'servicios' || historialFilter === 'todos') && (
+                <div className="flex items-center gap-1.5 pt-1 overflow-x-auto pb-0.5">
+                  <span className="text-[11px] font-semibold text-slate-400 shrink-0 mr-1">Servicios:</span>
+                  <button
+                    type="button"
+                    onClick={() => setServiciosSubFilter('todos')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shrink-0 ${
+                      serviciosSubFilter === 'todos'
+                        ? 'bg-slate-800 text-white shadow-2xs'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    Todos ({jobs.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setServiciosSubFilter('terceros')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shrink-0 ${
+                      serviciosSubFilter === 'terceros'
+                        ? 'bg-blue-700 text-white shadow-2xs'
+                        : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200/60'
+                    }`}
+                  >
+                    Para otros ({externalJobs.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setServiciosSubFilter('propiedad')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shrink-0 ${
+                      serviciosSubFilter === 'propiedad'
+                        ? 'bg-emerald-700 text-white shadow-2xs'
+                        : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200/60'
+                    }`}
+                  >
+                    En propiedad ({propertyJobs.length})
+                  </button>
+                </div>
+              )}
             </div>
 
-            {/* Listado de Trabajos estilo iOS Card */}
-            <div className="space-y-3 pt-2">
-              {filteredJobs.map((j) => (
-                <div
-                  key={j.id}
-                  className="rounded-2xl border border-slate-200/90 bg-white p-4 sm:p-5 shadow-xs space-y-3 hover:border-slate-300 transition"
-                >
-                  {/* Fila superior: Fecha DD/MM/AAAA y Destino */}
-                  <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
-                    <div className="flex items-center gap-2">
-                      <Calendar className="h-4 w-4 text-slate-400" />
-                      <span className="text-sm font-bold text-slate-800 font-mono">
-                        {formatDateDDMMAAAA(j.fecha)}
-                      </span>
-                    </div>
-                    <span
-                      className={`text-xs font-bold px-3 py-1 rounded-full ${
-                        j.tipoTrabajo === 'propiedad'
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : 'bg-blue-100 text-blue-800'
-                      }`}
-                    >
-                      {j.tipoTrabajo === 'propiedad' ? 'En propiedad' : 'Para otros'}
-                    </span>
-                  </div>
+            {/* Listado Compacto de Movimientos estilo iOS Card */}
+            <div className="space-y-2.5 pt-1">
+              {filteredMachineryMovements.map((m) => {
+                const isExpanded = expandedMovementId === m.id;
 
-                  {/* Nombre de la máquina y Cliente/Lote */}
-                  <div>
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2.5">
-                        <div className="w-10 h-10 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-center shrink-0 shadow-2xs">
-                          <VisualIcon name={j.icono || 'tractor'} size="md" />
+                return (
+                  <div
+                    key={`${m.kind}-${m.id}`}
+                    className={`rounded-2xl border transition overflow-hidden ${
+                      isExpanded
+                        ? 'border-slate-300 bg-slate-50/70 shadow-xs'
+                        : 'border-slate-200/90 bg-white hover:border-slate-300 shadow-2xs'
+                    }`}
+                  >
+                    {/* Fila compacta clicable */}
+                    <button
+                      type="button"
+                      onClick={() => setExpandedMovementId(isExpanded ? null : m.id)}
+                      className="w-full p-3 sm:p-3.5 flex items-center justify-between gap-3 text-left transition cursor-pointer select-none"
+                    >
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <div
+                          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-2xs border ${
+                            m.kind === 'servicio'
+                              ? m.tipoTrabajo === 'propiedad'
+                                ? 'bg-emerald-50 border-emerald-200/80'
+                                : 'bg-blue-50 border-blue-200/80'
+                              : 'bg-rose-50 border-rose-200/80'
+                          }`}
+                        >
+                          <VisualIcon
+                            name={m.icono || (m.kind === 'servicio' ? 'tractor' : 'repuestos')}
+                            size="sm"
+                          />
                         </div>
-                        <h4 className="text-base sm:text-lg font-bold text-slate-900">
-                          {j.maquinariaNombre || 'Maquinaria'}
-                        </h4>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <h4 className="text-sm font-bold text-slate-900 truncate">
+                              {m.titulo}
+                            </h4>
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-md shrink-0 ${
+                                m.kind === 'servicio'
+                                  ? m.tipoTrabajo === 'propiedad'
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : 'bg-blue-100 text-blue-800'
+                                  : 'bg-rose-100 text-rose-800'
+                              }`}
+                            >
+                              {m.kind === 'servicio'
+                                ? m.tipoTrabajo === 'propiedad'
+                                  ? 'En propiedad'
+                                  : 'Para otros'
+                                : 'Gasto Maq.'}
+                            </span>
+                          </div>
+
+                          <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                            <span className="font-semibold text-slate-600">
+                              {formatDateDDMMAAAA(m.fecha)}
+                            </span>
+                            <span className="mx-1.5 text-slate-300">·</span>
+                            <span>{m.maquinariaNombre}</span>
+                            <span className="mx-1.5 text-slate-300">·</span>
+                            <span
+                              className={
+                                m.tipoTrabajo === 'propiedad'
+                                  ? 'text-emerald-800 font-semibold'
+                                  : 'text-slate-600'
+                              }
+                            >
+                              {m.destinoOCliente}
+                            </span>
+                            {m.cantidadTexto && (
+                              <>
+                                <span className="mx-1.5 text-slate-300">·</span>
+                                <span className="font-semibold text-slate-700">
+                                  {m.cantidadTexto}
+                                </span>
+                              </>
+                            )}
+                          </p>
+                        </div>
                       </div>
-                      {j.trabajoNombre && (
-                        <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-900 border border-emerald-300 flex items-center gap-1.5">
-                          <VisualIcon name={j.trabajoNombre} size="xs" />
-                          <span>{j.trabajoNombre}</span>
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-sm text-slate-600 mt-1.5">
-                      {j.tipoTrabajo === 'propiedad' ? (
-                        <span>Lote: <strong className="text-emerald-950 font-semibold">{j.loteNombre || 'Lote Propio'}</strong></span>
-                      ) : (
-                        <span>Cliente: <strong className="text-blue-950 font-semibold">{j.cliente || 'Externo'}</strong></span>
-                      )}
-                    </p>
-                  </div>
 
-                  {/* Cantidad trabajada e Importe */}
-                  <div className="grid grid-cols-2 gap-2.5 bg-slate-50 p-3 rounded-xl border border-slate-200/60">
-                    <div>
-                      <span className="text-xs text-slate-500 block font-medium">Trabajo</span>
-                      <span className="text-sm sm:text-base font-bold text-slate-900 font-mono">
-                        {j.cantidad} {j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'horas'}
-                      </span>
-                      {j.tarifa ? (
-                        <span className="text-[11px] text-slate-500 block font-medium">
-                          Tarifa: {j.moneda === 'USD' ? 'USD' : 'Bs'} {j.tarifa}/{j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'hora'}
-                        </span>
-                      ) : null}
-                    </div>
-                    <div>
-                      <span className="text-xs text-slate-500 block font-medium">Importe</span>
-                      <span className="text-sm sm:text-base font-bold text-emerald-800 font-mono block">
-                        {j.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
-                        {j.total.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </span>
-                      {j.tipoCambio && j.tipoCambio > 0 && (
-                        <span className="text-[11px] text-slate-400 block font-medium">
-                          {j.moneda === 'USD'
-                            ? `equiv. Bs ${(j.total * j.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${j.tipoCambio})`
-                            : `equiv. USD ${(j.total / j.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${j.tipoCambio})`}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {j.observacion && (
-                    <p className="text-xs text-slate-600 italic bg-amber-50/50 p-2.5 rounded-xl border border-amber-200/40">
-                      {j.observacion}
-                    </p>
-                  )}
-
-                  {/* Botones Grandes de Editar y Eliminar */}
-                  <div className="flex items-center gap-2.5 pt-2 border-t border-slate-100">
-                    <button
-                      type="button"
-                      onClick={() => handleOpenEditJob(j)}
-                      className="flex-1 min-h-[46px] flex items-center justify-center gap-2 rounded-xl bg-slate-100 hover:bg-slate-200 active:bg-slate-300 text-slate-800 font-bold text-sm transition active:scale-98 cursor-pointer"
-                    >
-                      <Edit3 className="h-4 w-4 text-slate-700" />
-                      <span>Editar</span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <div className="text-right">
+                          <span
+                            className={`text-sm sm:text-base font-bold font-mono block ${
+                              m.kind === 'servicio' ? 'text-emerald-800' : 'text-rose-700'
+                            }`}
+                          >
+                            {m.kind === 'servicio' ? '+ ' : '- '}
+                            {m.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                            {m.total.toLocaleString('es-BO', {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}
+                          </span>
+                        </div>
+                        <div className="text-slate-400">
+                          {isExpanded ? (
+                            <ChevronUp className="h-4 w-4" />
+                          ) : (
+                            <ChevronDown className="h-4 w-4" />
+                          )}
+                        </div>
+                      </div>
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setJobToDelete(j)}
-                      className="flex-1 min-h-[46px] flex items-center justify-center gap-2 rounded-xl bg-rose-50 hover:bg-rose-100 active:bg-rose-200 text-rose-700 font-bold text-sm border border-rose-200 transition active:scale-98 cursor-pointer"
-                    >
-                      <Trash2 className="h-4 w-4 text-rose-600" />
-                      <span>Eliminar</span>
-                    </button>
-                  </div>
-                </div>
-              ))}
 
-              {filteredJobs.length === 0 && (
-                <div className="py-12 text-center text-sm text-slate-400 bg-slate-50 rounded-2xl border border-slate-200/60">
-                  No se encontraron registros de trabajos con los filtros seleccionados.
+                    {/* Detalle desplegable con tarifa, observaciones y acciones */}
+                    {isExpanded && (
+                      <div className="px-3 pb-3 pt-1 border-t border-slate-100 space-y-2.5 animate-fadeIn">
+                        <div className="grid grid-cols-2 gap-2 text-xs bg-white p-2.5 rounded-xl border border-slate-200/70">
+                          <div>
+                            <span className="text-[11px] text-slate-400 block font-medium">
+                              Tarifa / Precio:
+                            </span>
+                            <span className="font-bold text-slate-800">
+                              {m.tarifaOPrecio !== undefined
+                                ? `${m.moneda === 'USD' ? 'USD' : 'Bs'} ${m.tarifaOPrecio} / ${m.unidad || 'unidad'}`
+                                : '—'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-[11px] text-slate-400 block font-medium">
+                              Equivalencia:
+                            </span>
+                            <span className="font-bold text-slate-700 font-mono">
+                              {m.tipoCambio && m.tipoCambio > 0 ? (
+                                m.moneda === 'USD'
+                                  ? `Bs ${(m.total * m.tipoCambio).toLocaleString('es-BO', {
+                                      minimumFractionDigits: 2,
+                                      maximumFractionDigits: 2,
+                                    })} (TC: ${m.tipoCambio})`
+                                  : `USD ${(m.total / m.tipoCambio).toLocaleString('es-BO', {
+                                      minimumFractionDigits: 2,
+                                      maximumFractionDigits: 2,
+                                    })} (TC: ${m.tipoCambio})`
+                              ) : (
+                                '—'
+                              )}
+                            </span>
+                          </div>
+                        </div>
+
+                        {m.observacion && (
+                          <p className="text-xs text-slate-600 italic bg-amber-50/60 p-2.5 rounded-xl border border-amber-200/60 break-words">
+                            {m.observacion}
+                          </p>
+                        )}
+
+                        {/* Botones de acción dentro del detalle */}
+                        <div className="flex items-center gap-2 pt-1">
+                          {m.kind === 'servicio' && m.rawJob && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenEditJob(m.rawJob!)}
+                                className="flex-1 py-2 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer min-h-[38px]"
+                              >
+                                <Edit3 className="h-3.5 w-3.5 text-slate-600" />
+                                <span>Editar</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setJobToDelete(m.rawJob!)}
+                                className="flex-1 py-2 px-3 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer border border-rose-200 min-h-[38px]"
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                                <span>Eliminar</span>
+                              </button>
+                            </>
+                          )}
+                          {m.kind === 'gasto' && m.rawExpense && (
+                            <button
+                              type="button"
+                              onClick={() => setExpenseToDelete(m.rawExpense!)}
+                              className="w-full py-2 px-3 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer border border-rose-200 min-h-[38px]"
+                            >
+                              <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                              <span>Eliminar Gasto</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {filteredMachineryMovements.length === 0 && (
+                <div className="py-12 text-center text-xs text-slate-400 bg-slate-50 rounded-2xl border border-slate-200/60">
+                  No se encontraron movimientos registrados con los filtros seleccionados.
                 </div>
               )}
             </div>
@@ -1827,24 +2008,13 @@ export const MachineryView: React.FC<Props> = ({
                   />
                 </div>
               ) : (
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Lote Propio <span className="text-red-500">*</span>
-                  </label>
-                  <select
-                    required
-                    value={editLotId}
-                    onChange={(e) => setEditLotId(e.target.value)}
-                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-bold text-emerald-950 min-h-[46px]"
-                  >
-                    <option value="">-- Seleccionar Lote --</option>
-                    {lots.map((l) => (
-                      <option key={l.id} value={l.id}>
-                        {l.nombre} ({l.superficieHectareas} ha)
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <VisualLotPicker
+                  lots={lots}
+                  selectedLotId={editLotId}
+                  onSelect={(id) => setEditLotId(id)}
+                  label="Lote Propio"
+                  required
+                />
               )}
 
               {/* Cantidad y Unidad */}
@@ -2003,6 +2173,78 @@ export const MachineryView: React.FC<Props> = ({
                 className="flex-1 min-h-[48px] rounded-xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold text-sm transition disabled:opacity-50 cursor-pointer"
               >
                 {deletingJob ? 'Eliminando...' : 'Confirmar Eliminación'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* MODAL: CONFIRMAR ELIMINACIÓN DE GASTO DE MAQUINARIA          */}
+      {/* ============================================================ */}
+      {expenseToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs">
+          <div className="bg-white w-full max-w-sm rounded-3xl shadow-xl border border-slate-200 p-5 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3 text-rose-600">
+              <div className="p-3 rounded-2xl bg-rose-100">
+                <Trash2 className="h-6 w-6 text-rose-600" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  ¿Eliminar este gasto?
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Esta acción es definitiva en Google Sheets
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80 text-xs sm:text-sm space-y-1.5">
+              <p>
+                <strong className="text-slate-700">Concepto:</strong> {expenseToDelete.itemGasto}
+              </p>
+              <p>
+                <strong className="text-slate-700">Fecha:</strong> {formatDateDDMMAAAA(expenseToDelete.fecha)}
+              </p>
+              {expenseToDelete.maquinariaNombre && (
+                <p>
+                  <strong className="text-slate-700">Equipo:</strong> {expenseToDelete.maquinariaNombre}
+                </p>
+              )}
+              <p>
+                <strong className="text-slate-700">Monto:</strong> {expenseToDelete.moneda}{' '}
+                {expenseToDelete.total.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3 pt-1">
+              <button
+                type="button"
+                disabled={deletingExpense}
+                onClick={() => setExpenseToDelete(null)}
+                className="flex-1 min-h-[44px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs transition cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={deletingExpense}
+                onClick={async () => {
+                  setDeletingExpense(true);
+                  try {
+                    await deleteExpense(expenseToDelete.id);
+                    setSuccessMsg('Gasto de maquinaria eliminado exitosamente.');
+                    setExpenseToDelete(null);
+                    onRefreshData();
+                  } catch (err: unknown) {
+                    setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar');
+                  } finally {
+                    setDeletingExpense(false);
+                  }
+                }}
+                className="flex-1 min-h-[44px] rounded-xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold text-xs transition disabled:opacity-50 cursor-pointer"
+              >
+                {deletingExpense ? 'Eliminando...' : 'Eliminar Gasto'}
               </button>
             </div>
           </div>

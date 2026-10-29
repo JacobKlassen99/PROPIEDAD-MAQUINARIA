@@ -64,6 +64,9 @@ import {
   saveItemConfig,
   revokeAdminAuthorization,
   getAdminToken,
+  hasAdminAuthorization,
+  authorizeAdminDevice,
+  verifyAdminAuthorization,
   isAdminAuthorizationVerifiedInSession,
   changeSystemPassword,
 } from '../services/backend';
@@ -243,9 +246,7 @@ export const AdminView: React.FC<Props> = ({
   onRefreshData,
   onRevokeAuthorization,
 }) => {
-  const alreadyVerified = isAdminAuthorizationVerifiedInSession();
-  const [isAuthorized, setIsAuthorized] = useState<boolean>(alreadyVerified);
-  const [verifyingAuth, setVerifyingAuth] = useState<boolean>(() => !alreadyVerified && !!getAdminToken());
+  const [isAuthorized, setIsAuthorized] = useState<boolean>(() => hasAdminAuthorization());
   const [adminPasswordInput, setAdminPasswordInput] = useState('');
   const [showAdminPassword, setShowAdminPassword] = useState(false);
   const [authorizing, setAuthorizing] = useState(false);
@@ -253,33 +254,18 @@ export const AdminView: React.FC<Props> = ({
   const [revoking, setRevoking] = useState(false);
   const [showRevokeAdminModal, setShowRevokeAdminModal] = useState(false);
 
-  // Strict server verification on mount
   useEffect(() => {
-    let isMounted = true;
-    const token = getAdminToken();
-
-    if (!token) {
-      if (isMounted) {
-        setIsAuthorized(false);
-        setVerifyingAuth(false);
-      }
-      return;
+    if (hasAdminAuthorization()) {
+      verifyAdminAuthorization()
+        .then((valid) => {
+          setIsAuthorized(valid);
+        })
+        .catch(() => {
+          setIsAuthorized(false);
+        });
+    } else {
+      setIsAuthorized(false);
     }
-
-    if (isAdminAuthorizationVerifiedInSession()) {
-      if (isMounted) {
-        setIsAuthorized(true);
-        setVerifyingAuth(false);
-      }
-      return;
-    }
-
-    setIsAuthorized(true);
-    setVerifyingAuth(false);
-
-    return () => {
-      isMounted = false;
-    };
   }, []);
 
   const handleRevokeDevice = async () => {

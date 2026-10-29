@@ -37,9 +37,9 @@ const CACHE_TTL_MS = 30 * 1000; // 30 seconds
 // Session state (Token only, never store passwords or PINs)
 let activeSession: UserSession | null = null;
 
-// Try to restore session from sessionStorage (only token and public profile)
+// Restore session from localStorage (with fallback to sessionStorage for backwards compatibility)
 try {
-  const saved = sessionStorage.getItem('myp_session');
+  const saved = localStorage.getItem('myp_session') || sessionStorage.getItem('myp_session');
   if (saved) {
     activeSession = JSON.parse(saved);
   }
@@ -67,18 +67,13 @@ export function getAdminToken(): string | null {
   }
 }
 
-let verifiedAdminTokenInSession: string | null = null;
-
 export function isAdminAuthorizationVerifiedInSession(): boolean {
-  const currentToken = getAdminToken();
-  return !!currentToken && verifiedAdminTokenInSession === currentToken;
+  // Dispositivo previamente autorizado como Administrador
+  return !!getAdminToken();
 }
 
 export function setAdminToken(token: string | null): void {
   inMemoryAdminToken = token;
-  if (!token) {
-    verifiedAdminTokenInSession = null;
-  }
   try {
     if (token) {
       localStorage.setItem(ADMIN_TOKEN_KEY, token);
@@ -187,9 +182,19 @@ export function onSessionChange(listener: SessionChangeListener): () => void {
 export function setActiveSession(session: UserSession | null) {
   activeSession = session;
   if (session) {
-    sessionStorage.setItem('myp_session', JSON.stringify(session));
+    try {
+      localStorage.setItem('myp_session', JSON.stringify(session));
+      sessionStorage.setItem('myp_session', JSON.stringify(session));
+    } catch {
+      // Ignore storage quota or security policy error
+    }
   } else {
-    sessionStorage.removeItem('myp_session');
+    try {
+      localStorage.removeItem('myp_session');
+      sessionStorage.removeItem('myp_session');
+    } catch {
+      // Ignore error
+    }
     clearMemoryCache();
   }
   sessionListeners.forEach((listener) => {
@@ -434,37 +439,36 @@ export async function authorizeAdminDevice(password: string): Promise<{ tokenAdm
   return { tokenAdmin };
 }
 
-/**
- * Verificar si el tokenAdmin guardado en este dispositivo sigue siendo válido en Google Apps Script
- */
 export async function verifyAdminAuthorization(): Promise<boolean> {
   const currentToken = getAdminToken();
   if (!currentToken) {
-    verifiedAdminTokenInSession = null;
     return false;
   }
-
-  if (verifiedAdminTokenInSession === currentToken) {
-    return true;
-  }
-
   try {
-    const res = await callGAS<{ valid: boolean; ok?: boolean }>(
-      'auth.admin.verify',
-      { tokenAdmin: currentToken, token: currentToken },
-      false
-    );
-    if (res?.valid === false || res?.ok === false) {
+    const res = await callGAS<{ valid?: boolean; ok?: boolean }>('auth.admin.verify', {
+      tokenAdmin: currentToken,
+      token: currentToken,
+    });
+    if (res && (res.valid === true || res.ok === true)) {
+      return true;
+    }
+    setAdminToken(null);
+    return false;
+  } catch (err: unknown) {
+    const msg = String(err instanceof Error ? err.message : '').toLowerCase();
+    if (
+      msg.includes('credencial') ||
+      msg.includes('autorización') ||
+      msg.includes('autorizacion') ||
+      msg.includes('token') ||
+      msg.includes('revocad') ||
+      msg.includes('vencid') ||
+      msg.includes('no válida') ||
+      msg.includes('no valida')
+    ) {
       setAdminToken(null);
-      verifiedAdminTokenInSession = null;
       return false;
     }
-    verifiedAdminTokenInSession = currentToken;
-    return true;
-  } catch {
-    // Si falla la comunicación con el servidor, no conceder acceso administrativo
-    setAdminToken(null);
-    verifiedAdminTokenInSession = null;
     return false;
   }
 }
