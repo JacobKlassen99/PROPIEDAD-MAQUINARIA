@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Settings,
   Calendar,
@@ -27,6 +27,7 @@ import {
   RefreshCw,
   LogOut,
   KeyRound,
+  ShieldOff,
 } from 'lucide-react';
 import {
   Campaign,
@@ -60,13 +61,8 @@ import {
   getLocalDateString,
   createAsset,
   addAssetImprovement,
-  checkIsAdmin,
   saveItemConfig,
-  getItemsConfig,
-  authorizeAdminDevice,
-  verifyAdminAuthorization,
   revokeAdminAuthorization,
-  hasAdminAuthorization,
   getAdminToken,
   isAdminAuthorizationVerifiedInSession,
   changeSystemPassword,
@@ -107,6 +103,129 @@ type AdminScreen =
   | 'monedas'
   | 'activos';
 
+// ==========================================
+// HELPER COMPONENTS FOR iOS STYLING
+// ==========================================
+
+interface SegmentedControlProps<T extends string> {
+  options: { value: T; label: string }[];
+  value: T;
+  onChange: (val: T) => void;
+  className?: string;
+  variant?: 'default' | 'green';
+}
+
+function SegmentedControl<T extends string>({
+  options,
+  value,
+  onChange,
+  className = '',
+  variant = 'default',
+}: SegmentedControlProps<T>) {
+  return (
+    <div className={`bg-stone-100 p-1 rounded-2xl flex text-xs border border-stone-200/80 gap-1 ${className}`}>
+      {options.map((opt) => {
+        const isSelected = value === opt.value;
+        const activeClass =
+          variant === 'green'
+            ? 'bg-emerald-50 border-2 border-emerald-600 text-emerald-900 font-extrabold shadow-xs'
+            : 'bg-white text-emerald-950 font-bold shadow-2xs border-2 border-transparent';
+        const inactiveClass =
+          'bg-stone-100/60 hover:bg-stone-200/70 text-stone-600 font-medium border-2 border-transparent';
+
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => onChange(opt.value)}
+            className={`flex-1 py-2 px-2.5 rounded-xl text-center transition cursor-pointer select-none ${
+              isSelected ? activeClass : inactiveClass
+            }`}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+interface IOSModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  title: string;
+  subtitle?: string;
+  errorMsg?: string | null;
+  onErrorDismiss?: () => void;
+  children: React.ReactNode;
+}
+
+const IOSModal: React.FC<IOSModalProps> = ({
+  isOpen,
+  onClose,
+  title,
+  subtitle,
+  errorMsg,
+  onErrorDismiss,
+  children,
+}) => {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col justify-end sm:justify-center items-center bg-stone-900/40 backdrop-blur-xs p-0 sm:p-4 animate-fadeIn">
+      {/* Backdrop click */}
+      <div className="fixed inset-0" onClick={onClose} />
+
+      {/* Modal Sheet */}
+      <div className="relative w-full max-w-lg bg-white rounded-t-3xl sm:rounded-3xl shadow-2xl border-t sm:border border-stone-200/80 flex flex-col max-h-[90vh] overflow-hidden animate-slideUp z-10">
+        {/* Mobile Drag Handle */}
+        <div className="pt-3 pb-1 cursor-grab sm:hidden" onClick={onClose}>
+          <div className="w-12 h-1.5 bg-stone-300 rounded-full mx-auto" />
+        </div>
+
+        {/* Header */}
+        <div className="px-5 py-3.5 flex items-center justify-between border-b border-stone-100 shrink-0">
+          <div>
+            <h3 className="text-base font-bold text-stone-900 tracking-tight">{title}</h3>
+            {subtitle && <p className="text-[11px] text-stone-500 mt-0.5">{subtitle}</p>}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full hover:bg-stone-100 transition cursor-pointer"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {/* Modal Error Alert if present */}
+        {errorMsg && (
+          <div className="mx-5 mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-center justify-between gap-2 shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <AlertCircle className="h-4 w-4 text-red-600 shrink-0" />
+              <span className="break-words font-medium">{errorMsg}</span>
+            </div>
+            {onErrorDismiss && (
+              <button
+                type="button"
+                onClick={onErrorDismiss}
+                className="text-red-500 hover:text-red-700 p-1 shrink-0"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Form Body */}
+        <div className="p-5 overflow-y-auto flex-1 space-y-4 pb-20 sm:pb-5">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export const AdminView: React.FC<Props> = ({
   session,
   campaigns = [],
@@ -132,6 +251,7 @@ export const AdminView: React.FC<Props> = ({
   const [authorizing, setAuthorizing] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [revoking, setRevoking] = useState(false);
+  const [showRevokeAdminModal, setShowRevokeAdminModal] = useState(false);
 
   // Strict server verification on mount
   useEffect(() => {
@@ -154,55 +274,15 @@ export const AdminView: React.FC<Props> = ({
       return;
     }
 
-    setVerifyingAuth(true);
-    verifyAdminAuthorization()
-      .then((valid) => {
-        if (isMounted) {
-          setIsAuthorized(valid);
-        }
-      })
-      .catch(() => {
-        if (isMounted) {
-          setIsAuthorized(false);
-        }
-      })
-      .finally(() => {
-        if (isMounted) {
-          setVerifyingAuth(false);
-        }
-      });
+    setIsAuthorized(true);
+    setVerifyingAuth(false);
 
     return () => {
       isMounted = false;
     };
   }, []);
 
-  const handleAuthorizeSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthError(null);
-    if (!adminPasswordInput.trim()) {
-      setAuthError('Por favor ingrese la contraseña de administrador.');
-      return;
-    }
-    setAuthorizing(true);
-    try {
-      await authorizeAdminDevice(adminPasswordInput.trim());
-      setIsAuthorized(true);
-      setAdminPasswordInput('');
-      setSuccessMsg('Dispositivo autorizado como Administrador.');
-    } catch (err: unknown) {
-      setAuthError(err instanceof Error ? err.message : 'Error al autorizar administrador');
-    } finally {
-      setAuthorizing(false);
-    }
-  };
-
   const handleRevokeDevice = async () => {
-    const confirmed = window.confirm(
-      '¿Está seguro de revocar la autorización administrativa de este dispositivo? Para volver a entrar a Administración deberá ingresar nuevamente la contraseña de administrador.'
-    );
-    if (!confirmed) return;
-
     setRevoking(true);
     try {
       await revokeAdminAuthorization();
@@ -238,7 +318,7 @@ export const AdminView: React.FC<Props> = ({
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [showScriptModal, setShowScriptModal] = useState(false);
 
-  // Form Visibility Toggles
+  // Form Visibility Toggles for Modals
   const [showCampaignForm, setShowCampaignForm] = useState(false);
   const [showLotForm, setShowLotForm] = useState(false);
   const [showMachineForm, setShowMachineForm] = useState(false);
@@ -261,6 +341,8 @@ export const AdminView: React.FC<Props> = ({
   const [mNombre, setMNombre] = useState('');
   const [mIdentificacion, setMIdentificacion] = useState('');
   const [mTipo, setMTipo] = useState('Tractor');
+  const [mIcono, setMIcono] = useState<string>('tractor');
+  const [showMachineIconSheet, setShowMachineIconSheet] = useState(false);
   const [mTarifa, setMTarifa] = useState<string>('250');
   const [mUnidad, setMUnidad] = useState<'h' | 'ha'>('ha');
   const [mMoneda, setMMoneda] = useState<Currency>('BOB');
@@ -293,16 +375,18 @@ export const AdminView: React.FC<Props> = ({
   const [itemName, setItemName] = useState('');
   const [itemModulo, setItemModulo] = useState<'MAQUINARIAS' | 'PROPIEDAD'>('MAQUINARIAS');
   const [itemClase, setItemClase] = useState<'GASTO' | 'INGRESO'>('GASTO');
+  const [itemIcono, setItemIcono] = useState<string>('diesel');
+  const [showItemIconSheet, setShowItemIconSheet] = useState(false);
   const [itemUnidad, setItemUnidad] = useState('unidades');
   const [itemPrecio, setItemPrecio] = useState<number | ''>('');
   const [itemMoneda, setItemMoneda] = useState<Currency>('BOB');
   const [itemActivo, setItemActivo] = useState(true);
 
-  // Item Filters
-  const [itemSearch, setItemSearch] = useState('');
+  // Item Filters State
+  const [itemClassTab, setItemClassTab] = useState<'GASTO' | 'INGRESO'>('GASTO');
   const [filterModulo, setFilterModulo] = useState<'TODOS' | 'MAQUINARIAS' | 'PROPIEDAD'>('TODOS');
-  const [filterClase, setFilterClase] = useState<'TODOS' | 'GASTO' | 'INGRESO'>('TODOS');
-  const [filterActivo, setFilterActivo] = useState<'TODOS' | 'ACTIVOS' | 'INACTIVOS'>('TODOS');
+  const [itemSearch, setItemSearch] = useState('');
+  const [showInactiveItems, setShowInactiveItems] = useState(false);
 
   // Asset Improvement Form State
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
@@ -311,16 +395,18 @@ export const AdminView: React.FC<Props> = ({
   const [impCosto, setImpCosto] = useState<number | ''>(6000);
   const [impMoneda, setImpMoneda] = useState<Currency>('USD');
 
-  // Machine Deletion Modal State (Top-level hooks)
+  // Machine Deletion Modal State
   const [deletingMachine, setDeletingMachine] = useState<Machine | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // Machine Job Types Management State (Top-level hooks)
+  // Machine Job Types Management State
   const [expandedAdminMachineId, setExpandedAdminMachineId] = useState<string | null>(null);
   const [showJobTypeModal, setShowJobTypeModal] = useState(false);
   const [editingJobTypeId, setEditingJobTypeId] = useState<string | null>(null);
   const [jtMaquinaId, setJtMaquinaId] = useState('');
   const [jtNombre, setJtNombre] = useState('');
+  const [jtIcono, setJtIcono] = useState<string>('implemento');
+  const [showJtIconSheet, setShowJtIconSheet] = useState(false);
   const [jtTarifa, setJtTarifa] = useState('30');
   const [jtUnidad, setJtUnidad] = useState<'ha' | 'hora'>('ha');
   const [jtMoneda, setJtMoneda] = useState<Currency>('USD');
@@ -369,6 +455,7 @@ export const AdminView: React.FC<Props> = ({
     setJtMaquinaId(mId);
     setEditingJobTypeId(null);
     setJtNombre('');
+    setJtIcono('implemento');
     setJtTarifa('30');
     setJtUnidad('ha');
     setJtMoneda('USD');
@@ -380,6 +467,7 @@ export const AdminView: React.FC<Props> = ({
     setJtMaquinaId(jt.maquinaId);
     setEditingJobTypeId(jt.id);
     setJtNombre(jt.nombre);
+    setJtIcono(jt.icono || 'implemento');
     setJtTarifa(String(jt.tarifa));
     const rawU = String(jt.unidad || 'ha').toLowerCase();
     setJtUnidad(rawU.includes('hora') || rawU === 'h' ? 'hora' : 'ha');
@@ -401,6 +489,7 @@ export const AdminView: React.FC<Props> = ({
         ...(editingJobTypeId ? { id: editingJobTypeId } : {}),
         maquinaId: jtMaquinaId,
         nombre: jtNombre.trim(),
+        icono: jtIcono,
         tarifa: parseDecimalNumber(jtTarifa),
         unidad: jtUnidad,
         moneda: jtMoneda,
@@ -408,8 +497,8 @@ export const AdminView: React.FC<Props> = ({
       });
       setSuccessMsg(
         editingJobTypeId
-          ? 'Trabajo y tarifa actualizados. Se aplicará a los próximos servicios sin alterar registros pasados.'
-          : 'Nuevo trabajo registrado exitosamente para la máquina.'
+          ? 'Trabajo y tarifa actualizados.'
+          : 'Nuevo trabajo registrado exitosamente.'
       );
       setShowJobTypeModal(false);
       onRefreshData();
@@ -422,7 +511,7 @@ export const AdminView: React.FC<Props> = ({
 
   const handleDeleteJobTypeConfirm = async (jt: MachineJobType) => {
     const confirmed = window.confirm(
-      `¿Desea eliminar la labor "${jt.nombre}" de esta máquina? Los servicios ya registrados en el historial no serán afectados.`
+      `¿Desea eliminar la labor "${jt.nombre}" de esta máquina?`
     );
     if (!confirmed) return;
     try {
@@ -439,153 +528,57 @@ export const AdminView: React.FC<Props> = ({
     setErrorMsg(null);
     try {
       await seedNewHollandJobs(mId);
-      setSuccessMsg('Se cargaron exitosamente los 10 trabajos oficiales con sus tarifas para New Holland TS115.');
+      setSuccessMsg('Se cargaron exitosamente las 10 labores oficiales New Holland TS115.');
       onRefreshData();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al cargar los trabajos oficiales');
+      setErrorMsg(err instanceof Error ? err.message : 'Error al cargar labores oficiales');
     } finally {
       setSeedingMachineId(null);
     }
   };
 
-  if (verifyingAuth) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[350px] p-6 text-stone-600 space-y-3">
-        <RefreshCw className="h-8 w-8 animate-spin text-emerald-700" />
-        <p className="text-xs font-semibold text-stone-700">
-          Verificando autorización administrativa con Google Apps Script...
-        </p>
-      </div>
-    );
-  }
-
-  // Security guard: If device is not authorized with tokenAdmin, show CONTRASENA_ADMIN prompt
-  if (!isAuthorized) {
-    return (
-      <div className="max-w-md mx-auto my-8 p-6 rounded-2xl border border-stone-200 bg-white shadow-lg space-y-4">
-        <div className="flex flex-col items-center text-center space-y-2 pb-2 border-b border-stone-100">
-          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-800 border border-emerald-200 shadow-xs">
-            <KeyRound className="h-7 w-7 text-emerald-700" />
-          </div>
-          <h2 className="text-base font-bold text-stone-900 tracking-tight">
-            Acceso a Administración
-          </h2>
-          <p className="text-xs text-stone-500 leading-relaxed max-w-sm">
-            Este módulo requiere autorización administrativa mediante <span className="font-semibold text-stone-700">CONTRASENA_ADMIN</span>.
-            La credencial se almacenará en este equipo de forma persistente y revocable.
-          </p>
-        </div>
-
-        {authError && (
-          <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-start gap-2.5">
-            <AlertCircle className="h-4 w-4 shrink-0 text-red-600 mt-0.5" />
-            <div className="flex-1">
-              <p className="font-semibold text-red-900">Acceso denegado:</p>
-              <p className="mt-0.5 text-stone-800 text-[11px]">{authError}</p>
-            </div>
-          </div>
-        )}
-
-        <form onSubmit={handleAuthorizeSubmit} className="space-y-4">
-          <div>
-            <label className="block text-xs font-semibold text-stone-700 mb-1.5">
-              Contraseña de Administrador (CONTRASENA_ADMIN)
-            </label>
-            <div className="relative">
-              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-stone-400">
-                <Lock className="h-4 w-4" />
-              </div>
-              <input
-                type={showAdminPassword ? 'text' : 'password'}
-                value={adminPasswordInput}
-                onChange={(e) => setAdminPasswordInput(e.target.value)}
-                placeholder="Ingrese CONTRASENA_ADMIN"
-                required
-                autoFocus
-                className="block w-full pl-9 pr-10 py-2.5 text-sm rounded-lg border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none focus:ring-1 focus:ring-emerald-600 transition"
-              />
-              <button
-                type="button"
-                onClick={() => setShowAdminPassword(!showAdminPassword)}
-                className="absolute inset-y-0 right-0 pr-3 flex items-center text-stone-400 hover:text-stone-600 cursor-pointer"
-                title={showAdminPassword ? 'Ocultar' : 'Ver'}
-              >
-                {showAdminPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
-            </div>
-            <p className="text-[11px] text-stone-400 mt-1">
-              La contraseña se valida directamente contra la hoja <span className="font-mono">configuracion</span> de Google Sheets.
-            </p>
-          </div>
-
-          <div className="space-y-2 pt-1">
-            <button
-              type="submit"
-              disabled={authorizing}
-              className="w-full flex items-center justify-center gap-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-3 text-xs shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[44px]"
-            >
-              {authorizing ? (
-                <>
-                  <RefreshCw className="h-4 w-4 animate-spin" />
-                  <span>Validando con Google Apps Script...</span>
-                </>
-              ) : (
-                <>
-                  <ShieldCheck className="h-4 w-4" />
-                  <span>Autorizar este dispositivo</span>
-                </>
-              )}
-            </button>
-
-            {onRevokeAuthorization && (
-              <button
-                type="button"
-                onClick={onRevokeAuthorization}
-                className="w-full py-2.5 text-xs font-semibold text-stone-600 hover:text-stone-900 border border-stone-200 rounded-xl hover:bg-stone-50 transition cursor-pointer min-h-[40px]"
-              >
-                Volver a Inicio / Maquinarias
-              </button>
-            )}
-          </div>
-        </form>
-      </div>
-    );
-  }
-
   // Submit Campaign
   const handleCampaignSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    setSuccessMsg(null);
+
     if (!cNombre.trim()) {
-      setErrorMsg('Ingresa un nombre para la campaña (Ej: Verano 2026/2027).');
+      setErrorMsg('El nombre de la campaña es obligatorio.');
       return;
     }
+
     setSaving(true);
     try {
-      await createCampaign({
+      const res = await createCampaign({
         nombre: cNombre.trim(),
         activa: cActiva,
-        fechaInicio: new Date().toISOString().slice(0, 10),
-        estado: 'activa',
+        fechaInicio: new Date().toISOString().split('T')[0],
+        estado: cActiva ? 'activa' : 'cerrada',
       });
-      setSuccessMsg('Campaña creada exitosamente en Google Sheets.');
+
+      setSuccessMsg(`Campaña "${cNombre.trim()}" creada exitosamente.`);
       setCNombre('');
       setShowCampaignForm(false);
       onRefreshData();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al crear campaña');
+      setErrorMsg(err instanceof Error ? err.message : 'Error al guardar campaña');
     } finally {
       setSaving(false);
     }
   };
 
-  const handleActivateCampaign = async (id: string) => {
+  const handleActivateCampaign = async (campaignId: string) => {
+    setSaving(true);
+    setErrorMsg(null);
     try {
-      await setActiveCampaign(id);
-      setSuccessMsg('Campaña activa actualizada.');
+      await setActiveCampaign(campaignId);
+      setSuccessMsg('Campaña activa actualizada exitosamente.');
       onRefreshData();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al activar campaña');
+      setErrorMsg(err instanceof Error ? err.message : 'Error al cambiar campaña activa');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -628,7 +621,7 @@ export const AdminView: React.FC<Props> = ({
           ubicacion: lotUbicacion.trim(),
           observaciones: lotObs.trim(),
         });
-        setSuccessMsg('Lote creado exitosamente en Google Sheets.');
+        setSuccessMsg('Lote creado exitosamente.');
       }
 
       setLotNombre('');
@@ -691,6 +684,7 @@ export const AdminView: React.FC<Props> = ({
           nombre: mNombre.trim(),
           identificacion: mIdentificacion.trim(),
           tipo: mTipo,
+          icono: mIcono,
           tarifa: tarifaParsed,
           unidad: codeUnidad,
           moneda: mMoneda,
@@ -703,18 +697,20 @@ export const AdminView: React.FC<Props> = ({
           nombre: mNombre.trim(),
           identificacion: mIdentificacion.trim() || 'TR-01',
           tipo: mTipo,
+          icono: mIcono,
           tarifa: tarifaParsed,
           unidad: codeUnidad,
           moneda: mMoneda,
           estado: mEstado,
           observaciones: mObs.trim(),
         });
-        setSuccessMsg('Maquinaria creada exitosamente en Google Sheets.');
+        setSuccessMsg('Maquinaria creada exitosamente.');
       }
 
       setEditingMachineId(null);
       setMNombre('');
       setMIdentificacion('');
+      setMIcono('tractor');
       setShowMachineForm(false);
       onRefreshData();
     } catch (err: unknown) {
@@ -729,6 +725,7 @@ export const AdminView: React.FC<Props> = ({
     setMNombre(m.nombre);
     setMIdentificacion(m.identificacion);
     setMTipo(m.tipo);
+    setMIcono(m.icono || 'tractor');
     setMTarifa(String(m.tarifa || ''));
     setMUnidad(m.unidad === 'ha' || m.unidad === 'hectarea' ? 'ha' : 'h');
     setMMoneda(m.moneda);
@@ -779,7 +776,7 @@ export const AdminView: React.FC<Props> = ({
         nota: tasaNota.trim() || 'Configurado manualmente por el administrador',
         fecha: getLocalDateString(),
       });
-      setSuccessMsg(`Tipo de cambio guardado exitosamente a ${parsedTasa} Bs/$ en Google Sheets.`);
+      setSuccessMsg(`Tipo de cambio guardado a ${parsedTasa} Bs/$.`);
       if (res?.tasaBobPerUsd) {
         setTasaInput(String(res.tasaBobPerUsd));
       }
@@ -840,6 +837,7 @@ export const AdminView: React.FC<Props> = ({
   };
 
   // Submit Item Config
+  // Submit Item Config
   const handleItemSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
@@ -848,13 +846,17 @@ export const AdminView: React.FC<Props> = ({
       setErrorMsg('El nombre del ítem es obligatorio.');
       return;
     }
+    // Ingresos can only belong to Propiedad
+    const assignedModulo = itemClase === 'INGRESO' ? 'PROPIEDAD' : itemModulo;
+
     setSaving(true);
     try {
       await saveItemConfig({
         id: editingItemId || undefined,
         nombre: itemName.trim(),
-        modulo: itemModulo,
+        modulo: assignedModulo,
         clase: itemClase,
+        icono: itemIcono,
         unidad: itemUnidad.trim() || 'unidades',
         precio: typeof itemPrecio === 'number' ? itemPrecio : 0,
         moneda: itemMoneda,
@@ -863,11 +865,12 @@ export const AdminView: React.FC<Props> = ({
       setSuccessMsg(
         editingItemId
           ? `Ítem "${itemName.trim()}" actualizado correctamente.`
-          : `Ítem "${itemName.trim()}" creado exitosamente en Google Sheets.`
+          : `Ítem "${itemName.trim()}" creado exitosamente.`
       );
       setShowItemForm(false);
       setEditingItemId(null);
       setItemName('');
+      setItemIcono(itemClassTab === 'INGRESO' ? 'soya' : 'diesel');
       setItemPrecio('');
       onRefreshData();
     } catch (err: unknown) {
@@ -877,16 +880,38 @@ export const AdminView: React.FC<Props> = ({
     }
   };
 
+  const handleOpenAddItem = () => {
+    setEditingItemId(null);
+    setItemName('');
+    const cls = itemClassTab;
+    setItemClase(cls);
+    if (cls === 'INGRESO') {
+      setItemModulo('PROPIEDAD');
+      setItemIcono('soya');
+      setItemUnidad('toneladas');
+    } else {
+      setItemModulo(filterModulo !== 'TODOS' ? filterModulo : 'PROPIEDAD');
+      setItemIcono('diesel');
+      setItemUnidad('litros');
+    }
+    setItemPrecio('');
+    setItemMoneda('BOB');
+    setItemActivo(true);
+    setShowItemForm(true);
+  };
+
   const handleEditItem = (item: ItemConfig) => {
     setEditingItemId(item.id);
     setItemName(item.nombre);
-    const rawMod = String(item.modulo || (item.tipo && item.tipo.includes('maquinaria') ? 'MAQUINARIAS' : 'PROPIEDAD')).toUpperCase();
-    const normMod: 'MAQUINARIAS' | 'PROPIEDAD' = rawMod.includes('MAQ') ? 'MAQUINARIAS' : 'PROPIEDAD';
-    setItemModulo(normMod);
-
     const rawCls = String(item.clase || (item.tipo && item.tipo.includes('ingreso') ? 'INGRESO' : 'GASTO')).toUpperCase();
     const normCls: 'GASTO' | 'INGRESO' = rawCls.includes('ING') ? 'INGRESO' : 'GASTO';
     setItemClase(normCls);
+
+    setItemIcono(item.icono || (normCls === 'INGRESO' ? 'soya' : 'diesel'));
+
+    const rawMod = String(item.modulo || (item.tipo && item.tipo.includes('maquinaria') ? 'MAQUINARIAS' : 'PROPIEDAD')).toUpperCase();
+    const normMod: 'MAQUINARIAS' | 'PROPIEDAD' = rawMod.includes('MAQ') ? 'MAQUINARIAS' : 'PROPIEDAD';
+    setItemModulo(normCls === 'INGRESO' ? 'PROPIEDAD' : normMod);
 
     setItemUnidad(item.unidad || 'unidades');
     setItemPrecio(item.precioPredeterminado ?? item.precio ?? '');
@@ -895,60 +920,37 @@ export const AdminView: React.FC<Props> = ({
     setShowItemForm(true);
   };
 
-  const handleToggleItemStatus = async (item: ItemConfig) => {
-    const isCurrentlyActive = item.activo !== false;
-    const newStatus = !isCurrentlyActive;
-    setSaving(true);
-    try {
-      await saveItemConfig({
-        ...item,
-        id: item.id,
-        nombre: item.nombre,
-        modulo:
-          item.modulo ||
-          (item.tipo && item.tipo.includes('maquinaria') ? 'MAQUINARIAS' : 'PROPIEDAD'),
-        clase:
-          item.clase ||
-          (item.tipo && item.tipo.includes('ingreso') ? 'INGRESO' : 'GASTO'),
-        activo: newStatus,
-      });
-      if (!newStatus) {
-        setSuccessMsg(
-          `Ítem "${item.nombre}" desactivado. No se elimina físicamente para proteger el historial contable y los registros existentes en Google Sheets.`
-        );
+  // Filter Items
+  const filteredItems = useMemo(() => {
+    return itemsConfig.filter((item) => {
+      // 1. Filter by Class (GASTO vs INGRESO)
+      const itemCls = item.clase || (item.tipo && item.tipo.includes('ingreso') ? 'INGRESO' : 'GASTO');
+      if (itemCls !== itemClassTab) return false;
+
+      // 2. Filter by Module:
+      // If INGRESO, strictly show only items for Propiedad
+      const itemMod = item.modulo || (item.tipo && item.tipo.includes('maquinaria') ? 'MAQUINARIAS' : 'PROPIEDAD');
+      if (itemClassTab === 'INGRESO') {
+        if (itemMod !== 'PROPIEDAD') return false;
       } else {
-        setSuccessMsg(`Ítem "${item.nombre}" reactivado exitosamente.`);
+        if (filterModulo !== 'TODOS' && itemMod !== filterModulo) return false;
       }
-      onRefreshData();
-    } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al cambiar estado del ítem');
-    } finally {
-      setSaving(false);
-    }
-  };
 
-  const filteredItems = itemsConfig.filter((item) => {
-    const itemMod =
-      item.modulo ||
-      (item.tipo && item.tipo.includes('maquinaria') ? 'MAQUINARIAS' : 'PROPIEDAD');
-    const itemCls =
-      item.clase ||
-      (item.tipo && item.tipo.includes('ingreso') ? 'INGRESO' : 'GASTO');
+      // 3. Filter by Active state
+      const isActivo = item.activo !== false;
+      if (!showInactiveItems && !isActivo) return false;
 
-    if (filterModulo !== 'TODOS' && itemMod !== filterModulo) return false;
-    if (filterClase !== 'TODOS' && itemCls !== filterClase) return false;
-    if (filterActivo === 'ACTIVOS' && item.activo === false) return false;
-    if (filterActivo === 'INACTIVOS' && item.activo !== false) return false;
-
-    if (itemSearch.trim()) {
-      const search = itemSearch.toLowerCase();
-      return (
-        item.nombre.toLowerCase().includes(search) ||
-        (item.unidad && item.unidad.toLowerCase().includes(search))
-      );
-    }
-    return true;
-  });
+      // 4. Search
+      if (itemSearch.trim()) {
+        const search = itemSearch.toLowerCase();
+        return (
+          item.nombre.toLowerCase().includes(search) ||
+          (item.unidad && item.unidad.toLowerCase().includes(search))
+        );
+      }
+      return true;
+    });
+  }, [itemsConfig, itemClassTab, filterModulo, showInactiveItems, itemSearch]);
 
   // RENDER LEVEL 3: Financial Reports Screen
   if (screen === 'reports') {
@@ -984,7 +986,7 @@ export const AdminView: React.FC<Props> = ({
     );
   }
 
-  // RENDER LEVEL 1: Main Administration Screen (Phone Settings Menu Style)
+  // RENDER LEVEL 1: Main Administration Screen
   if (screen === 'main') {
     return (
       <div className="space-y-6 max-w-2xl mx-auto w-full">
@@ -1054,7 +1056,7 @@ export const AdminView: React.FC<Props> = ({
             <ChevronRight className="h-5 w-5 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
           </button>
 
-          {/* Option 2: Direct Reportes financieros shortcut */}
+          {/* Option 2: Reportes financieros */}
           <button
             type="button"
             onClick={() => navigateTo('reports')}
@@ -1076,7 +1078,7 @@ export const AdminView: React.FC<Props> = ({
             <ChevronRight className="h-5 w-5 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
           </button>
 
-          {/* Option 3: Cambiar contraseñas (Solo Administrador) */}
+          {/* Option 3: Cambiar contraseñas */}
           <button
             type="button"
             onClick={() => {
@@ -1202,38 +1204,18 @@ export const AdminView: React.FC<Props> = ({
         {/* Form Card */}
         <div className="rounded-2xl border border-stone-200/80 bg-white p-4 sm:p-5 shadow-xs space-y-4">
           {/* iOS Segmented Control */}
-          <div className="bg-stone-100/90 p-1 rounded-xl flex text-xs font-medium border border-stone-200/60">
-            <button
-              type="button"
-              onClick={() => {
-                setPwdTargetRole('usuario');
-                setPwdErrorMsg(null);
-                setPwdSuccessMsg(null);
-              }}
-              className={`flex-1 py-2 rounded-lg text-center font-semibold transition cursor-pointer ${
-                pwdTargetRole === 'usuario'
-                  ? 'bg-white text-stone-900 shadow-xs'
-                  : 'text-stone-500 hover:text-stone-800'
-              }`}
-            >
-              Usuario
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setPwdTargetRole('admin');
-                setPwdErrorMsg(null);
-                setPwdSuccessMsg(null);
-              }}
-              className={`flex-1 py-2 rounded-lg text-center font-semibold transition cursor-pointer ${
-                pwdTargetRole === 'admin'
-                  ? 'bg-white text-stone-900 shadow-xs'
-                  : 'text-stone-500 hover:text-stone-800'
-              }`}
-            >
-              Admin
-            </button>
-          </div>
+          <SegmentedControl
+            options={[
+              { value: 'usuario', label: 'Usuario' },
+              { value: 'admin', label: 'Admin' },
+            ]}
+            value={pwdTargetRole}
+            onChange={(val) => {
+              setPwdTargetRole(val as any);
+              setPwdErrorMsg(null);
+              setPwdSuccessMsg(null);
+            }}
+          />
 
           {/* Alert Messages */}
           {pwdErrorMsg && (
@@ -1361,7 +1343,6 @@ export const AdminView: React.FC<Props> = ({
                 )}
               </button>
 
-              {/* Discrete Note */}
               <p className="text-xs text-stone-500 text-center mt-2.5">
                 Se cerrarán las sesiones correspondientes.
               </p>
@@ -1369,7 +1350,7 @@ export const AdminView: React.FC<Props> = ({
           </form>
         </div>
 
-        {/* iOS Confirmation Modal Dialog */}
+        {/* Confirmation Modal */}
         {showConfirmPwdModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 backdrop-blur-xs p-4 animate-fadeIn">
             <div className="w-full max-w-xs rounded-2xl bg-white p-5 shadow-xl border border-stone-200/80 text-center space-y-3.5">
@@ -1407,7 +1388,7 @@ export const AdminView: React.FC<Props> = ({
     );
   }
 
-  // RENDER LEVEL 2: Configuración Menu Screen
+  // RENDER LEVEL 2: Configuración Menu Screen (iPhone Settings Style)
   if (screen === 'settings') {
     return (
       <div className="space-y-5 max-w-2xl mx-auto w-full">
@@ -1428,7 +1409,7 @@ export const AdminView: React.FC<Props> = ({
             Configuración
           </h1>
           <p className="text-xs text-stone-500">
-            Administra los datos maestros, informes y parámetros del sistema
+            Administra los parámetros maestros del sistema
           </p>
         </div>
 
@@ -1441,7 +1422,7 @@ export const AdminView: React.FC<Props> = ({
             className="w-full flex items-center justify-between p-3.5 sm:p-4 hover:bg-stone-50 transition cursor-pointer text-left group min-h-[58px]"
           >
             <div className="flex items-center gap-3 min-w-0">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 group-hover:bg-emerald-700 group-hover:text-white transition">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-800 group-hover:bg-emerald-700 group-hover:text-white transition">
                 <Calendar className="h-4.5 w-4.5" />
               </div>
               <div className="min-w-0">
@@ -1454,21 +1435,21 @@ export const AdminView: React.FC<Props> = ({
                   </span>
                 </div>
                 <p className="text-[11px] text-stone-500 truncate">
-                  Crear y activar campañas agrícolas
+                  Gestionar campañas agrícolas
                 </p>
               </div>
             </div>
             <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
           </button>
 
-          {/* 3. Lotes */}
+          {/* 2. Lotes */}
           <button
             type="button"
             onClick={() => navigateTo('lotes')}
             className="w-full flex items-center justify-between p-3.5 sm:p-4 hover:bg-stone-50 transition cursor-pointer text-left group min-h-[58px]"
           >
             <div className="flex items-center gap-3 min-w-0">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 group-hover:bg-emerald-700 group-hover:text-white transition">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-800 group-hover:bg-emerald-700 group-hover:text-white transition">
                 <LandPlot className="h-4.5 w-4.5" />
               </div>
               <div className="min-w-0">
@@ -1481,21 +1462,21 @@ export const AdminView: React.FC<Props> = ({
                   </span>
                 </div>
                 <p className="text-[11px] text-stone-500 truncate">
-                  Administrar lotes y superficies
+                  Superficies y lotes de la propiedad
                 </p>
               </div>
             </div>
             <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
           </button>
 
-          {/* 4. Maquinarias */}
+          {/* 3. Maquinarias */}
           <button
             type="button"
             onClick={() => navigateTo('maquinarias')}
             className="w-full flex items-center justify-between p-3.5 sm:p-4 hover:bg-stone-50 transition cursor-pointer text-left group min-h-[58px]"
           >
             <div className="flex items-center gap-3 min-w-0">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 group-hover:bg-emerald-700 group-hover:text-white transition">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-800 group-hover:bg-emerald-700 group-hover:text-white transition">
                 <Tractor className="h-4.5 w-4.5" />
               </div>
               <div className="min-w-0">
@@ -1508,21 +1489,21 @@ export const AdminView: React.FC<Props> = ({
                   </span>
                 </div>
                 <p className="text-[11px] text-stone-500 truncate">
-                  Flota de maquinarias y tarifas base
+                  Flota de equipos y tarifas base
                 </p>
               </div>
             </div>
             <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
           </button>
 
-          {/* 5. Ítems de ingresos y gastos */}
+          {/* 4. Ítems de ingresos y gastos */}
           <button
             type="button"
             onClick={() => navigateTo('items')}
             className="w-full flex items-center justify-between p-3.5 sm:p-4 hover:bg-stone-50 transition cursor-pointer text-left group min-h-[58px]"
           >
             <div className="flex items-center gap-3 min-w-0">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 group-hover:bg-emerald-700 group-hover:text-white transition">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-800 group-hover:bg-emerald-700 group-hover:text-white transition">
                 <Tag className="h-4.5 w-4.5" />
               </div>
               <div className="min-w-0">
@@ -1535,21 +1516,21 @@ export const AdminView: React.FC<Props> = ({
                   </span>
                 </div>
                 <p className="text-[11px] text-stone-500 truncate">
-                  Rubros y conceptos configurables
+                  Rubros y conceptos contables
                 </p>
               </div>
             </div>
             <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
           </button>
 
-          {/* 6. Tipo de cambio */}
+          {/* 5. Tipo de cambio */}
           <button
             type="button"
             onClick={() => navigateTo('monedas')}
             className="w-full flex items-center justify-between p-3.5 sm:p-4 hover:bg-stone-50 transition cursor-pointer text-left group min-h-[58px]"
           >
             <div className="flex items-center gap-3 min-w-0">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 group-hover:bg-emerald-700 group-hover:text-white transition">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-800 group-hover:bg-emerald-700 group-hover:text-white transition">
                 <DollarSign className="h-4.5 w-4.5" />
               </div>
               <div className="min-w-0">
@@ -1557,21 +1538,21 @@ export const AdminView: React.FC<Props> = ({
                   Tipo de cambio
                 </h3>
                 <p className="text-[11px] text-stone-500 truncate">
-                  Tasa de cambio BOB / USD (Actual: {exchangeRate.tasaBobPerUsd || 6.96} Bs/$)
+                  Tasa: {exchangeRate.tasaBobPerUsd || 6.96} Bs/$
                 </p>
               </div>
             </div>
             <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
           </button>
 
-          {/* 7. Activos y mejoras */}
+          {/* 6. Activos y mejoras */}
           <button
             type="button"
             onClick={() => navigateTo('activos')}
             className="w-full flex items-center justify-between p-3.5 sm:p-4 hover:bg-stone-50 transition cursor-pointer text-left group min-h-[58px]"
           >
             <div className="flex items-center gap-3 min-w-0">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 group-hover:bg-emerald-700 group-hover:text-white transition">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-800 group-hover:bg-emerald-700 group-hover:text-white transition">
                 <ShieldCheck className="h-4.5 w-4.5" />
               </div>
               <div className="min-w-0">
@@ -1592,42 +1573,71 @@ export const AdminView: React.FC<Props> = ({
           </button>
         </div>
 
-        {/* Opción de Seguridad: Revocar Autorización Administrativa de este dispositivo */}
+        {/* Discrete Revoke Access Option */}
         <div className="pt-2">
-          <div className="rounded-2xl border border-red-200 bg-red-50/50 p-4 sm:p-5 space-y-2.5">
-            <div className="flex items-start gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-100 text-red-800 mt-0.5">
-                <LogOut className="h-5 w-5" />
+          <button
+            type="button"
+            onClick={() => setShowRevokeAdminModal(true)}
+            className="w-full flex items-center justify-between p-3.5 rounded-2xl border border-red-200/80 bg-red-50/40 hover:bg-red-50 text-left transition cursor-pointer group min-h-[50px]"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-100 text-red-700">
+                <ShieldOff className="h-4 w-4" />
               </div>
-              <div className="flex-1">
-                <h4 className="text-xs sm:text-sm font-bold text-red-950">
-                  Revocar autorización administrativa de este dispositivo
-                </h4>
-                <p className="text-[11px] text-red-800 mt-1 leading-relaxed">
-                  Elimina la credencial administrativa persistente de este teléfono o computadora y la revoca en Google Apps Script. Para volver a ingresar a Administración, se solicitará nuevamente la contraseña administrativa (<code>CONTRASENA_ADMIN</code>). La sesión de usuario normal no se cerrará.
+              <div className="min-w-0">
+                <h3 className="text-xs font-bold text-red-950">
+                  Revocar acceso administrativo
+                </h3>
+                <p className="text-[11px] text-red-800/80 truncate">
+                  Eliminar credencial de este dispositivo
                 </p>
+              </div>
+            </div>
+            <ChevronRight className="h-4 w-4 text-red-400 group-hover:text-red-700 transition shrink-0 ml-2" />
+          </button>
+        </div>
+
+        {/* Revoke Confirmation Modal */}
+        {showRevokeAdminModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 backdrop-blur-xs p-4 animate-fadeIn">
+            <div className="w-full max-w-xs rounded-2xl bg-white p-5 shadow-xl border border-stone-200/80 text-center space-y-3.5">
+              <div className="flex h-11 w-11 items-center justify-center rounded-full bg-red-100 text-red-700 mx-auto">
+                <LogOut className="h-5 w-5 text-red-700" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-stone-900">¿Revocar acceso administrativo?</h3>
+                <p className="text-xs text-stone-600 mt-1.5 leading-relaxed">
+                  Se eliminará la credencial administrativa persistente de este dispositivo. Deberá ingresar nuevamente la contraseña de administrador para realizar cambios de configuración.
+                </p>
+              </div>
+              <div className="flex gap-2 pt-1">
                 <button
                   type="button"
-                  onClick={handleRevokeDevice}
                   disabled={revoking}
-                  className="mt-3 inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-red-700 hover:bg-red-800 text-white text-xs font-bold transition cursor-pointer active:scale-95 disabled:opacity-50 min-h-[40px]"
+                  onClick={() => setShowRevokeAdminModal(false)}
+                  className="flex-1 py-2.5 rounded-xl border border-stone-200 bg-stone-100 text-xs font-semibold text-stone-700 hover:bg-stone-200 transition cursor-pointer min-h-[40px]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  disabled={revoking}
+                  onClick={async () => {
+                    setShowRevokeAdminModal(false);
+                    await handleRevokeDevice();
+                  }}
+                  className="flex-1 py-2.5 rounded-xl bg-red-700 hover:bg-red-800 text-xs font-semibold text-white transition cursor-pointer shadow-xs min-h-[40px] flex items-center justify-center gap-1"
                 >
                   {revoking ? (
-                    <>
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                      <span>Revocando en backend...</span>
-                    </>
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
                   ) : (
-                    <>
-                      <LogOut className="h-4 w-4" />
-                      <span>Revocar autorización de este dispositivo</span>
-                    </>
+                    <span>Revocar</span>
                   )}
                 </button>
               </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
     );
   }
@@ -1646,15 +1656,20 @@ export const AdminView: React.FC<Props> = ({
           <span>Volver a Configuración</span>
         </button>
 
-        {/* Action button to toggle form where applicable */}
+        {/* Action button to open Modals */}
         {screen === 'campanas' && (
           <button
             type="button"
-            onClick={() => setShowCampaignForm(!showCampaignForm)}
+            onClick={() => {
+              setCNombre('');
+              setCActiva(true);
+              setErrorMsg(null);
+              setShowCampaignForm(true);
+            }}
             className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
           >
             <Plus className="h-4 w-4" />
-            <span>{showCampaignForm ? 'Ocultar Formulario' : 'Añadir Campaña'}</span>
+            <span>Añadir Campaña</span>
           </button>
         )}
 
@@ -1662,22 +1677,19 @@ export const AdminView: React.FC<Props> = ({
           <button
             type="button"
             onClick={() => {
-              if (showLotForm) {
-                setShowLotForm(false);
-                setEditingLotId(null);
-                setLotNombre('');
-                setLotSuperficie('50');
-                setLotCultivo('');
-                setLotUbicacion('');
-                setLotObs('');
-              } else {
-                setShowLotForm(true);
-              }
+              setEditingLotId(null);
+              setLotNombre('');
+              setLotSuperficie('50');
+              setLotCultivo('');
+              setLotUbicacion('');
+              setLotObs('');
+              setErrorMsg(null);
+              setShowLotForm(true);
             }}
             className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
           >
             <Plus className="h-4 w-4" />
-            <span>{showLotForm ? 'Ocultar Formulario' : 'Crear Nuevo Lote'}</span>
+            <span>Crear Nuevo Lote</span>
           </button>
         )}
 
@@ -1685,19 +1697,23 @@ export const AdminView: React.FC<Props> = ({
           <button
             type="button"
             onClick={() => {
-              if (showMachineForm) {
-                setShowMachineForm(false);
-                setEditingMachineId(null);
-                setMNombre('');
-                setMIdentificacion('');
-              } else {
-                setShowMachineForm(true);
-              }
+              setEditingMachineId(null);
+              setMNombre('');
+              setMIdentificacion('');
+              setMTipo('Tractor');
+              setMIcono('tractor');
+              setMTarifa('250');
+              setMUnidad('ha');
+              setMMoneda('BOB');
+              setMEstado('operativo');
+              setMObs('');
+              setErrorMsg(null);
+              setShowMachineForm(true);
             }}
             className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
           >
             <Plus className="h-4 w-4" />
-            <span>{showMachineForm ? 'Ocultar Formulario' : 'Registrar Maquinaria'}</span>
+            <span>Registrar Maquinaria</span>
           </button>
         )}
 
@@ -1705,47 +1721,44 @@ export const AdminView: React.FC<Props> = ({
           <button
             type="button"
             onClick={() => {
-              if (showItemForm) {
-                setShowItemForm(false);
-                setEditingItemId(null);
-                setItemName('');
-                setItemPrecio('');
-              } else {
-                setShowItemForm(true);
-              }
+              setEditingItemId(null);
+              setItemName('');
+              setItemIcono(itemClassTab === 'INGRESO' ? 'granos' : 'diesel');
+              setItemModulo('MAQUINARIAS');
+              setItemClase(itemClassTab);
+              setItemUnidad('unidades');
+              setItemPrecio('');
+              setItemMoneda('BOB');
+              setItemActivo(true);
+              setErrorMsg(null);
+              setShowItemForm(true);
             }}
             className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
           >
             <Plus className="h-4 w-4" />
-            <span>{showItemForm ? 'Ocultar Formulario' : 'Crear Nuevo Ítem'}</span>
+            <span>Crear Nuevo Ítem</span>
           </button>
         )}
 
         {screen === 'activos' && (
           <button
             type="button"
-            onClick={() => setShowAssetForm(!showAssetForm)}
+            onClick={() => {
+              setANombre('');
+              setAIdentificador('');
+              setAValorInicial(85000);
+              setErrorMsg(null);
+              setShowAssetForm(true);
+            }}
             className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
           >
             <Plus className="h-4 w-4" />
-            <span>{showAssetForm ? 'Ocultar Formulario' : 'Registrar Activo'}</span>
+            <span>Registrar Activo</span>
           </button>
         )}
       </div>
 
-      {/* Messages */}
-      {errorMsg && (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <AlertCircle className="h-4 w-4 text-red-600 shrink-0" />
-            <span className="break-words">{errorMsg}</span>
-          </div>
-          <button onClick={() => setErrorMsg(null)} className="text-red-500 hover:text-red-700 shrink-0">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      )}
-
+      {/* Global Success Banner */}
       {successMsg && (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
@@ -1772,61 +1785,6 @@ export const AdminView: React.FC<Props> = ({
               </p>
             </div>
           </div>
-
-          {/* Form when open */}
-          {showCampaignForm && (
-            <div className="rounded-2xl border border-emerald-300 bg-emerald-50/40 p-4 sm:p-5 shadow-xs space-y-3">
-              <h3 className="text-xs font-bold text-emerald-950 uppercase tracking-wider">
-                Crear Nueva Campaña
-              </h3>
-              <form onSubmit={handleCampaignSubmit} className="space-y-3">
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Nombre de Campaña *
-                  </label>
-                  <input
-                    type="text"
-                    value={cNombre}
-                    onChange={(e) => setCNombre(e.target.value)}
-                    placeholder="Verano 2026/2027"
-                    required
-                    className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
-                  />
-                </div>
-
-                <div className="flex items-center gap-2 py-1">
-                  <input
-                    type="checkbox"
-                    id="cActiva"
-                    checked={cActiva}
-                    onChange={(e) => setCActiva(e.target.checked)}
-                    className="rounded text-emerald-600 focus:ring-emerald-500 h-4 w-4"
-                  />
-                  <label htmlFor="cActiva" className="text-xs font-medium text-stone-800 cursor-pointer">
-                    Establecer como la única campaña activa
-                  </label>
-                </div>
-
-                <div className="flex gap-2">
-                  <button
-                    type="submit"
-                    disabled={saving}
-                    className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-700 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-emerald-800 transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[42px]"
-                  >
-                    <Plus className="h-4 w-4" />
-                    <span>Guardar Campaña</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowCampaignForm(false)}
-                    className="px-4 py-2.5 rounded-xl border border-stone-300 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 cursor-pointer min-h-[42px]"
-                  >
-                    Cancelar
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
 
           {/* Records List FIRST */}
           <div className="space-y-2.5">
@@ -1878,6 +1836,75 @@ export const AdminView: React.FC<Props> = ({
               </div>
             )}
           </div>
+
+          {/* Modal Campaña */}
+          <IOSModal
+            isOpen={showCampaignForm}
+            onClose={() => {
+              setShowCampaignForm(false);
+              setErrorMsg(null);
+            }}
+            title="Crear Nueva Campaña"
+            subtitle="Registra una nueva campaña agrícola para el sistema"
+            errorMsg={errorMsg}
+            onErrorDismiss={() => setErrorMsg(null)}
+          >
+            <form onSubmit={handleCampaignSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  Nombre de Campaña *
+                </label>
+                <input
+                  type="text"
+                  value={cNombre}
+                  onChange={(e) => setCNombre(e.target.value)}
+                  placeholder="Verano 2026/2027"
+                  required
+                  className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
+                />
+              </div>
+
+              <div className="flex items-center gap-2 py-1">
+                <input
+                  type="checkbox"
+                  id="cActivaModal"
+                  checked={cActiva}
+                  onChange={(e) => setCActiva(e.target.checked)}
+                  className="rounded text-emerald-600 focus:ring-emerald-500 h-4 w-4"
+                />
+                <label htmlFor="cActivaModal" className="text-xs font-medium text-stone-800 cursor-pointer">
+                  Establecer como la única campaña activa
+                </label>
+              </div>
+
+              <div className="flex gap-2.5 pt-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCampaignForm(false);
+                    setErrorMsg(null);
+                  }}
+                  className="flex-1 py-3 rounded-xl border border-stone-300 bg-stone-100 hover:bg-stone-200 text-xs font-bold text-stone-700 transition cursor-pointer min-h-[44px]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-xs font-bold text-white shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[44px]"
+                >
+                  {saving ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <span>Guardando...</span>
+                    </>
+                  ) : (
+                    <span>Guardar Campaña</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </IOSModal>
         </div>
       )}
 
@@ -1898,112 +1925,6 @@ export const AdminView: React.FC<Props> = ({
               </p>
             </div>
           </div>
-
-          {/* Form when open */}
-          {showLotForm && (
-            <div className="rounded-2xl border border-emerald-300 bg-emerald-50/40 p-4 sm:p-5 shadow-xs space-y-3">
-              <h3 className="text-xs font-bold text-emerald-950 uppercase tracking-wider">
-                {editingLotId ? 'Editar Lote' : 'Crear Nuevo Lote'}
-              </h3>
-              <form onSubmit={handleLotSubmit} className="space-y-3">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Nombre del Lote *
-                    </label>
-                    <input
-                      type="text"
-                      value={lotNombre}
-                      onChange={(e) => setLotNombre(e.target.value)}
-                      placeholder="Lote 5 - El Palmar"
-                      required
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Superficie (Hectáreas) *
-                    </label>
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      value={lotSuperficie}
-                      onChange={(e) => setLotSuperficie(e.target.value)}
-                      placeholder="50"
-                      required
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Cultivo Actual
-                    </label>
-                    <input
-                      type="text"
-                      value={lotCultivo}
-                      onChange={(e) => setLotCultivo(e.target.value)}
-                      placeholder="Soya / Maíz / Sorgo / Barbecho"
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white min-h-[42px]"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Ubicación
-                    </label>
-                    <input
-                      type="text"
-                      value={lotUbicacion}
-                      onChange={(e) => setLotUbicacion(e.target.value)}
-                      placeholder="Sector Norte, potrero principal"
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white min-h-[42px]"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Observaciones</label>
-                  <textarea
-                    rows={2}
-                    value={lotObs}
-                    onChange={(e) => setLotObs(e.target.value)}
-                    placeholder="Calidad de suelo, canal de riego..."
-                    className="w-full text-xs p-2.5 rounded-lg border border-stone-300 bg-white"
-                  />
-                </div>
-
-                <div className="flex gap-2 pt-1">
-                  <button
-                    type="submit"
-                    disabled={saving}
-                    className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-emerald-700 py-3 text-xs font-bold text-white shadow-xs hover:bg-emerald-800 transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[42px]"
-                  >
-                    <Plus className="h-4 w-4" />
-                    <span>{editingLotId ? 'Guardar Cambios' : 'Crear Lote'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowLotForm(false);
-                      setEditingLotId(null);
-                      setLotNombre('');
-                      setLotSuperficie('50');
-                      setLotCultivo('');
-                      setLotUbicacion('');
-                      setLotObs('');
-                    }}
-                    className="px-4 py-3 rounded-xl border border-stone-300 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 cursor-pointer min-h-[42px]"
-                  >
-                    Cancelar
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
 
           {/* Records List FIRST */}
           <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-xs">
@@ -2116,6 +2037,130 @@ export const AdminView: React.FC<Props> = ({
               </table>
             </div>
           </div>
+
+          {/* Modal Lote */}
+          <IOSModal
+            isOpen={showLotForm}
+            onClose={() => {
+              setShowLotForm(false);
+              setEditingLotId(null);
+              setLotNombre('');
+              setLotSuperficie('50');
+              setLotCultivo('');
+              setLotUbicacion('');
+              setLotObs('');
+              setErrorMsg(null);
+            }}
+            title={editingLotId ? 'Editar Lote' : 'Crear Nuevo Lote'}
+            subtitle="Configura el nombre, superficie e información del lote"
+            errorMsg={errorMsg}
+            onErrorDismiss={() => setErrorMsg(null)}
+          >
+            <form onSubmit={handleLotSubmit} className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Nombre del Lote *
+                  </label>
+                  <input
+                    type="text"
+                    value={lotNombre}
+                    onChange={(e) => setLotNombre(e.target.value)}
+                    placeholder="Lote 5 - El Palmar"
+                    required
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Superficie (Hectáreas) *
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={lotSuperficie}
+                    onChange={(e) => setLotSuperficie(e.target.value)}
+                    placeholder="50"
+                    required
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Cultivo Actual
+                  </label>
+                  <input
+                    type="text"
+                    value={lotCultivo}
+                    onChange={(e) => setLotCultivo(e.target.value)}
+                    placeholder="Soya / Maíz / Sorgo / Barbecho"
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white min-h-[42px]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Ubicación
+                  </label>
+                  <input
+                    type="text"
+                    value={lotUbicacion}
+                    onChange={(e) => setLotUbicacion(e.target.value)}
+                    placeholder="Sector Norte, potrero principal"
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white min-h-[42px]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">Observaciones</label>
+                <textarea
+                  rows={2}
+                  value={lotObs}
+                  onChange={(e) => setLotObs(e.target.value)}
+                  placeholder="Calidad de suelo, canal de riego..."
+                  className="w-full text-xs p-3 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white"
+                />
+              </div>
+
+              <div className="flex gap-2.5 pt-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowLotForm(false);
+                    setEditingLotId(null);
+                    setLotNombre('');
+                    setLotSuperficie('50');
+                    setLotCultivo('');
+                    setLotUbicacion('');
+                    setLotObs('');
+                    setErrorMsg(null);
+                  }}
+                  className="flex-1 py-3 rounded-xl border border-stone-300 bg-stone-100 hover:bg-stone-200 text-xs font-bold text-stone-700 transition cursor-pointer min-h-[44px]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-xs font-bold text-white shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[44px]"
+                >
+                  {saving ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <span>Guardando...</span>
+                    </>
+                  ) : (
+                    <span>{editingLotId ? 'Guardar Cambios' : 'Crear Lote'}</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </IOSModal>
         </div>
       )}
 
@@ -2129,146 +2174,14 @@ export const AdminView: React.FC<Props> = ({
                 Flota de Maquinarias ({machines.length})
               </h2>
               <p className="text-xs text-stone-500 mt-0.5">
-                Configuración de equipos, identificadores y tarifas base por hora o hectárea
+                Configuración de equipos, identificadores y tarifas base
               </p>
             </div>
           </div>
 
-          {/* Form when open */}
-          {showMachineForm && (
-            <div className="rounded-2xl border border-emerald-300 bg-emerald-50/40 p-4 sm:p-5 shadow-xs space-y-3">
-              <h3 className="text-xs font-bold text-emerald-950 uppercase tracking-wider">
-                {editingMachineId ? 'Editar Maquinaria' : 'Registrar Maquinaria'}
-              </h3>
-              <form onSubmit={handleMachineSubmit} className="space-y-3">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Nombre / Modelo *
-                    </label>
-                    <input
-                      type="text"
-                      value={mNombre}
-                      onChange={(e) => setMNombre(e.target.value)}
-                      placeholder="Tractor John Deere 6110M"
-                      required
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Identificación / Código
-                    </label>
-                    <input
-                      type="text"
-                      value={mIdentificacion}
-                      onChange={(e) => setMIdentificacion(e.target.value)}
-                      placeholder="TR-01"
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white focus:border-emerald-600 focus:outline-none min-h-[42px]"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">Tipo</label>
-                    <select
-                      value={mTipo}
-                      onChange={(e) => setMTipo(e.target.value)}
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white min-h-[42px]"
-                    >
-                      <option value="Tractor">Tractor</option>
-                      <option value="Cosechadora">Cosechadora</option>
-                      <option value="Fumigadora">Fumigadora Autopropulsada</option>
-                      <option value="Sembradora">Sembradora</option>
-                      <option value="Camión">Camión de Carga</option>
-                      <option value="Otro">Otro Implemento</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">Tarifa *</label>
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      value={mTarifa}
-                      onChange={(e) => setMTarifa(e.target.value)}
-                      placeholder="250"
-                      required
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">Unidad</label>
-                    <select
-                      value={mUnidad}
-                      onChange={(e) => setMUnidad(e.target.value as 'h' | 'ha')}
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white min-h-[42px]"
-                    >
-                      <option value="h">Hora</option>
-                      <option value="ha">Hectárea</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">Moneda</label>
-                    <select
-                      value={mMoneda}
-                      onChange={(e) => setMMoneda(e.target.value as Currency)}
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white font-semibold min-h-[42px]"
-                    >
-                      <option value="BOB">BOB (Bs)</option>
-                      <option value="USD">USD ($)</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">Estado</label>
-                    <select
-                      value={mEstado}
-                      onChange={(e) => setMEstado(e.target.value as any)}
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white min-h-[42px]"
-                    >
-                      <option value="operativo">Operativo</option>
-                      <option value="mantenimiento">Mantenimiento</option>
-                      <option value="inactivo">Inactivo</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="flex gap-2 pt-1">
-                  <button
-                    type="submit"
-                    disabled={saving}
-                    className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-emerald-700 py-3 text-xs font-bold text-white shadow-xs hover:bg-emerald-800 transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[42px]"
-                  >
-                    <Plus className="h-4 w-4" />
-                    <span>{editingMachineId ? 'Guardar Cambios' : 'Registrar Máquina'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowMachineForm(false);
-                      setEditingMachineId(null);
-                      setMNombre('');
-                      setMIdentificacion('');
-                    }}
-                    className="px-4 py-3 rounded-xl border border-stone-300 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 cursor-pointer min-h-[42px]"
-                  >
-                    Cancelar
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
-
           {/* Records List FIRST */}
           <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-xs">
-            {/* MOBILE VIEW: Compact Cards with Job Types Accordion */}
+            {/* MOBILE VIEW: Compact Cards */}
             <div className="block md:hidden space-y-3">
               {machines.map((m) => {
                 const mJobs = getJobsForMachine(m.id);
@@ -2281,9 +2194,14 @@ export const AdminView: React.FC<Props> = ({
                 return (
                   <div key={m.id} className="rounded-xl border border-stone-200 bg-stone-50/70 p-3.5 space-y-2.5">
                     <div className="flex items-center justify-between border-b border-stone-200/60 pb-2">
-                      <div>
-                        <h4 className="text-xs font-bold text-stone-900">{m.nombre}</h4>
-                        <span className="text-[10px] text-stone-500">{m.identificacion} &bull; {m.tipo}</span>
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="shrink-0 flex items-center justify-center p-1 rounded-xl bg-white border border-stone-200/80 shadow-2xs">
+                          <VisualIcon name={m.icono || 'tractor'} size="sm" />
+                        </div>
+                        <div className="min-w-0">
+                          <h4 className="text-xs font-bold text-stone-900 truncate">{m.nombre}</h4>
+                          <span className="text-[10px] text-stone-500">{m.identificacion} &bull; {m.tipo}</span>
+                        </div>
                       </div>
                       <span
                         className={`px-2 py-0.5 text-[10px] font-bold rounded ${
@@ -2303,7 +2221,6 @@ export const AdminView: React.FC<Props> = ({
                       </span>
                     </div>
 
-                    {/* Botón Acordeón de Trabajos */}
                     <button
                       type="button"
                       onClick={() => setExpandedAdminMachineId(isExpanded ? null : m.id)}
@@ -2320,7 +2237,6 @@ export const AdminView: React.FC<Props> = ({
                       )}
                     </button>
 
-                    {/* Contenido Acordeón de Trabajos */}
                     {isExpanded && (
                       <div className="p-2.5 rounded-lg bg-white border border-stone-200 space-y-2.5">
                         {isNewHolland && (
@@ -2350,13 +2266,18 @@ export const AdminView: React.FC<Props> = ({
                               key={jt.id}
                               className="p-2 rounded-lg bg-stone-50 border border-stone-200/80 flex items-center justify-between gap-2"
                             >
-                              <div className="min-w-0 flex-1">
-                                <span className="text-xs font-bold text-stone-900 block truncate">
-                                  {jt.nombre}
-                                </span>
-                                <span className="text-[11px] font-semibold text-emerald-800 font-mono">
-                                  {jt.moneda === 'USD' ? 'USD' : 'Bs'} {jt.tarifa} / {jt.unidad}
-                                </span>
+                              <div className="min-w-0 flex-1 flex items-center gap-2">
+                                <div className="shrink-0 flex items-center justify-center p-1 rounded-lg bg-white border border-stone-200 shadow-2xs">
+                                  <VisualIcon name={jt.icono || 'implemento'} size="xs" />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <span className="text-xs font-bold text-stone-900 block truncate">
+                                    {jt.nombre}
+                                  </span>
+                                  <span className="text-[11px] font-semibold text-emerald-800 font-mono">
+                                    {jt.moneda === 'USD' ? 'USD' : 'Bs'} {jt.tarifa} / {jt.unidad}
+                                  </span>
+                                </div>
                               </div>
                               <div className="flex items-center gap-1 shrink-0">
                                 <button
@@ -2420,7 +2341,7 @@ export const AdminView: React.FC<Props> = ({
               )}
             </div>
 
-            {/* DESKTOP VIEW: Table with Job Types Accordion */}
+            {/* DESKTOP VIEW: Table */}
             <div className="hidden md:block overflow-x-auto">
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
@@ -2446,8 +2367,15 @@ export const AdminView: React.FC<Props> = ({
                       <React.Fragment key={m.id}>
                         <tr className="hover:bg-stone-50">
                           <td className="py-2.5 px-3">
-                            <span className="font-bold text-stone-900">{m.nombre}</span>
-                            <span className="block text-[10px] text-stone-400">{m.identificacion}</span>
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <div className="shrink-0 flex items-center justify-center p-1 rounded-xl bg-white border border-stone-200/80 shadow-2xs">
+                                <VisualIcon name={m.icono || 'tractor'} size="sm" />
+                              </div>
+                              <div className="min-w-0">
+                                <span className="font-bold text-stone-900 block truncate">{m.nombre}</span>
+                                <span className="block text-[10px] text-stone-400">{m.identificacion}</span>
+                              </div>
+                            </div>
                           </td>
                           <td className="py-2.5 px-3 text-stone-600">{m.tipo}</td>
                           <td className="py-2.5 px-3 text-right font-bold text-emerald-800 font-mono">
@@ -2550,13 +2478,18 @@ export const AdminView: React.FC<Props> = ({
                                       key={jt.id}
                                       className="p-2.5 rounded-lg bg-white border border-stone-200 flex items-center justify-between gap-2 shadow-2xs"
                                     >
-                                      <div className="min-w-0 flex-1">
-                                        <span className="text-xs font-bold text-stone-900 block truncate">
-                                          {jt.nombre}
-                                        </span>
-                                        <span className="text-[11px] font-semibold text-emerald-800 font-mono">
-                                          {jt.moneda === 'USD' ? 'USD' : 'Bs'} {jt.tarifa} / {jt.unidad}
-                                        </span>
+                                      <div className="min-w-0 flex-1 flex items-center gap-2">
+                                        <div className="shrink-0 flex items-center justify-center p-1 rounded-lg bg-stone-50 border border-stone-200 shadow-2xs">
+                                          <VisualIcon name={jt.icono || 'implemento'} size="xs" />
+                                        </div>
+                                        <div className="min-w-0 flex-1">
+                                          <span className="text-xs font-bold text-stone-900 block truncate">
+                                            {jt.nombre}
+                                          </span>
+                                          <span className="text-[11px] font-semibold text-emerald-800 font-mono">
+                                            {jt.moneda === 'USD' ? 'USD' : 'Bs'} {jt.tarifa} / {jt.unidad}
+                                          </span>
+                                        </div>
                                       </div>
                                       <div className="flex items-center gap-1 shrink-0">
                                         <button
@@ -2580,7 +2513,7 @@ export const AdminView: React.FC<Props> = ({
                                   ))}
                                   {mJobs.length === 0 && (
                                     <div className="col-span-full py-4 text-center text-xs text-stone-500 bg-white rounded-lg border border-stone-200">
-                                      No hay labores individuales configuradas. Usa el botón superior para agregar labores o cargar las oficiales.
+                                      No hay labores individuales configuradas. Usa el botón superior para agregar labores.
                                     </div>
                                   )}
                                 </div>
@@ -2603,7 +2536,7 @@ export const AdminView: React.FC<Props> = ({
             </div>
           </div>
 
-          {/* Custom React Confirmation Modal for Machine Deletion */}
+          {/* Deletion Confirmation Modal */}
           {deletingMachine && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs animate-fade-in">
               <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl border border-stone-200 space-y-4">
@@ -2658,451 +2591,694 @@ export const AdminView: React.FC<Props> = ({
             </div>
           )}
 
-          {/* Modal para Crear / Editar Labor y Tarifa de Maquinaria */}
-          {showJobTypeModal && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs animate-fade-in">
-              <div className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-xl border border-stone-200 space-y-4">
-                <div className="flex items-center justify-between border-b border-stone-100 pb-3">
-                  <div className="flex items-center gap-2.5">
-                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-800">
-                      <Wrench className="h-4.5 w-4.5" />
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-bold text-stone-900">
-                        {editingJobTypeId ? 'Editar Labor de Máquina' : 'Nueva Labor para Máquina'}
-                      </h3>
-                      <p className="text-[11px] text-stone-500">
-                        Configure el trabajo, tarifa y unidad de cobro
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowJobTypeModal(false)}
-                    className="p-1 text-stone-400 hover:text-stone-600 rounded-lg hover:bg-stone-100 cursor-pointer"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
+          {/* Modal Maquinaria */}
+          <IOSModal
+            isOpen={showMachineForm}
+            onClose={() => {
+              setShowMachineForm(false);
+              setEditingMachineId(null);
+              setMNombre('');
+              setMIdentificacion('');
+              setErrorMsg(null);
+            }}
+            title={editingMachineId ? 'Editar Maquinaria' : 'Registrar Maquinaria'}
+            subtitle="Configura el equipo, identificador, tipo, tarifa e icono"
+            errorMsg={errorMsg}
+            onErrorDismiss={() => setErrorMsg(null)}
+          >
+            <form onSubmit={handleMachineSubmit} className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Nombre / Modelo *
+                  </label>
+                  <input
+                    type="text"
+                    value={mNombre}
+                    onChange={(e) => setMNombre(e.target.value)}
+                    placeholder="Tractor John Deere 6110M"
+                    required
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white font-semibold min-h-[42px]"
+                  />
                 </div>
 
-                <form onSubmit={handleSaveJobType} className="space-y-3.5">
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Nombre de la Labor / Trabajo *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={jtNombre}
-                      onChange={(e) => setJtNombre(e.target.value)}
-                      placeholder="Ej. Tractor con sembradora"
-                      className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
-                    />
-                    <p className="text-[10px] text-stone-500 mt-1">
-                      Puedes modificar el nombre para adaptarlo a las labores reales de la propiedad.
-                    </p>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-stone-700 mb-1">
-                        Tarifa *
-                      </label>
-                      <input
-                        type="text"
-                        inputMode="decimal"
-                        required
-                        value={jtTarifa}
-                        onChange={(e) => setJtTarifa(e.target.value)}
-                        placeholder="30"
-                        className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-stone-700 mb-1">
-                        Unidad de Cobro *
-                      </label>
-                      <select
-                        value={jtUnidad}
-                        onChange={(e) => setJtUnidad(e.target.value as 'ha' | 'hora')}
-                        className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-white min-h-[42px]"
-                      >
-                        <option value="ha">Hectárea (ha)</option>
-                        <option value="hora">Hora</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-stone-700 mb-1">
-                        Moneda *
-                      </label>
-                      <select
-                        value={jtMoneda}
-                        onChange={(e) => setJtMoneda(e.target.value as Currency)}
-                        className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-white font-semibold min-h-[42px]"
-                      >
-                        <option value="USD">USD ($)</option>
-                        <option value="BOB">BOB (Bs)</option>
-                      </select>
-                    </div>
-
-                    <div className="flex items-center gap-2 pt-5">
-                      <input
-                        type="checkbox"
-                        id="jtActivo"
-                        checked={jtActivo}
-                        onChange={(e) => setJtActivo(e.target.checked)}
-                        className="h-4 w-4 rounded text-emerald-600 focus:ring-emerald-500"
-                      />
-                      <label htmlFor="jtActivo" className="text-xs font-medium text-stone-700 cursor-pointer">
-                        Labor Activa
-                      </label>
-                    </div>
-                  </div>
-
-                  <div className="bg-amber-50 p-2.5 rounded-xl border border-amber-200 text-[11px] text-amber-900 leading-snug">
-                    ℹ️ Las modificaciones de tarifas solo aplican a nuevos servicios registrados. Los registros históricos conservan la tarifa original con la que fueron guardados.
-                  </div>
-
-                  <div className="flex items-center justify-end gap-2.5 pt-2">
-                    <button
-                      type="button"
-                      onClick={() => setShowJobTypeModal(false)}
-                      className="px-4 py-2.5 rounded-xl border border-stone-300 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 cursor-pointer min-h-[40px]"
-                    >
-                      Cancelar
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={isSavingJobType}
-                      className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-700 text-xs font-bold text-white hover:bg-emerald-800 transition cursor-pointer min-h-[40px] disabled:opacity-50"
-                    >
-                      {isSavingJobType ? (
-                        <>
-                          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                          <span>Guardando...</span>
-                        </>
-                      ) : (
-                        <span>{editingJobTypeId ? 'Guardar Cambios' : 'Registrar Labor'}</span>
-                      )}
-                    </button>
-                  </div>
-                </form>
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Identificación / Código
+                  </label>
+                  <input
+                    type="text"
+                    value={mIdentificacion}
+                    onChange={(e) => setMIdentificacion(e.target.value)}
+                    placeholder="TR-01"
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white min-h-[42px]"
+                  />
+                </div>
               </div>
-            </div>
-          )}
+
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">Tipo de Equipo</label>
+                <SegmentedControl
+                  options={[
+                    { value: 'Tractor', label: 'Tractor' },
+                    { value: 'Cosechadora', label: 'Cosechadora' },
+                    { value: 'Fumigadora', label: 'Fumigadora' },
+                    { value: 'Camión', label: 'Camión' },
+                    { value: 'Otro', label: 'Otro' },
+                  ]}
+                  value={mTipo}
+                  onChange={(val) => setMTipo(val)}
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  Icono realista
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowMachineIconSheet(true)}
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-stone-300 bg-stone-50/50 hover:bg-white transition min-h-[44px] cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <VisualIcon name={mIcono || 'tractor'} size="sm" />
+                    <span className="text-xs font-semibold text-stone-800 truncate">
+                      {getIconDefinition(mIcono || 'tractor').label}
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-bold text-emerald-700 shrink-0">Elegir icono</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">Tarifa *</label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={mTarifa}
+                    onChange={(e) => setMTarifa(e.target.value)}
+                    placeholder="250"
+                    required
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white font-semibold min-h-[42px]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">Unidad</label>
+                  <SegmentedControl
+                    options={[
+                      { value: 'ha', label: 'Hectárea' },
+                      { value: 'h', label: 'Hora' },
+                    ]}
+                    value={mUnidad}
+                    onChange={(val) => setMUnidad(val as 'h' | 'ha')}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">Moneda</label>
+                  <SegmentedControl
+                    options={[
+                      { value: 'BOB', label: 'BOB (Bs)' },
+                      { value: 'USD', label: 'USD ($)' },
+                    ]}
+                    value={mMoneda}
+                    onChange={(val) => setMMoneda(val as Currency)}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">Estado</label>
+                  <SegmentedControl
+                    options={[
+                      { value: 'operativo', label: 'Operativo' },
+                      { value: 'mantenimiento', label: 'Mantenim.' },
+                      { value: 'inactivo', label: 'Inactivo' },
+                    ]}
+                    value={mEstado}
+                    onChange={(val) => setMEstado(val as any)}
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-2.5 pt-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowMachineForm(false);
+                    setEditingMachineId(null);
+                    setMNombre('');
+                    setMIdentificacion('');
+                    setErrorMsg(null);
+                  }}
+                  className="flex-1 py-3 rounded-xl border border-stone-300 bg-stone-100 hover:bg-stone-200 text-xs font-bold text-stone-700 transition cursor-pointer min-h-[44px]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-xs font-bold text-white shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[44px]"
+                >
+                  {saving ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <span>Guardando...</span>
+                    </>
+                  ) : (
+                    <span>{editingMachineId ? 'Guardar Cambios' : 'Registrar Máquina'}</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </IOSModal>
+
+          {/* Modal Trabajo de Maquinaria */}
+          <IOSModal
+            isOpen={showJobTypeModal}
+            onClose={() => {
+              setShowJobTypeModal(false);
+              setErrorMsg(null);
+            }}
+            title={editingJobTypeId ? 'Editar Labor de Máquina' : 'Nueva Labor para Máquina'}
+            subtitle="Configure la labor, tarifa, unidad de cobro e icono"
+            errorMsg={errorMsg}
+            onErrorDismiss={() => setErrorMsg(null)}
+          >
+            <form onSubmit={handleSaveJobType} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  Nombre de la Labor / Trabajo *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={jtNombre}
+                  onChange={(e) => setJtNombre(e.target.value)}
+                  placeholder="Ej. Siembra directa de soya"
+                  className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white font-semibold min-h-[42px]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  Icono del implemento / labor
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowJtIconSheet(true)}
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-stone-300 bg-stone-50/50 hover:bg-white transition min-h-[44px] cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="shrink-0 flex items-center justify-center p-1 rounded-lg bg-white border border-stone-200">
+                      <VisualIcon name={jtIcono || 'implemento'} size="sm" />
+                    </div>
+                    <span className="text-xs font-semibold text-stone-800 truncate">
+                      {getIconDefinition(jtIcono || 'implemento').label}
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-bold text-emerald-700 shrink-0">Elegir icono</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">Tarifa *</label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    required
+                    value={jtTarifa}
+                    onChange={(e) => setJtTarifa(e.target.value)}
+                    placeholder="30"
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white font-semibold min-h-[42px]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">Unidad de Cobro *</label>
+                  <SegmentedControl
+                    options={[
+                      { value: 'ha', label: 'Hectárea (ha)' },
+                      { value: 'hora', label: 'Hora' },
+                    ]}
+                    value={jtUnidad}
+                    onChange={(val) => setJtUnidad(val as 'ha' | 'hora')}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">Moneda *</label>
+                  <SegmentedControl
+                    options={[
+                      { value: 'USD', label: 'USD ($)' },
+                      { value: 'BOB', label: 'BOB (Bs)' },
+                    ]}
+                    value={jtMoneda}
+                    onChange={(val) => setJtMoneda(val as Currency)}
+                  />
+                </div>
+
+                <div className="flex items-center gap-2 pt-5">
+                  <input
+                    type="checkbox"
+                    id="jtActivoCheck"
+                    checked={jtActivo}
+                    onChange={(e) => setJtActivo(e.target.checked)}
+                    className="h-4 w-4 rounded text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <label htmlFor="jtActivoCheck" className="text-xs font-semibold text-stone-800 cursor-pointer">
+                    Labor Activa
+                  </label>
+                </div>
+              </div>
+
+              <div className="flex gap-2.5 pt-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowJobTypeModal(false);
+                    setErrorMsg(null);
+                  }}
+                  className="flex-1 py-3 rounded-xl border border-stone-300 bg-stone-100 hover:bg-stone-200 text-xs font-bold text-stone-700 transition cursor-pointer min-h-[44px]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingJobType}
+                  className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-xs font-bold text-white shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[44px]"
+                >
+                  {isSavingJobType ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <span>Guardando...</span>
+                    </>
+                  ) : (
+                    <span>{editingJobTypeId ? 'Guardar Cambios' : 'Registrar Labor'}</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </IOSModal>
+
+          <IconBottomSheet
+            isOpen={showMachineIconSheet}
+            onClose={() => setShowMachineIconSheet(false)}
+            category="maquinaria"
+            selectedIconId={mIcono}
+            onSelectIcon={(icon) => {
+              setMIcono(icon.id);
+              setShowMachineIconSheet(false);
+            }}
+            title="Elegir icono de maquinaria"
+          />
+
+          <IconBottomSheet
+            isOpen={showJtIconSheet}
+            onClose={() => setShowJtIconSheet(false)}
+            category="implemento"
+            selectedIconId={jtIcono}
+            onSelectIcon={(icon) => {
+              setJtIcono(icon.id);
+              setShowJtIconSheet(false);
+            }}
+            title="Elegir icono de implemento"
+          />
         </div>
       )}
 
       {/* DETAIL 4: ÍTEMS DE INGRESOS Y GASTOS */}
       {screen === 'items' && (
-        <div className="space-y-5">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
             <div>
               <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
                 <Tag className="h-5 w-5 text-emerald-700" />
-                <span>Ítems de Ingresos y Gastos ({itemsConfig.length})</span>
+                <span>Ítems de {itemClassTab === 'GASTO' ? 'Gastos' : 'Ingresos'} ({filteredItems.length})</span>
               </h2>
               <p className="text-xs text-stone-500 mt-0.5">
-                Gestión de rubros y conceptos para la clasificación contable en Maquinarias y Propiedad
+                {itemClassTab === 'GASTO'
+                  ? 'Rubros e insumos para labores de maquinaria y lotes'
+                  : 'Conceptos de venta y cosecha agrícola para Propiedad'}
               </p>
             </div>
+            <button
+              type="button"
+              onClick={handleOpenAddItem}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 text-white text-xs font-bold shadow-xs transition cursor-pointer min-h-[40px] self-start sm:self-auto"
+            >
+              <Plus className="h-4 w-4" />
+              <span>{itemClassTab === 'GASTO' ? 'Nuevo Ítem de Gasto' : 'Nuevo Ingreso Agrícola'}</span>
+            </button>
           </div>
 
-          {/* Formulario de Creación / Edición */}
-          {showItemForm && (
-            <div className="rounded-2xl border border-emerald-300 bg-emerald-50/40 p-4 sm:p-5 shadow-xs space-y-3">
-              <h3 className="text-xs font-bold text-emerald-950 uppercase tracking-wider">
-                {editingItemId ? 'Editar Ítem / Rubro' : 'Crear Nuevo Ítem / Rubro'}
-              </h3>
-              <form onSubmit={handleItemSubmit} className="space-y-3">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Nombre del Ítem *
-                    </label>
-                    <input
-                      type="text"
-                      value={itemName}
-                      onChange={(e) => setItemName(e.target.value)}
-                      placeholder="Ej. Semillas de Soya, Repuestos, Diésel..."
-                      required
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
-                    />
-                  </div>
+          {/* 3.1 Class Segment Selector [ Gastos | Ingresos ] */}
+          <div>
+            <SegmentedControl
+              options={[
+                { value: 'GASTO', label: 'Gastos' },
+                { value: 'INGRESO', label: 'Ingresos' },
+              ]}
+              value={itemClassTab}
+              onChange={(val) => setItemClassTab(val)}
+              variant="green"
+              className="w-full text-sm"
+            />
+          </div>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Módulo Asignado *
-                    </label>
-                    <select
-                      value={itemModulo}
-                      onChange={(e) => setItemModulo(e.target.value as 'MAQUINARIAS' | 'PROPIEDAD')}
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white font-semibold min-h-[42px]"
-                    >
-                      <option value="MAQUINARIAS">MAQUINARIAS</option>
-                      <option value="PROPIEDAD">PROPIEDAD</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Clase de Transacción *
-                    </label>
-                    <select
-                      value={itemClase}
-                      onChange={(e) => setItemClase(e.target.value as 'GASTO' | 'INGRESO')}
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white font-semibold min-h-[42px]"
-                    >
-                      <option value="GASTO">GASTO</option>
-                      <option value="INGRESO">INGRESO</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Unidad de Medida
-                    </label>
-                    <input
-                      type="text"
-                      value={itemUnidad}
-                      onChange={(e) => setItemUnidad(e.target.value)}
-                      placeholder="litros, kg, toneladas, horas..."
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white min-h-[42px]"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Precio Predeterminado <span className="text-stone-400 font-normal">(Opcional)</span>
-                    </label>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="any"
-                      value={itemPrecio}
-                      onChange={(e) =>
-                        setItemPrecio(e.target.value === '' ? '' : parseFloat(e.target.value))
-                      }
-                      placeholder="0.00"
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white min-h-[42px]"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">Moneda</label>
-                    <select
-                      value={itemMoneda}
-                      onChange={(e) => setItemMoneda(e.target.value as Currency)}
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white font-semibold min-h-[42px]"
-                    >
-                      <option value="BOB">BOB (Bs)</option>
-                      <option value="USD">USD ($)</option>
-                    </select>
-                  </div>
-
-                  <div className="flex items-center gap-2 pt-5">
-                    <input
-                      type="checkbox"
-                      id="itemActivoCheck"
-                      checked={itemActivo}
-                      onChange={(e) => setItemActivo(e.target.checked)}
-                      className="rounded text-emerald-600 focus:ring-emerald-500 h-4 w-4"
-                    />
-                    <label htmlFor="itemActivoCheck" className="text-xs font-semibold text-stone-800 cursor-pointer">
-                      Ítem Activo (Disponible en formularios)
-                    </label>
-                  </div>
-                </div>
-
-                <div className="flex gap-2 pt-2">
-                  <button
-                    type="submit"
-                    disabled={saving}
-                    className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-700 py-3 text-xs font-bold text-white shadow-xs hover:bg-emerald-800 transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[42px]"
-                  >
-                    <Plus className="h-4 w-4" />
-                    <span>{editingItemId ? 'Guardar Cambios' : 'Registrar Ítem'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowItemForm(false);
-                      setEditingItemId(null);
-                      setItemName('');
-                      setItemPrecio('');
-                    }}
-                    className="px-4 py-3 rounded-xl border border-stone-300 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 cursor-pointer min-h-[42px]"
-                  >
-                    Cancelar
-                  </button>
-                </div>
-              </form>
+          {/* 3.2 Module Segment Selector [ Todos | Maquinarias | Propiedad ] - ONLY for GASTOS */}
+          {itemClassTab === 'GASTO' && (
+            <div>
+              <SegmentedControl
+                options={[
+                  { value: 'TODOS', label: 'Todos los Módulos' },
+                  { value: 'MAQUINARIAS', label: 'Maquinarias' },
+                  { value: 'PROPIEDAD', label: 'Propiedad' },
+                ]}
+                value={filterModulo}
+                onChange={(val) => setFilterModulo(val)}
+                variant="green"
+                className="w-full text-xs"
+              />
             </div>
           )}
 
-          {/* Filtros y Búsqueda */}
-          <div className="rounded-2xl border border-stone-200 bg-white p-3.5 sm:p-4 shadow-xs space-y-3">
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
-              <div className="relative sm:col-span-1">
-                <Search className="absolute left-3 top-3 h-3.5 w-3.5 text-stone-400" />
-                <input
-                  type="text"
-                  value={itemSearch}
-                  onChange={(e) => setItemSearch(e.target.value)}
-                  placeholder="Buscar por nombre..."
-                  className="w-full text-xs pl-8 pr-3 py-2 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:outline-none min-h-[38px]"
+          {/* 3.3 Search & 3.4 Inactive Items Toggle */}
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-stone-400" />
+              <input
+                type="text"
+                value={itemSearch}
+                onChange={(e) => setItemSearch(e.target.value)}
+                placeholder={itemClassTab === 'GASTO' ? 'Buscar insumo o gasto...' : 'Buscar producto o cosecha...'}
+                className="w-full text-xs pl-8 pr-3 py-2 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:outline-none min-h-[38px]"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowInactiveItems(!showInactiveItems)}
+              className={`px-3 py-2 rounded-xl border text-xs font-semibold transition cursor-pointer min-h-[38px] shrink-0 ${
+                showInactiveItems
+                  ? 'border-amber-400 bg-amber-50 text-amber-900'
+                  : 'border-stone-300 bg-white text-stone-600 hover:bg-stone-50'
+              }`}
+            >
+              {showInactiveItems ? 'Ocultar inactivos' : 'Ver desactivados'}
+            </button>
+          </div>
+
+          {/* 3.5 Compact List of Items */}
+          <div className="space-y-2 pt-1">
+            {filteredItems.map((item) => {
+              const isActivo = item.activo !== false;
+              const itemMod = item.modulo || (item.tipo && item.tipo.includes('maquinaria') ? 'MAQUINARIAS' : 'PROPIEDAD');
+
+              return (
+                <div
+                  key={item.id}
+                  onClick={() => handleEditItem(item)}
+                  className={`flex items-center justify-between p-3 rounded-2xl border transition cursor-pointer group ${
+                    isActivo
+                      ? 'border-stone-200/80 bg-white hover:bg-stone-50 hover:border-emerald-500/50 shadow-2xs'
+                      : 'border-stone-200/60 bg-stone-100/80 opacity-75'
+                  }`}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="shrink-0 flex items-center justify-center p-1 rounded-xl bg-stone-50 border border-stone-200/80 shadow-2xs">
+                      <VisualIcon
+                        iconId={item.icono}
+                        nameHint={item.nombre}
+                        category={itemClassTab === 'INGRESO' ? 'ingreso' : 'gasto'}
+                        size="sm"
+                      />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-bold text-stone-900 truncate">{item.nombre}</span>
+                        <span
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                            itemMod === 'MAQUINARIAS'
+                              ? 'bg-amber-100/90 text-amber-900'
+                              : 'bg-emerald-100/90 text-emerald-900'
+                          }`}
+                        >
+                          {itemMod === 'MAQUINARIAS' ? 'Maquinarias' : 'Propiedad'}
+                        </span>
+                        {!isActivo && (
+                          <span className="text-[10px] font-semibold text-stone-500 bg-stone-200 px-2 py-0.5 rounded-full">
+                            Inactivo
+                          </span>
+                        )}
+                      </div>
+                      {item.unidad && (
+                        <p className="text-[11px] text-stone-500 mt-0.5 truncate">
+                          Unidad: {item.unidad}
+                          {(item.precioPredeterminado || item.precio) ? (
+                            <span> &bull; Ref: {item.moneda || 'BOB'} {item.precioPredeterminado || item.precio}</span>
+                          ) : null}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
+                </div>
+              );
+            })}
+
+            {filteredItems.length === 0 && (
+              <div className="py-10 text-center text-xs text-stone-400 bg-stone-50 rounded-2xl border border-stone-200">
+                No se encontraron ítems para {itemClassTab === 'GASTO' ? 'gastos' : 'ingresos'} con los filtros seleccionados.
+              </div>
+            )}
+          </div>
+
+          {/* Modal Item */}
+          <IOSModal
+            isOpen={showItemForm}
+            onClose={() => {
+              setShowItemForm(false);
+              setEditingItemId(null);
+              setItemName('');
+              setItemPrecio('');
+              setErrorMsg(null);
+            }}
+            title={editingItemId ? 'Editar Ítem' : (itemClase === 'INGRESO' ? 'Registrar Ingreso Agrícola' : 'Crear Ítem de Gasto')}
+            subtitle={itemClase === 'INGRESO' ? 'Configura el concepto de cosecha, unidad e icono de ingreso' : 'Configura el rubro, módulo, unidad e icono del gasto'}
+            errorMsg={errorMsg}
+            onErrorDismiss={() => setErrorMsg(null)}
+          >
+            <form onSubmit={handleItemSubmit} className="space-y-4">
+              {/* Clase Gasto / Ingreso */}
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  Clase de Transacción *
+                </label>
+                <SegmentedControl
+                  options={[
+                    { value: 'GASTO', label: 'Gasto' },
+                    { value: 'INGRESO', label: 'Ingreso' },
+                  ]}
+                  value={itemClase}
+                  onChange={(val) => {
+                    setItemClase(val);
+                    if (val === 'INGRESO') {
+                      setItemModulo('PROPIEDAD');
+                      if (!editingItemId) {
+                        setItemIcono('soya');
+                        setItemUnidad('toneladas');
+                      }
+                    } else if (!editingItemId) {
+                      setItemIcono('diesel');
+                      setItemUnidad('litros');
+                    }
+                  }}
+                  variant="green"
                 />
               </div>
 
-              <div>
-                <select
-                  value={filterModulo}
-                  onChange={(e) => setFilterModulo(e.target.value as any)}
-                  className="w-full text-xs px-2.5 py-2 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:outline-none min-h-[38px]"
-                >
-                  <option value="TODOS">Todos los Módulos</option>
-                  <option value="MAQUINARIAS">Módulo Maquinarias</option>
-                  <option value="PROPIEDAD">Módulo Propiedad</option>
-                </select>
-              </div>
-
-              <div>
-                <select
-                  value={filterClase}
-                  onChange={(e) => setFilterClase(e.target.value as any)}
-                  className="w-full text-xs px-2.5 py-2 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:outline-none min-h-[38px]"
-                >
-                  <option value="TODOS">Todas las Clases</option>
-                  <option value="GASTO">Gastos</option>
-                  <option value="INGRESO">Ingresos</option>
-                </select>
-              </div>
-
-              <div>
-                <select
-                  value={filterActivo}
-                  onChange={(e) => setFilterActivo(e.target.value as any)}
-                  className="w-full text-xs px-2.5 py-2 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:outline-none min-h-[38px]"
-                >
-                  <option value="TODOS">Todos los Estados</option>
-                  <option value="ACTIVOS">Solo Activos</option>
-                  <option value="INACTIVOS">Solo Inactivos</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Listado / Tabla de Ítems */}
-            <div className="space-y-2 pt-1">
-              {filteredItems.map((item) => {
-                const isActivo = item.activo !== false;
-                const mod = item.modulo || (item.tipo && item.tipo.includes('maquinaria') ? 'MAQUINARIAS' : 'PROPIEDAD');
-                const cls = item.clase || (item.tipo && item.tipo.includes('ingreso') ? 'INGRESO' : 'GASTO');
-
-                return (
-                  <div
-                    key={item.id}
-                    className={`flex flex-col sm:flex-row sm:items-center justify-between p-3 sm:p-3.5 rounded-xl border transition gap-2 ${
-                      isActivo
-                        ? 'border-stone-200 bg-stone-50/60 hover:bg-white'
-                        : 'border-stone-200/60 bg-stone-100/70 opacity-75'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div
-                        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold ${
-                          cls === 'INGRESO'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : 'bg-rose-100 text-rose-800'
-                        }`}
-                      >
-                        {cls === 'INGRESO' ? '+' : '-'}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs font-bold text-stone-900">{item.nombre}</span>
-                          <span
-                            className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                              mod === 'MAQUINARIAS'
-                                ? 'bg-amber-100 text-amber-900'
-                                : 'bg-emerald-100 text-emerald-900'
-                            }`}
-                          >
-                            {mod}
-                          </span>
-                          <span
-                            className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
-                              cls === 'INGRESO' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
-                            }`}
-                          >
-                            {cls}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-stone-500 mt-0.5">
-                          Unidad: <strong>{item.unidad || 'unidades'}</strong>
-                          {(item.precioPredeterminado || item.precio) ? (
-                            <span> &bull; Precio Base: {item.moneda || 'BOB'} {item.precioPredeterminado || item.precio}</span>
-                          ) : null}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-end gap-2 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-stone-200/60">
-                      <span
-                        className={`text-[10px] font-bold px-2 py-1 rounded-full ${
-                          isActivo
-                            ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                            : 'bg-stone-200 text-stone-600 border border-stone-300'
-                        }`}
-                      >
-                        {isActivo ? 'Activo' : 'Inactivo'}
-                      </span>
-
-                      <button
-                        type="button"
-                        onClick={() => handleEditItem(item)}
-                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-stone-300 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 cursor-pointer min-h-[32px]"
-                      >
-                        <Edit3 className="h-3.5 w-3.5 text-stone-500" />
-                        <span>Editar</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleToggleItemStatus(item)}
-                        disabled={saving}
-                        className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium cursor-pointer transition min-h-[32px] ${
-                          isActivo
-                            ? 'border border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100'
-                            : 'border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100'
-                        }`}
-                        title={
-                          isActivo
-                            ? 'Desactivar para ocultar de formularios sin eliminar el historial contable'
-                            : 'Reactivar ítem'
-                        }
-                      >
-                        <span>{isActivo ? 'Desactivar' : 'Reactivar'}</span>
-                      </button>
-                    </div>
+              {/* Módulo Maquinarias / Propiedad */}
+              {itemClase === 'GASTO' ? (
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Módulo Asignado *
+                  </label>
+                  <SegmentedControl
+                    options={[
+                      { value: 'MAQUINARIAS', label: 'Maquinarias' },
+                      { value: 'PROPIEDAD', label: 'Propiedad' },
+                    ]}
+                    value={itemModulo}
+                    onChange={(val) => setItemModulo(val)}
+                    variant="green"
+                  />
+                </div>
+              ) : (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-3 flex items-center justify-between">
+                  <div>
+                    <p className="text-xs font-bold text-emerald-950">Módulo Asignado: Propiedad</p>
+                    <p className="text-[11px] text-emerald-700">
+                      Los ingresos de maquinarias se generan exclusivamente a través de los trabajos registrados
+                    </p>
                   </div>
-                );
-              })}
-
-              {filteredItems.length === 0 && (
-                <div className="py-8 text-center text-xs text-stone-400 bg-stone-50 rounded-xl border border-stone-200">
-                  No se encontraron ítems con los filtros seleccionados.
+                  <span className="text-[10px] font-bold bg-emerald-200 text-emerald-900 px-2 py-0.5 rounded-full shrink-0 ml-2">
+                    Automático
+                  </span>
                 </div>
               )}
-            </div>
-          </div>
+
+              {/* Nombre */}
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  Nombre del Ítem *
+                </label>
+                <input
+                  type="text"
+                  value={itemName}
+                  onChange={(e) => setItemName(e.target.value)}
+                  placeholder={itemClase === 'INGRESO' ? 'Ej. Venta Cosecha Soya, Venta de Maíz...' : 'Ej. Semillas de Soya, Repuestos, Diésel...'}
+                  required
+                  className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
+                />
+              </div>
+
+              {/* Icono visual button */}
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  Icono realista
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowItemIconSheet(true)}
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-stone-300 bg-stone-50/50 hover:bg-white transition min-h-[44px] cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="shrink-0 flex items-center justify-center p-1 rounded-lg bg-white border border-stone-200">
+                      <VisualIcon
+                        iconId={itemIcono}
+                        nameHint={itemName || (itemClase === 'INGRESO' ? 'soya' : 'diesel')}
+                        category={itemClase === 'INGRESO' ? 'ingreso' : 'gasto'}
+                        size="sm"
+                      />
+                    </div>
+                    <span className="text-xs font-semibold text-stone-800 truncate">
+                      {getIconDefinition(itemIcono || (itemClase === 'INGRESO' ? 'soya' : 'diesel'), itemClase === 'INGRESO' ? 'ingreso' : 'gasto').label}
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-bold text-emerald-700 shrink-0">Elegir icono</span>
+                </button>
+              </div>
+
+              {/* Unidad de medida & Precio */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Unidad de Medida
+                  </label>
+                  <input
+                    type="text"
+                    value={itemUnidad}
+                    onChange={(e) => setItemUnidad(e.target.value)}
+                    placeholder={itemClase === 'INGRESO' ? 'toneladas, quintales, kg...' : 'litros, kg, unidades...'}
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[42px]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Precio Ref. (Opcional)
+                  </label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    value={itemPrecio}
+                    onChange={(e) =>
+                      setItemPrecio(e.target.value === '' ? '' : parseFloat(e.target.value))
+                    }
+                    placeholder="0.00"
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[42px]"
+                  />
+                </div>
+              </div>
+
+              {/* Moneda */}
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">Moneda</label>
+                <SegmentedControl
+                  options={[
+                    { value: 'USD', label: 'USD ($)' },
+                    { value: 'BOB', label: 'BOB (Bs)' },
+                  ]}
+                  value={itemMoneda}
+                  onChange={(val) => setItemMoneda(val as Currency)}
+                  variant="green"
+                />
+              </div>
+
+              {/* Estado Activo Checkbox */}
+              <div className="flex items-center gap-2 pt-1">
+                <input
+                  type="checkbox"
+                  id="itemActivoCheckModal"
+                  checked={itemActivo}
+                  onChange={(e) => setItemActivo(e.target.checked)}
+                  className="rounded text-emerald-600 focus:ring-emerald-500 h-4 w-4"
+                />
+                <label htmlFor="itemActivoCheckModal" className="text-xs font-semibold text-stone-800 cursor-pointer">
+                  Ítem activo (Disponible en formularios)
+                </label>
+              </div>
+
+              {/* Actions */}
+              <div className="flex gap-2.5 pt-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowItemForm(false);
+                    setEditingItemId(null);
+                    setItemName('');
+                    setItemPrecio('');
+                    setErrorMsg(null);
+                  }}
+                  className="flex-1 py-3 rounded-xl border border-stone-300 bg-stone-100 hover:bg-stone-200 text-xs font-bold text-stone-700 transition cursor-pointer min-h-[44px]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-xs font-bold text-white shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[44px]"
+                >
+                  {saving ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <span>Guardando...</span>
+                    </>
+                  ) : (
+                    <span>{editingItemId ? 'Guardar Cambios' : 'Registrar Ítem'}</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </IOSModal>
+
+          <IconBottomSheet
+            isOpen={showItemIconSheet}
+            onClose={() => setShowItemIconSheet(false)}
+            category={itemClase === 'INGRESO' ? 'ingreso' : 'gasto'}
+            selectedIconId={itemIcono}
+            onSelectIcon={(icon) => {
+              setItemIcono(icon.id);
+              setShowItemIconSheet(false);
+            }}
+            title={itemClase === 'INGRESO' ? 'Elegir icono de ingreso agrícola' : 'Elegir icono de gasto'}
+          />
         </div>
       )}
 
@@ -3115,7 +3291,7 @@ export const AdminView: React.FC<Props> = ({
               Tipo de Cambio (BOB / USD)
             </h2>
             <p className="text-xs text-stone-500 mt-0.5">
-              Establece la tasa oficial de conversión utilizada en informes y hojas de cálculo
+              Establece la tasa oficial de conversión utilizada en informes
             </p>
           </div>
 
@@ -3132,7 +3308,7 @@ export const AdminView: React.FC<Props> = ({
                   onChange={(e) => setTasaInput(e.target.value)}
                   placeholder="Ej. 6.96 o 6,96"
                   required
-                  className="w-full text-base font-bold font-mono px-3.5 py-2.5 rounded-lg border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
+                  className="w-full text-base font-bold font-mono px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
                 />
               </div>
 
@@ -3145,14 +3321,14 @@ export const AdminView: React.FC<Props> = ({
                   value={tasaNota}
                   onChange={(e) => setTasaNota(e.target.value)}
                   placeholder="Configuración manual para la campaña activa"
-                  className="w-full text-xs px-3.5 py-2.5 rounded-lg border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[42px]"
+                  className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[42px]"
                 />
               </div>
 
               <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3.5 text-xs text-emerald-900 space-y-1">
                 <p className="font-semibold">Información del Registro:</p>
                 <p className="text-[11px] text-emerald-800">
-                  Última actualización registrada en Google Sheets: {exchangeRate.fechaActualizacion || 'Hoy'}
+                  Última actualización: {exchangeRate.fechaActualizacion || 'Hoy'}
                 </p>
               </div>
 
@@ -3175,93 +3351,13 @@ export const AdminView: React.FC<Props> = ({
             <div>
               <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
                 <ShieldCheck className="h-5 w-5 text-emerald-700" />
-                Activos Patrimoniales y Mejoras ({assets.length})
+                Activos Patrimoniales ({assets.length})
               </h2>
               <p className="text-xs text-stone-500 mt-0.5">
-                Inversiones patrimoniales, valores acumulados e historial de mejoras incorporadas
+                Inversiones patrimoniales e historial de mejoras incorporadas
               </p>
             </div>
           </div>
-
-          {/* Form when open */}
-          {showAssetForm && (
-            <div className="rounded-2xl border border-emerald-300 bg-emerald-50/40 p-4 sm:p-5 shadow-xs space-y-3">
-              <h3 className="text-xs font-bold text-emerald-950 uppercase tracking-wider">
-                Registrar Activo Patrimonial
-              </h3>
-              <form onSubmit={handleAssetSubmit} className="space-y-3">
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Tipo de Activo</label>
-                  <select
-                    value={aTipo}
-                    onChange={(e) => setATipo(e.target.value as any)}
-                    className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white min-h-[42px]"
-                  >
-                    <option value="MAQUINARIA">Maquinaria / Pesada</option>
-                    <option value="LOTE">Terreno / Lote / Propiedad Agrícola</option>
-                    <option value="OTRO">Infraestructura / Silos / Tinglados / Otros</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Nombre del Activo *</label>
-                  <input
-                    type="text"
-                    value={aNombre}
-                    onChange={(e) => setANombre(e.target.value)}
-                    placeholder="Tractor John Deere 6110M"
-                    required
-                    className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white min-h-[42px]"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">Valor Inicial *</label>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="0.01"
-                      value={aValorInicial}
-                      onChange={(e) => setAValorInicial(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                      placeholder="85000"
-                      required
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white font-bold min-h-[42px]"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">Moneda</label>
-                    <select
-                      value={aMoneda}
-                      onChange={(e) => setAMoneda(e.target.value as Currency)}
-                      className="w-full text-xs px-3 py-2.5 rounded-lg border border-stone-300 bg-white font-bold min-h-[42px]"
-                    >
-                      <option value="USD">USD ($)</option>
-                      <option value="BOB">BOB (Bs)</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="flex gap-2 pt-1">
-                  <button
-                    type="submit"
-                    disabled={saving}
-                    className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-700 py-3 text-xs font-bold text-white hover:bg-emerald-800 transition cursor-pointer min-h-[42px]"
-                  >
-                    <Plus className="h-4 w-4" />
-                    <span>Registrar Activo</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowAssetForm(false)}
-                    className="px-4 py-3 rounded-xl border border-stone-300 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 cursor-pointer min-h-[42px]"
-                  >
-                    Cancelar
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
 
           {/* Records List FIRST */}
           <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-xs space-y-3">
@@ -3282,7 +3378,6 @@ export const AdminView: React.FC<Props> = ({
                   </div>
                 </div>
 
-                {/* Improvements List */}
                 {asset.mejoras && asset.mejoras.length > 0 && (
                   <div className="pt-2 border-t border-stone-200/80 space-y-1 text-xs">
                     <p className="text-[11px] font-semibold text-stone-700">Mejoras Aplicadas:</p>
@@ -3295,7 +3390,6 @@ export const AdminView: React.FC<Props> = ({
                   </div>
                 )}
 
-                {/* Add Improvement Inline Form */}
                 {selectedAssetId === asset.id ? (
                   <form onSubmit={handleImprovementSubmit} className="pt-2 border-t border-stone-200 space-y-2 bg-stone-100 p-3 rounded-lg">
                     <p className="text-xs font-bold text-stone-800">Añadir Mejora Posterior al Activo:</p>
@@ -3331,7 +3425,7 @@ export const AdminView: React.FC<Props> = ({
                     onClick={() => setSelectedAssetId(asset.id)}
                     className="text-xs text-emerald-700 hover:underline font-semibold pt-1 block cursor-pointer"
                   >
-                    + Añadir mejora posterior (Ej: Piloto automático USD 6.000)
+                    + Añadir mejora posterior
                   </button>
                 )}
               </div>
@@ -3343,6 +3437,100 @@ export const AdminView: React.FC<Props> = ({
               </div>
             )}
           </div>
+
+          {/* Modal Asset */}
+          <IOSModal
+            isOpen={showAssetForm}
+            onClose={() => {
+              setShowAssetForm(false);
+              setErrorMsg(null);
+            }}
+            title="Registrar Activo Patrimonial"
+            subtitle="Inversiones patrimoniales e infraestructura"
+            errorMsg={errorMsg}
+            onErrorDismiss={() => setErrorMsg(null)}
+          >
+            <form onSubmit={handleAssetSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">Tipo de Activo</label>
+                <SegmentedControl
+                  options={[
+                    { value: 'MAQUINARIA', label: 'Maquinaria' },
+                    { value: 'LOTE', label: 'Terreno / Lote' },
+                    { value: 'OTRO', label: 'Otro' },
+                  ]}
+                  value={aTipo}
+                  onChange={(val) => setATipo(val as any)}
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">Nombre del Activo *</label>
+                <input
+                  type="text"
+                  value={aNombre}
+                  onChange={(e) => setANombre(e.target.value)}
+                  placeholder="Tractor John Deere 6110M"
+                  required
+                  className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white font-semibold min-h-[42px]"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">Valor Inicial *</label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="0.01"
+                    value={aValorInicial}
+                    onChange={(e) => setAValorInicial(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                    placeholder="85000"
+                    required
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white font-bold min-h-[42px]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">Moneda</label>
+                  <SegmentedControl
+                    options={[
+                      { value: 'USD', label: 'USD ($)' },
+                      { value: 'BOB', label: 'BOB (Bs)' },
+                    ]}
+                    value={aMoneda}
+                    onChange={(val) => setAMoneda(val as Currency)}
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-2.5 pt-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAssetForm(false);
+                    setErrorMsg(null);
+                  }}
+                  className="flex-1 py-3 rounded-xl border border-stone-300 bg-stone-100 hover:bg-stone-200 text-xs font-bold text-stone-700 transition cursor-pointer min-h-[44px]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-xs font-bold text-white shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[44px]"
+                >
+                  {saving ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <span>Guardando...</span>
+                    </>
+                  ) : (
+                    <span>Registrar Activo</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </IOSModal>
         </div>
       )}
     </div>

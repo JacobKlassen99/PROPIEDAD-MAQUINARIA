@@ -1,15 +1,74 @@
-export type IconCategory = 'maquinaria' | 'implemento' | 'gasto';
+export type IconCategory = 'maquinaria' | 'implemento' | 'gasto' | 'ingreso';
 
 export interface IconDefinition {
   id: string;
   name: string;
+  label?: string;
   category: IconCategory;
   keywords: string[];
   description?: string;
 }
 
 export const ICON_CATALOG: IconDefinition[] = [
-  // --- 1. MAQUINARIAS ---
+  // --- 1. INGRESOS AGRÍCOLAS ---
+  {
+    id: 'soya',
+    name: 'Venta de Soya',
+    label: 'Venta de Soya',
+    category: 'ingreso',
+    keywords: ['soya', 'soja', 'cosecha', 'granos', 'venta de soya', 'legumbre', 'grano de oro', 'oleaginosa'],
+    description: 'Venta o cosecha de granos de soya',
+  },
+  {
+    id: 'maiz',
+    name: 'Venta de Maíz',
+    label: 'Venta de Maíz',
+    category: 'ingreso',
+    keywords: ['maiz', 'maíz', 'choclo', 'grano', 'venta de maiz', 'cosecha', 'cereal'],
+    description: 'Venta o cosecha de maíz amarillo o blanco',
+  },
+  {
+    id: 'trigo',
+    name: 'Venta de Trigo',
+    label: 'Venta de Trigo',
+    category: 'ingreso',
+    keywords: ['trigo', 'espiga', 'cereal', 'harina', 'venta de trigo', 'cosecha', 'pan'],
+    description: 'Venta o cosecha de trigo harinero o forrajero',
+  },
+  {
+    id: 'sorgo',
+    name: 'Venta de Sorgo',
+    label: 'Venta de Sorgo',
+    category: 'ingreso',
+    keywords: ['sorgo', 'panoja', 'grano rojo', 'venta de sorgo', 'cosecha', 'forraje'],
+    description: 'Venta o cosecha de sorgo granífero',
+  },
+  {
+    id: 'girasol',
+    name: 'Venta de Girasol',
+    label: 'Venta de Girasol',
+    category: 'ingreso',
+    keywords: ['girasol', 'pepitas', 'semilla', 'aceitera', 'venta de girasol', 'flor', 'cosecha'],
+    description: 'Venta o cosecha de semillas de girasol',
+  },
+  {
+    id: 'granos',
+    name: 'Otros Granos Agrícolas',
+    label: 'Otros Granos Agrícolas',
+    category: 'ingreso',
+    keywords: ['granos', 'productos', 'agricolas', 'chia', 'chía', 'sesamo', 'sésamo', 'frijol', 'cosecha'],
+    description: 'Venta de chía, sésamo, frijol u otros productos agrícolas',
+  },
+  {
+    id: 'otros-ingresos',
+    name: 'Otros Ingresos',
+    label: 'Otros Ingresos',
+    category: 'ingreso',
+    keywords: ['ingreso', 'dinero', 'venta', 'cobro', 'otros ingresos', 'bolivianos', 'dolares', 'renta'],
+    description: 'Otros ingresos, cobros extraordinarios o servicios de la propiedad',
+  },
+
+  // --- 2. MAQUINARIAS ---
   {
     id: 'tractor',
     name: 'Tractor Agrícola',
@@ -269,20 +328,31 @@ export function getIconDefinition(idOrName?: string, categoryHint?: IconCategory
   const directMatch = ICON_CATALOG.find((icon) => icon.id === clean);
   if (directMatch) return directMatch;
 
-  // 2. Mapeos comunes por nombre de labores oficiales
+  // 2. Mapeos de ingresos agrícolas
+  if (clean.includes('soya') || clean.includes('soja')) return findIcon('soya');
+  if (clean.includes('maiz') || clean.includes('maíz') || clean.includes('choclo')) return findIcon('maiz');
+  if (clean.includes('trigo')) return findIcon('trigo');
+  if (clean.includes('sorgo')) {
+    if (clean.includes('cortadora') || categoryHint === 'implemento') return findIcon('cortadora-sorgo');
+    return findIcon('sorgo');
+  }
+  if (clean.includes('girasol')) return findIcon('girasol');
+  if (clean.includes('grano') || clean.includes('chia') || clean.includes('sesamo') || clean.includes('frijol')) return findIcon('granos');
+  if (clean.includes('ingreso') || (categoryHint === 'ingreso' && clean.includes('venta'))) return findIcon('otros-ingresos');
+
+  // 3. Mapeos comunes por nombre de labores oficiales
   if (clean.includes('sembradora') || clean.includes('siembra')) return findIcon('sembradora');
   if (clean.includes('romplow')) return findIcon('romplow');
   if (clean.includes('ripper') || clean.includes('subsolador')) return findIcon('ripper');
   if (clean.includes('pala') || clean.includes('niveladora')) return findIcon('pala-niveladora');
   if (clean.includes('rastra') || clean.includes('rastreada')) return findIcon('rastra');
   if (clean.includes('trailla') || clean.includes('traílla')) return findIcon('trailla');
-  if (clean.includes('sorgo') || clean.includes('cortadora')) return findIcon('cortadora-sorgo');
   if (clean.includes('rolo')) return findIcon('rolo');
   if (clean.includes('fumig') || clean.includes('pulveriz')) {
     return categoryHint === 'maquinaria' ? findIcon('pulverizadora') : findIcon('fumigadora');
   }
 
-  // 3. Mapeos de gastos
+  // 4. Mapeos de gastos
   if (clean.includes('diesel') || clean.includes('diésel') || clean.includes('combustible')) return findIcon('diesel');
   if (clean.includes('gasolina')) return findIcon('gasolina');
   if (clean.includes('aceite') || clean.includes('lubricante')) return findIcon('aceite');
@@ -298,7 +368,7 @@ export function getIconDefinition(idOrName?: string, categoryHint?: IconCategory
   if (clean.includes('insecticida')) return findIcon('insecticida');
   if (clean.includes('fungicida')) return findIcon('insecticida');
 
-  // 4. Mapeos de maquinarias
+  // 5. Mapeos de maquinarias
   if (clean.includes('new holland') || clean.includes('ts115') || clean.includes('ts 115')) return findIcon('tractor-blue');
   if (clean.includes('cosechadora') || clean.includes('trilladora')) return findIcon('cosechadora');
   if (clean.includes('camion') || clean.includes('camión')) return findIcon('camion');
@@ -307,22 +377,24 @@ export function getIconDefinition(idOrName?: string, categoryHint?: IconCategory
   if (clean.includes('motonivel')) return findIcon('motoniveladora');
   if (clean.includes('tractor')) return findIcon('tractor');
 
-  // 5. Coincidencia por palabras clave
+  // 6. Coincidencia por palabras clave
   const keywordMatch = ICON_CATALOG.find((icon) =>
     icon.keywords.some((k) => clean.includes(k))
   );
-  if (keywordMatch) return keywordMatch;
+  if (keywordMatch) return { ...keywordMatch, label: keywordMatch.label || keywordMatch.name };
 
   return getDefaultIconForCategory(categoryHint || 'maquinaria');
 }
 
 function findIcon(id: string): IconDefinition {
-  return ICON_CATALOG.find((i) => i.id === id) || ICON_CATALOG[0];
+  const icon = ICON_CATALOG.find((i) => i.id === id) || ICON_CATALOG[0];
+  return { ...icon, label: icon.label || icon.name };
 }
 
 export function getDefaultIconForCategory(cat: IconCategory): IconDefinition {
   if (cat === 'implemento') return findIcon('sembradora');
   if (cat === 'gasto') return findIcon('diesel');
+  if (cat === 'ingreso') return findIcon('soya');
   return findIcon('tractor');
 }
 
@@ -338,5 +410,5 @@ export function searchIcons(query: string, categoryFilter?: IconCategory | 'todo
       item.id.toLowerCase().includes(q) ||
       item.keywords.some((k) => k.toLowerCase().includes(q))
     );
-  });
+  }).map((item) => ({ ...item, label: item.label || item.name }));
 }

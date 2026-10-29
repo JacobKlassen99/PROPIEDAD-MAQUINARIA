@@ -1,34 +1,43 @@
 import React, { useState, useMemo } from 'react';
-import { ChevronDown, Search, X, Check } from 'lucide-react';
+import { ChevronDown, Search, X, Check, LandPlot } from 'lucide-react';
 import { VisualIcon } from './VisualIcon';
-import { Machine, MachineJobType, ItemConfig } from '../types';
+import { Machine, MachineJobType, ItemConfig, Lot } from '../types';
 
 // ==========================================
 // 1. VISUAL MACHINE PICKER
 // ==========================================
 interface MachinePickerProps {
   machines: Machine[];
-  selectedId: string;
-  onSelect: (machineId: string) => void;
+  selectedId?: string;
+  selectedMachineId?: string;
+  onSelect?: (machineId: string) => void;
+  onSelectMachine?: (machine: Machine | any) => void;
   required?: boolean;
   label?: string;
   optionalText?: string;
+  allowNone?: boolean;
+  noneLabel?: string;
 }
 
 export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
   machines,
   selectedId,
+  selectedMachineId,
   onSelect,
+  onSelectMachine,
   required = false,
   label = 'Maquinaria',
   optionalText,
+  allowNone = false,
+  noneLabel = 'Gasto general (sin asignar)',
 }) => {
+  const currentId = selectedId !== undefined ? selectedId : (selectedMachineId || '');
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
 
   const selectedMachine = useMemo(
-    () => machines.find((m) => m.id === selectedId),
-    [machines, selectedId]
+    () => machines.find((m) => m.id === currentId),
+    [machines, currentId]
   );
 
   const filteredMachines = useMemo(() => {
@@ -42,8 +51,9 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
     );
   }, [machines, search]);
 
-  const handleChoose = (id: string) => {
-    onSelect(id);
+  const handleChoose = (id: string, m?: Machine) => {
+    if (onSelect) onSelect(id);
+    if (onSelectMachine) onSelectMachine(m || machines.find(x => x.id === id) || { id, nombre: '', tipo: '' });
     setIsOpen(false);
   };
 
@@ -151,12 +161,12 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
 
             {/* List */}
             <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2">
-              {!required && (
+              {(!required || allowNone) && (
                 <button
                   type="button"
-                  onClick={() => handleChoose('')}
+                  onClick={() => handleChoose('', undefined)}
                   className={`w-full flex items-center justify-between p-3 rounded-2xl border text-left transition cursor-pointer ${
-                    !selectedId
+                    !currentId
                       ? 'border-emerald-600 bg-emerald-50/90 shadow-xs'
                       : 'border-stone-200 bg-white hover:bg-stone-50'
                   }`}
@@ -166,11 +176,11 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
                       —
                     </div>
                     <div>
-                      <p className="text-xs font-bold text-stone-800">Sin asignar / General</p>
+                      <p className="text-xs font-bold text-stone-800">{noneLabel}</p>
                       <p className="text-[11px] text-stone-500">No vincular a una máquina específica</p>
                     </div>
                   </div>
-                  {!selectedId && (
+                  {!currentId && (
                     <div className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-600 text-white">
                       <Check className="h-3 w-3 stroke-[3]" />
                     </div>
@@ -179,12 +189,12 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
               )}
 
               {filteredMachines.map((m) => {
-                const isSelected = selectedId === m.id;
+                const isSelected = currentId === m.id;
                 return (
                   <button
                     key={m.id}
                     type="button"
-                    onClick={() => handleChoose(m.id)}
+                    onClick={() => handleChoose(m.id, m)}
                     className={`w-full flex items-center justify-between p-3 rounded-2xl border text-left transition cursor-pointer ${
                       isSelected
                         ? 'border-emerald-600 bg-emerald-50/90 ring-2 ring-emerald-500/20 shadow-xs'
@@ -247,38 +257,49 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
 // 2. VISUAL JOB TYPE / IMPLEMENT PICKER
 // ==========================================
 interface JobTypePickerProps {
-  jobs: MachineJobType[];
-  selectedId: string;
-  onSelect: (job: MachineJobType) => void;
+  jobs?: MachineJobType[];
+  jobTypes?: MachineJobType[];
+  selectedId?: string;
+  selectedJobTypeId?: string;
+  onSelect?: (job: MachineJobType) => void;
+  onSelectJobType?: (job: MachineJobType | any) => void;
   required?: boolean;
+  label?: string;
 }
 
 export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
   jobs,
+  jobTypes,
   selectedId,
+  selectedJobTypeId,
   onSelect,
+  onSelectJobType,
   required = true,
+  label = 'Tipo de Trabajo / Implemento',
 }) => {
+  const list = jobs || jobTypes || [];
+  const currentId = selectedId !== undefined ? selectedId : (selectedJobTypeId || '');
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
 
-  const selectedJob = useMemo(() => jobs.find((j) => j.id === selectedId), [jobs, selectedId]);
+  const selectedJob = useMemo(() => list.find((j) => j.id === currentId), [list, currentId]);
 
   const filteredJobs = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return jobs;
-    return jobs.filter((j) => j.nombre.toLowerCase().includes(q));
-  }, [jobs, search]);
+    if (!q) return list;
+    return list.filter((j) => j.nombre.toLowerCase().includes(q));
+  }, [list, search]);
 
   const handleChoose = (j: MachineJobType) => {
-    onSelect(j);
+    if (onSelect) onSelect(j);
+    if (onSelectJobType) onSelectJobType(j);
     setIsOpen(false);
   };
 
   return (
     <div>
       <label className="block text-xs font-semibold text-stone-700 mb-1">
-        Tipo de Trabajo / Implemento {required && <span className="text-red-500">*</span>}
+        {label} {required && <span className="text-red-500">*</span>}
       </label>
 
       {/* Trigger Card */}
@@ -339,7 +360,7 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
                   Seleccionar Labor / Implemento
                 </h3>
                 <p className="text-[11px] text-stone-500">
-                  {jobs.length} trabajos disponibles para esta máquina
+                  {list.length} trabajos disponibles para esta máquina
                 </p>
               </div>
               <button
@@ -429,23 +450,32 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
 // ==========================================
 interface ExpenseItemPickerProps {
   items: ItemConfig[];
-  selectedName: string;
-  onSelect: (item: ItemConfig | { nombre: string; icono?: string; unidad?: string; precio?: number }) => void;
+  selectedName?: string;
+  selectedItemName?: string;
+  onSelect?: (item: ItemConfig | { nombre: string; icono?: string; unidad?: string; precio?: number; precioDefecto?: number; moneda?: any }) => void;
+  onSelectItem?: (item: ItemConfig | any) => void;
   required?: boolean;
+  label?: string;
+  defaultIcon?: string;
 }
 
 export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
   items,
   selectedName,
+  selectedItemName,
   onSelect,
+  onSelectItem,
   required = true,
+  label = 'Insumo o Concepto de Gasto',
+  defaultIcon = 'diesel',
 }) => {
+  const currentName = selectedName !== undefined ? selectedName : (selectedItemName || '');
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
 
   const selectedItem = useMemo(
-    () => items.find((i) => i.nombre.toLowerCase() === selectedName.toLowerCase()),
-    [items, selectedName]
+    () => items.find((i) => i.nombre.toLowerCase() === currentName.toLowerCase()),
+    [items, currentName]
   );
 
   const filteredItems = useMemo(() => {
@@ -454,15 +484,16 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
     return items.filter((i) => i.nombre.toLowerCase().includes(q));
   }, [items, search]);
 
-  const handleChoose = (item: ItemConfig) => {
-    onSelect(item);
+  const handleChoose = (item: ItemConfig | any) => {
+    if (onSelect) onSelect(item);
+    if (onSelectItem) onSelectItem(item);
     setIsOpen(false);
   };
 
   return (
     <div>
       <label className="block text-xs font-semibold text-stone-700 mb-1">
-        Insumo o Concepto de Gasto {required && <span className="text-red-500">*</span>}
+        {label} {required && <span className="text-red-500">*</span>}
       </label>
 
       {/* Trigger Card */}
@@ -541,7 +572,7 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
 
             <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2">
               {filteredItems.map((item) => {
-                const isSelected = selectedName.toLowerCase() === item.nombre.toLowerCase();
+                const isSelected = currentName.toLowerCase() === item.nombre.toLowerCase();
                 return (
                   <button
                     key={item.id || item.nombre}
@@ -585,6 +616,395 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
                 type="button"
                 onClick={() => setIsOpen(false)}
                 className="px-4 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-semibold text-stone-700 hover:bg-stone-100"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ==========================================
+// 4. VISUAL INCOME ITEM PICKER (Cosechas / Ingresos Agrícolas)
+// ==========================================
+interface IncomeItemPickerProps {
+  items: ItemConfig[];
+  selectedName?: string;
+  selectedItemName?: string;
+  onSelect?: (item: ItemConfig | { nombre: string; icono?: string; unidad?: string; precio?: number; precioPredeterminado?: number; moneda?: any }) => void;
+  onSelectItem?: (item: ItemConfig | any) => void;
+  required?: boolean;
+  label?: string;
+  defaultIcon?: string;
+}
+
+const DEFAULT_INCOME_ITEMS: Partial<ItemConfig>[] = [
+  { id: 'def_soya', nombre: 'Venta Cosecha Soya', icono: 'soya', unidad: 'toneladas' },
+  { id: 'def_maiz', nombre: 'Venta Cosecha Maíz', icono: 'maiz', unidad: 'toneladas' },
+  { id: 'def_trigo', nombre: 'Venta Cosecha Trigo', icono: 'trigo', unidad: 'toneladas' },
+  { id: 'def_sorgo', nombre: 'Venta Cosecha Sorgo', icono: 'sorgo', unidad: 'toneladas' },
+  { id: 'def_girasol', nombre: 'Venta Cosecha Girasol', icono: 'girasol', unidad: 'toneladas' },
+  { id: 'def_semilla', nombre: 'Venta de Semilla', icono: 'granos', unidad: 'bolsas' },
+  { id: 'def_otros', nombre: 'Otros Ingresos del Lote', icono: 'otros-ingresos', unidad: 'unidades' },
+];
+
+export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
+  items,
+  selectedName,
+  selectedItemName,
+  onSelect,
+  onSelectItem,
+  required = true,
+  label = 'Concepto / Producto de Cosecha',
+  defaultIcon = 'soya',
+}) => {
+  const currentName = selectedName !== undefined ? selectedName : (selectedItemName || '');
+  const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState('');
+
+  // Use available income items or fallback to default standard crops
+  const effectiveItems = useMemo(() => {
+    return items.length > 0 ? items : (DEFAULT_INCOME_ITEMS as ItemConfig[]);
+  }, [items]);
+
+  const selectedItem = useMemo(
+    () => effectiveItems.find((i) => i.nombre.toLowerCase() === currentName.toLowerCase()),
+    [effectiveItems, currentName]
+  );
+
+  const filteredItems = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return effectiveItems;
+    return effectiveItems.filter((i) => i.nombre.toLowerCase().includes(q));
+  }, [effectiveItems, search]);
+
+  const handleChoose = (item: ItemConfig | any) => {
+    if (onSelect) onSelect(item);
+    if (onSelectItem) onSelectItem(item);
+    setIsOpen(false);
+  };
+
+  return (
+    <div>
+      <label className="block text-xs font-semibold text-stone-700 mb-1">
+        {label} {required && <span className="text-red-500">*</span>}
+      </label>
+
+      {/* Trigger Card */}
+      <button
+        type="button"
+        onClick={() => setIsOpen(true)}
+        className="w-full flex items-center justify-between p-2.5 sm:p-3 rounded-2xl border border-stone-300 bg-white hover:border-emerald-500 shadow-2xs text-left transition cursor-pointer min-h-[50px] group"
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="p-1 rounded-xl bg-emerald-50/60 border border-emerald-200/80 shrink-0">
+            <VisualIcon
+              iconId={selectedItem?.icono}
+              nameHint={selectedName || defaultIcon}
+              category="ingreso"
+              size={36}
+            />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-bold text-stone-900 truncate">
+              {selectedName || 'Seleccionar producto / cosecha...'}
+            </p>
+            {selectedItem?.unidad && (
+              <p className="text-[11px] text-stone-500 truncate">
+                Unidad habitual: {selectedItem.unidad}
+                {selectedItem.precioPredeterminado ? ` • Ref: ${selectedItem.moneda || 'USD'} ${selectedItem.precioPredeterminado}` : ''}
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-1 shrink-0 ml-2 text-stone-400 group-hover:text-emerald-700">
+          <span className="text-[10px] font-semibold hidden sm:inline">Cambiar</span>
+          <ChevronDown className="h-4 w-4" />
+        </div>
+      </button>
+
+      {/* iOS Bottom Sheet Modal */}
+      {isOpen && (
+        <div className="fixed inset-0 z-50 flex flex-col justify-end bg-stone-900/40 backdrop-blur-xs animate-fadeIn">
+          <div className="flex-1" onClick={() => setIsOpen(false)} />
+          <div className="w-full max-w-xl mx-auto bg-white rounded-t-3xl shadow-2xl border-t border-stone-200/80 flex flex-col max-h-[85vh] animate-slideUp overflow-hidden">
+            <div className="pt-3 pb-1" onClick={() => setIsOpen(false)}>
+              <div className="w-12 h-1.5 bg-stone-300 rounded-full mx-auto" />
+            </div>
+
+            <div className="px-4 py-2 flex items-center justify-between border-b border-stone-100">
+              <div>
+                <h3 className="text-base font-bold text-stone-900">
+                  Concepto / Producto de Ingreso
+                </h3>
+                <p className="text-[11px] text-stone-500">
+                  {effectiveItems.length} rubros de ingresos agrícolas disponibles
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsOpen(false)}
+                className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="px-4 pt-3 pb-2">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-stone-400" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Buscar soya, maíz, trigo, sorgo, girasol..."
+                  autoFocus
+                  className="w-full pl-9 pr-8 py-2 rounded-xl border border-stone-200 bg-stone-50 text-xs text-stone-900 focus:bg-white focus:border-emerald-600 focus:outline-none"
+                />
+                {search && (
+                  <button
+                    type="button"
+                    onClick={() => setSearch('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-stone-400 hover:text-stone-700"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2">
+              {filteredItems.map((item) => {
+                const isSelected = currentName.toLowerCase() === item.nombre.toLowerCase();
+                return (
+                  <button
+                    key={item.id || item.nombre}
+                    type="button"
+                    onClick={() => handleChoose(item)}
+                    className={`w-full flex items-center justify-between p-3 rounded-2xl border text-left transition cursor-pointer ${
+                      isSelected
+                        ? 'border-emerald-600 bg-emerald-50/90 ring-2 ring-emerald-500/20 shadow-xs'
+                        : 'border-stone-200 bg-white hover:bg-stone-50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="p-1 rounded-xl bg-white border border-stone-200 shrink-0">
+                        <VisualIcon
+                          iconId={item.icono}
+                          nameHint={item.nombre}
+                          category="ingreso"
+                          size={40}
+                        />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-bold text-stone-900">{item.nombre}</p>
+                        <p className="text-[11px] text-stone-500 mt-0.5">
+                          {item.unidad && `Unidad: ${item.unidad}`}
+                          {item.precioPredeterminado ? ` • Ref: ${item.moneda || 'USD'} ${item.precioPredeterminado}` : ''}
+                        </p>
+                      </div>
+                    </div>
+                    {isSelected && (
+                      <div className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-600 text-white shrink-0 ml-2">
+                        <Check className="h-3.5 w-3.5 stroke-[3]" />
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="p-3 border-t border-stone-100 bg-stone-50 text-right">
+              <button
+                type="button"
+                onClick={() => setIsOpen(false)}
+                className="px-4 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-semibold text-stone-700 hover:bg-stone-100 cursor-pointer"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ==========================================
+// 5. VISUAL LOT PICKER (Selector iOS para Lotes)
+// ==========================================
+interface LotPickerProps {
+  lots: Lot[];
+  selectedId?: string;
+  selectedLotId?: string;
+  onSelect?: (lotId: string) => void;
+  onSelectLot?: (lot: Lot) => void;
+  required?: boolean;
+  label?: string;
+}
+
+export const VisualLotPicker: React.FC<LotPickerProps> = ({
+  lots,
+  selectedId,
+  selectedLotId,
+  onSelect,
+  onSelectLot,
+  required = true,
+  label = 'Lote de Origen',
+}) => {
+  const currentId = selectedId !== undefined ? selectedId : (selectedLotId || '');
+  const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState('');
+
+  const selectedLot = useMemo(() => lots.find((l) => l.id === currentId), [lots, currentId]);
+
+  const filteredLots = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return lots;
+    return lots.filter(
+      (l) =>
+        l.nombre.toLowerCase().includes(q) ||
+        (l.cultivoActual && l.cultivoActual.toLowerCase().includes(q)) ||
+        (l.ubicacion && l.ubicacion.toLowerCase().includes(q))
+    );
+  }, [lots, search]);
+
+  const handleChoose = (l: Lot) => {
+    if (onSelect) onSelect(l.id);
+    if (onSelectLot) onSelectLot(l);
+    setIsOpen(false);
+  };
+
+  return (
+    <div>
+      <label className="block text-xs font-semibold text-stone-700 mb-1">
+        {label} {required && <span className="text-red-500">*</span>}
+      </label>
+
+      {/* Trigger Card */}
+      <button
+        type="button"
+        onClick={() => setIsOpen(true)}
+        className="w-full flex items-center justify-between p-2.5 sm:p-3 rounded-2xl border border-stone-300 bg-white hover:border-emerald-500 shadow-2xs text-left transition cursor-pointer min-h-[50px] group"
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="p-2 rounded-xl bg-emerald-50 text-emerald-800 border border-emerald-200/80 shrink-0">
+            <LandPlot className="h-5 w-5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            {selectedLot ? (
+              <>
+                <p className="text-xs font-bold text-stone-900 truncate">{selectedLot.nombre}</p>
+                <p className="text-[11px] text-stone-500 truncate">
+                  {selectedLot.superficieHectareas || selectedLot.superficie || 0} ha
+                  {selectedLot.cultivoActual ? ` • ${selectedLot.cultivoActual}` : ' • Sin cultivo asignado'}
+                </p>
+              </>
+            ) : (
+              <p className="text-xs font-medium text-stone-400">
+                Toca para seleccionar lote...
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-1 shrink-0 ml-2 text-stone-400 group-hover:text-emerald-700">
+          <span className="text-[10px] font-semibold hidden sm:inline">Cambiar</span>
+          <ChevronDown className="h-4 w-4" />
+        </div>
+      </button>
+
+      {/* iOS Bottom Sheet Modal */}
+      {isOpen && (
+        <div className="fixed inset-0 z-50 flex flex-col justify-end bg-stone-900/40 backdrop-blur-xs animate-fadeIn">
+          <div className="flex-1" onClick={() => setIsOpen(false)} />
+          <div className="w-full max-w-xl mx-auto bg-white rounded-t-3xl shadow-2xl border-t border-stone-200/80 flex flex-col max-h-[85vh] animate-slideUp overflow-hidden">
+            <div className="pt-3 pb-1" onClick={() => setIsOpen(false)}>
+              <div className="w-12 h-1.5 bg-stone-300 rounded-full mx-auto" />
+            </div>
+
+            <div className="px-4 py-2 flex items-center justify-between border-b border-stone-100">
+              <div>
+                <h3 className="text-base font-bold text-stone-900">Seleccionar Lote</h3>
+                <p className="text-[11px] text-stone-500">
+                  {lots.length} lotes registrados en la propiedad
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsOpen(false)}
+                className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="px-4 pt-3 pb-2">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-stone-400" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Buscar lote por nombre o cultivo..."
+                  autoFocus
+                  className="w-full pl-9 pr-8 py-2 rounded-xl border border-stone-200 bg-stone-50 text-xs text-stone-900 focus:bg-white focus:border-emerald-600 focus:outline-none"
+                />
+                {search && (
+                  <button
+                    type="button"
+                    onClick={() => setSearch('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-stone-400 hover:text-stone-700"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2">
+              {filteredLots.map((l) => {
+                const isSelected = currentId === l.id;
+                return (
+                  <button
+                    key={l.id}
+                    type="button"
+                    onClick={() => handleChoose(l)}
+                    className={`w-full flex items-center justify-between p-3 rounded-2xl border text-left transition cursor-pointer ${
+                      isSelected
+                        ? 'border-emerald-600 bg-emerald-50/90 ring-2 ring-emerald-500/20 shadow-xs'
+                        : 'border-stone-200 bg-white hover:bg-stone-50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="p-2 rounded-xl bg-emerald-50 text-emerald-800 border border-emerald-100 shrink-0">
+                        <LandPlot className="h-5 w-5" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-bold text-stone-900">{l.nombre}</p>
+                        <p className="text-[11px] text-stone-500 mt-0.5">
+                          {l.superficieHectareas || l.superficie || 0} ha
+                          {l.cultivoActual ? ` • Cultivo: ${l.cultivoActual}` : ' • Sin cultivo'}
+                        </p>
+                      </div>
+                    </div>
+                    {isSelected && (
+                      <div className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-600 text-white shrink-0 ml-2">
+                        <Check className="h-3.5 w-3.5 stroke-[3]" />
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="p-3 border-t border-stone-100 bg-stone-50 text-right">
+              <button
+                type="button"
+                onClick={() => setIsOpen(false)}
+                className="px-4 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-semibold text-stone-700 hover:bg-stone-100 cursor-pointer"
               >
                 Cerrar
               </button>

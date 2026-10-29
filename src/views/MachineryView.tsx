@@ -45,6 +45,12 @@ import {
   isTechnicalId,
   NEW_HOLLAND_DEFAULT_JOBS,
 } from '../services/backend';
+import { VisualIcon } from '../components/VisualIcon';
+import {
+  VisualMachinePicker,
+  VisualJobTypePicker,
+  VisualExpenseItemPicker,
+} from '../components/VisualEntityPicker';
 
 interface Props {
   activeCampaign: Campaign | null;
@@ -735,58 +741,44 @@ export const MachineryView: React.FC<Props> = ({
             </div>
 
             <form onSubmit={(e) => handleJobSubmit(e, 'tercero')} className="space-y-4">
-              {/* Maquinaria */}
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Maquinaria <span className="text-red-500">*</span>
-                </label>
-                <select
-                  required
-                  value={selectedMachineId}
-                  onChange={(e) => handleMachineChange(e.target.value)}
-                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[44px]"
-                >
-                  <option value="">-- Seleccionar Maquinaria --</option>
-                  {machines.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {getMachineOptionLabel(m, false)}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {/* Maquinaria con selector visual e icono */}
+              <VisualMachinePicker
+                label="Maquinaria *"
+                machines={machines}
+                selectedMachineId={selectedMachineId}
+                onSelectMachine={(m) => handleMachineChange(m.id)}
+                required
+              />
 
-              {/* Tipo de Trabajo por Máquina */}
+              {/* Tipo de Trabajo / Implemento con selector visual */}
               {selectedMachineId && (
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Tipo de Trabajo / Labor <span className="text-red-500">*</span>
-                  </label>
                   {getAvailableJobsForMachine(selectedMachineId).length > 0 ? (
                     <div className="space-y-1.5">
-                      <select
+                      <VisualJobTypePicker
+                        label="Tipo de Trabajo / Labor *"
+                        jobTypes={getAvailableJobsForMachine(selectedMachineId)}
+                        selectedJobTypeId={selectedJobTypeId}
+                        onSelectJobType={(j) => handleJobTypeChange(j.id)}
                         required
-                        value={selectedJobTypeId}
-                        onChange={(e) => handleJobTypeChange(e.target.value)}
-                        className="w-full text-xs px-3 py-2.5 rounded-xl border-2 border-emerald-500 bg-emerald-50/50 focus:bg-white focus:border-emerald-700 focus:outline-none font-bold text-emerald-950 min-h-[46px]"
-                      >
-                        {getAvailableJobsForMachine(selectedMachineId).map((j) => (
-                          <option key={j.id} value={j.id}>
-                            {j.nombre} — {j.moneda === 'USD' ? 'USD' : 'Bs'} {j.tarifa} / {j.unidad}
-                          </option>
-                        ))}
-                      </select>
+                      />
                       <p className="text-[11px] text-emerald-800 font-medium">
                         Tarifa, moneda y unidad asignadas automáticamente. Puedes modificar la tarifa si se pactó un precio diferente.
                       </p>
                     </div>
                   ) : (
-                    <input
-                      type="text"
-                      placeholder="Ej. Siembra, Arada, Rastra..."
-                      value={selectedJobNombre}
-                      onChange={(e) => setSelectedJobNombre(e.target.value)}
-                      className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                    />
+                    <div>
+                      <label className="block text-xs font-semibold text-stone-700 mb-1">
+                        Tipo de Trabajo / Labor <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Ej. Siembra, Arada, Rastra..."
+                        value={selectedJobNombre}
+                        onChange={(e) => setSelectedJobNombre(e.target.value)}
+                        className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
+                      />
+                    </div>
                   )}
                 </div>
               )}
@@ -972,58 +964,44 @@ export const MachineryView: React.FC<Props> = ({
                 </select>
               </div>
 
-              {/* Maquinaria */}
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Maquinaria <span className="text-red-500">*</span>
-                </label>
-                <select
-                  required
-                  value={selectedMachineId}
-                  onChange={(e) => handleMachineChange(e.target.value)}
-                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[44px]"
-                >
-                  <option value="">-- Seleccionar Maquinaria --</option>
-                  {machines.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {getMachineOptionLabel(m, false)}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {/* Maquinaria con selector visual e icono */}
+              <VisualMachinePicker
+                label="Maquinaria *"
+                machines={machines}
+                selectedMachineId={selectedMachineId}
+                onSelectMachine={(m) => handleMachineChange(m.id)}
+                required
+              />
 
-              {/* Tipo de Trabajo por Máquina */}
+              {/* Tipo de Trabajo / Implemento con selector visual */}
               {selectedMachineId && (
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Tipo de Trabajo / Labor <span className="text-red-500">*</span>
-                  </label>
                   {getAvailableJobsForMachine(selectedMachineId).length > 0 ? (
                     <div className="space-y-1.5">
-                      <select
+                      <VisualJobTypePicker
+                        label="Tipo de Trabajo / Labor *"
+                        jobTypes={getAvailableJobsForMachine(selectedMachineId)}
+                        selectedJobTypeId={selectedJobTypeId}
+                        onSelectJobType={(j) => handleJobTypeChange(j.id)}
                         required
-                        value={selectedJobTypeId}
-                        onChange={(e) => handleJobTypeChange(e.target.value)}
-                        className="w-full text-xs px-3 py-2.5 rounded-xl border-2 border-emerald-500 bg-emerald-50/50 focus:bg-white focus:border-emerald-700 focus:outline-none font-bold text-emerald-950 min-h-[46px]"
-                      >
-                        {getAvailableJobsForMachine(selectedMachineId).map((j) => (
-                          <option key={j.id} value={j.id}>
-                            {j.nombre} — {j.moneda === 'USD' ? 'USD' : 'Bs'} {j.tarifa} / {j.unidad}
-                          </option>
-                        ))}
-                      </select>
+                      />
                       <p className="text-[11px] text-emerald-800 font-medium">
                         Tarifa, moneda y unidad asignadas automáticamente. Puedes modificar la tarifa si se pactó un precio diferente.
                       </p>
                     </div>
                   ) : (
-                    <input
-                      type="text"
-                      placeholder="Ej. Siembra, Arada, Rastra..."
-                      value={selectedJobNombre}
-                      onChange={(e) => setSelectedJobNombre(e.target.value)}
-                      className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                    />
+                    <div>
+                      <label className="block text-xs font-semibold text-stone-700 mb-1">
+                        Tipo de Trabajo / Labor <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Ej. Siembra, Arada, Rastra..."
+                        value={selectedJobNombre}
+                        onChange={(e) => setSelectedJobNombre(e.target.value)}
+                        className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
+                      />
+                    </div>
                   )}
                 </div>
               )}
@@ -1179,54 +1157,29 @@ export const MachineryView: React.FC<Props> = ({
             </div>
 
             <form onSubmit={handleExpenseSubmit} className="space-y-4">
-              {/* Maquinaria Asignada */}
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Maquinaria Asignada <span className="text-stone-400 font-normal">(Opcional si es gasto general)</span>
-                </label>
-                <select
-                  value={expMachineId}
-                  onChange={(e) => setExpMachineId(e.target.value)}
-                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none min-h-[44px]"
-                >
-                  <option value="">-- General / Sin asignar --</option>
-                  {machines.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {getMachineOptionLabel(m, false)}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {/* Maquinaria Asignada con selector visual */}
+              <VisualMachinePicker
+                label="Maquinaria Asignada (Opcional si es general)"
+                machines={machines}
+                selectedMachineId={expMachineId}
+                onSelectMachine={(m) => setExpMachineId(m.id)}
+                allowNone
+                noneLabel="-- Gasto General / Sin asignar a equipo --"
+              />
 
-              {/* Rubro / Concepto de Gasto */}
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Rubro / Concepto <span className="text-red-500">*</span>
-                </label>
-                <select
-                  value={expItemGasto}
-                  onChange={(e) => setExpItemGasto(e.target.value)}
-                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none font-semibold min-h-[44px]"
-                >
-                  {machineryExpenseItems.length > 0 ? (
-                    machineryExpenseItems.map((item) => (
-                      <option key={item.id || item.nombre} value={item.nombre}>
-                        {item.nombre}
-                      </option>
-                    ))
-                  ) : (
-                    <>
-                      <option value="Combustible">Combustible (Diésel / Gasolina)</option>
-                      <option value="Repuestos">Repuestos y Piezas</option>
-                      <option value="Mantenimiento">Mantenimiento y Lubricantes</option>
-                      <option value="Reparaciones">Reparaciones y Taller</option>
-                      <option value="Sueldos">Sueldos y Operadores</option>
-                      <option value="Seguro">Seguro y Patentes</option>
-                      <option value="Otros">Otros Gastos</option>
-                    </>
-                  )}
-                </select>
-              </div>
+              {/* Rubro / Concepto de Gasto con selector visual e iconos */}
+              <VisualExpenseItemPicker
+                label="Rubro / Concepto de Gasto *"
+                items={machineryExpenseItems}
+                selectedItemName={expItemGasto}
+                onSelectItem={(item) => {
+                  setExpItemGasto(item.nombre);
+                  if (item.unidad) setExpUnidad(item.unidad);
+                  if (item.precioPredeterminado && !expPrecio) setExpPrecio(item.precioPredeterminado);
+                  if (item.moneda) setExpMoneda(item.moneda);
+                }}
+                required
+              />
 
               {/* Fecha */}
               <div>
@@ -1359,19 +1312,24 @@ export const MachineryView: React.FC<Props> = ({
                   key={exp.id}
                   className="rounded-xl border border-stone-200 bg-stone-50/70 p-3 flex items-center justify-between gap-3 text-xs"
                 >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-bold text-stone-900">{exp.itemGasto}</span>
-                      <span className="text-[11px] text-stone-500 font-normal">({exp.fecha})</span>
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-xl bg-white border border-stone-200/80 flex items-center justify-center shrink-0 shadow-2xs">
+                      <VisualIcon name={exp.icono || exp.itemGasto || 'repuestos'} size="sm" />
                     </div>
-                    <p className="text-[11px] text-stone-600 mt-0.5 truncate">
-                      {exp.maquinariaNombre ? `Equipo: ${exp.maquinariaNombre}` : 'Gasto general'} &bull; {exp.cantidad} {exp.unidad}
-                    </p>
-                    {exp.observacion && (
-                      <p className="text-[11px] text-stone-500 italic mt-0.5 break-words">
-                        {exp.observacion}
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-bold text-stone-900">{exp.itemGasto}</span>
+                        <span className="text-[11px] text-stone-500 font-normal">({exp.fecha})</span>
+                      </div>
+                      <p className="text-[11px] text-stone-600 mt-0.5 truncate">
+                        {exp.maquinariaNombre ? `Equipo: ${exp.maquinariaNombre}` : 'Gasto general'} &bull; {exp.cantidad} {exp.unidad}
                       </p>
-                    )}
+                      {exp.observacion && (
+                        <p className="text-[11px] text-stone-500 italic mt-0.5 break-words">
+                          {exp.observacion}
+                        </p>
+                      )}
+                    </div>
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0">
@@ -1498,17 +1456,22 @@ export const MachineryView: React.FC<Props> = ({
                   {/* Nombre de la máquina y Cliente/Lote */}
                   <div>
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <h4 className="text-base sm:text-lg font-bold text-slate-900 flex items-center gap-2">
-                        <Tractor className="h-5 w-5 text-emerald-700 shrink-0" />
-                        <span>{j.maquinariaNombre || 'Maquinaria'}</span>
-                      </h4>
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-10 h-10 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-center shrink-0 shadow-2xs">
+                          <VisualIcon name={j.icono || 'tractor'} size="md" />
+                        </div>
+                        <h4 className="text-base sm:text-lg font-bold text-slate-900">
+                          {j.maquinariaNombre || 'Maquinaria'}
+                        </h4>
+                      </div>
                       {j.trabajoNombre && (
-                        <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-900 border border-emerald-300">
-                          {j.trabajoNombre}
+                        <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-900 border border-emerald-300 flex items-center gap-1.5">
+                          <VisualIcon name={j.trabajoNombre} size="xs" />
+                          <span>{j.trabajoNombre}</span>
                         </span>
                       )}
                     </div>
-                    <p className="text-sm text-slate-600 mt-1">
+                    <p className="text-sm text-slate-600 mt-1.5">
                       {j.tipoTrabajo === 'propiedad' ? (
                         <span>Lote: <strong className="text-emerald-950 font-semibold">{j.loteNombre || 'Lote Propio'}</strong></span>
                       ) : (
@@ -1618,11 +1581,16 @@ export const MachineryView: React.FC<Props> = ({
                     className="w-full rounded-2xl border border-slate-200 bg-slate-50/70 p-4 shadow-2xs space-y-3"
                   >
                     <div className="flex items-start justify-between pb-2 border-b border-slate-200/60">
-                      <div className="min-w-0 flex-1">
-                        <h4 className="text-base font-bold text-slate-900 truncate">{m.nombre}</h4>
-                        <p className="text-xs text-slate-500 truncate mt-0.5">
-                          {m.tipo || 'Tractor'}
-                        </p>
+                      <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                        <div className="w-10 h-10 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center shrink-0 shadow-2xs">
+                          <VisualIcon name={m.icono || m.tipo || 'tractor'} size="md" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <h4 className="text-base font-bold text-slate-900 truncate">{m.nombre}</h4>
+                          <p className="text-xs text-slate-500 truncate mt-0.5">
+                            {m.tipo || 'Tractor'}
+                          </p>
+                        </div>
                       </div>
                       <span
                         className={`px-2.5 py-0.5 text-xs font-semibold rounded-full shrink-0 ${
@@ -1676,13 +1644,18 @@ export const MachineryView: React.FC<Props> = ({
                               key={jobDef.id}
                               className="p-2.5 rounded-xl bg-white border border-slate-200/90 flex items-center justify-between gap-2 shadow-2xs"
                             >
-                              <div className="min-w-0 flex-1">
-                                <span className="text-xs font-bold text-slate-900 block truncate">
-                                  {jobDef.nombre}
-                                </span>
-                                <span className="text-[11px] font-semibold text-emerald-800 font-mono">
-                                  {jobDef.moneda === 'USD' ? 'USD' : 'Bs'} {jobDef.tarifa} / {jobDef.unidad}
-                                </span>
+                              <div className="flex items-center gap-2 min-w-0 flex-1">
+                                <div className="w-7 h-7 rounded-lg bg-slate-50 border border-slate-200/80 flex items-center justify-center shrink-0">
+                                  <VisualIcon name={jobDef.icono || jobDef.nombre} size="xs" />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <span className="text-xs font-bold text-slate-900 block truncate">
+                                    {jobDef.nombre}
+                                  </span>
+                                  <span className="text-[11px] font-semibold text-emerald-800 font-mono">
+                                    {jobDef.moneda === 'USD' ? 'USD' : 'Bs'} {jobDef.tarifa} / {jobDef.unidad}
+                                  </span>
+                                </div>
                               </div>
                               <span className="text-[10px] bg-emerald-50 text-emerald-800 font-bold px-2 py-0.5 rounded-full border border-emerald-200 shrink-0">
                                 Activo

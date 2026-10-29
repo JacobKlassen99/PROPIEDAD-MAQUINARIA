@@ -77,6 +77,7 @@ export interface MachineryJob {
   total: number;
   observacion?: string;
   linkedMovimientoId?: string;
+  icono?: string;
 }
 
 export interface Expense {
@@ -91,6 +92,7 @@ export interface Expense {
   loteNombre?: string;
   itemGasto: string;
   itemIcono?: string;
+  icono?: string;
   cantidad: number;
   unidad: string;
   precio: number;
@@ -113,6 +115,7 @@ export interface Income {
   loteId?: string;
   loteNombre?: string;
   concepto: string;
+  icono?: string;
   cantidad: number;
   unidad?: string;
   precio: number;

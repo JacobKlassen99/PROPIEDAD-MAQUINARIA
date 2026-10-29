@@ -24,6 +24,13 @@ import {
   Edit3,
   Sparkles,
 } from 'lucide-react';
+import { VisualIcon } from '../components/VisualIcon';
+import {
+  VisualExpenseItemPicker,
+  VisualIncomeItemPicker,
+  VisualLotPicker,
+} from '../components/VisualEntityPicker';
+import { getIconDefinition } from '../services/iconCatalog';
 import {
   Campaign,
   Lot,
@@ -82,6 +89,7 @@ interface MovementItem {
   observacion?: string;
   esTrabajoPropio?: boolean;
   trabajoId?: string;
+  icono?: string;
 }
 
 export const PropertyView: React.FC<Props> = ({
@@ -179,7 +187,10 @@ export const PropertyView: React.FC<Props> = ({
       unidad: i.unidad,
       precioUnitario: i.precio,
       observacion: i.observacion,
-      esTrabajoPropio: false,
+      icono:
+        i.icono ||
+        (itemsConfig.find((it) => it.nombre.toLowerCase() === i.concepto.toLowerCase())?.icono) ||
+        getIconDefinition(i.concepto, 'ingreso').id,
     })),
     ...propertyExpenses.map((e) => {
       const isJobLinked = Boolean(e.esTrabajoPropio || e.trabajoId);
@@ -200,6 +211,7 @@ export const PropertyView: React.FC<Props> = ({
         observacion: e.observacion,
         esTrabajoPropio: isJobLinked,
         trabajoId: e.trabajoId,
+        icono: e.icono || (itemsConfig.find((it) => it.nombre.toLowerCase() === e.itemGasto.toLowerCase())?.icono) || 'semillas',
       };
     }),
     ...linkedPropertyJobs
@@ -221,6 +233,7 @@ export const PropertyView: React.FC<Props> = ({
         observacion: j.observacion,
         esTrabajoPropio: true,
         trabajoId: j.id,
+        icono: j.icono || 'tractor',
       })),
   ].sort((a, b) => (b.fecha > a.fecha ? 1 : -1));
 
@@ -248,6 +261,7 @@ export const PropertyView: React.FC<Props> = ({
     }
 
     const lotObj = lots.find((l) => l.id === expLotId);
+    const selectedItemObj = propertyExpenseItems.find((it) => it.nombre.toLowerCase() === expItem.toLowerCase());
     const totalExp = (Number(expCantidad) || 1) * Number(expPrecio);
 
     setSaving(true);
@@ -259,6 +273,7 @@ export const PropertyView: React.FC<Props> = ({
         loteId: expLotId,
         loteNombre: lotObj?.nombre,
         itemGasto: expItem,
+        icono: selectedItemObj?.icono,
         cantidad: Number(expCantidad) || 1,
         unidad: expUnidad,
         precio: Number(expPrecio),
@@ -300,6 +315,11 @@ export const PropertyView: React.FC<Props> = ({
     }
 
     const lotObj = lots.find((l) => l.id === incLotId);
+    const selectedItemObj = propertyIncomeItems.find(
+      (it) => it.nombre.toLowerCase() === incConcepto.toLowerCase()
+    );
+    const resolvedIcon =
+      selectedItemObj?.icono || getIconDefinition(incConcepto, 'ingreso').id;
     const totalInc = (Number(incCantidad) || 0) * Number(incPrecio);
 
     setSaving(true);
@@ -311,6 +331,7 @@ export const PropertyView: React.FC<Props> = ({
         loteId: incLotId,
         loteNombre: lotObj?.nombre,
         concepto: incConcepto,
+        icono: resolvedIcon,
         cantidad: Number(incCantidad) || 0,
         unidad: incUnidad,
         precio: Number(incPrecio),
@@ -654,55 +675,32 @@ export const PropertyView: React.FC<Props> = ({
             </div>
 
             <form onSubmit={handleIncomeSubmit} className="space-y-4">
-              {/* Lote */}
-              <div>
-                <label className="block text-xs font-bold text-stone-700 mb-1">
-                  Lote de Origen <span className="text-red-500">*</span>
-                </label>
-                <select
-                  required
-                  value={incLotId}
-                  onChange={(e) => setIncLotId(e.target.value)}
-                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-bold text-emerald-950 min-h-[44px]"
-                >
-                  <option value="">-- Seleccionar Lote --</option>
-                  {lots.map((l) => (
-                    <option key={l.id} value={l.id}>
-                      {l.nombre} ({l.superficieHectareas} ha &bull; {l.cultivoActual || 'Sin cultivo'})
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {/* Lote de Origen */}
+              <VisualLotPicker
+                lots={lots}
+                selectedLotId={incLotId}
+                onSelect={(id) => setIncLotId(id)}
+                label="Lote de Origen"
+                required
+              />
 
               {/* Concepto / Producto */}
-              <div>
-                <label className="block text-xs font-bold text-stone-700 mb-1">
-                  Concepto / Producto <span className="text-red-500">*</span>
-                </label>
-                <select
-                  value={incConcepto}
-                  onChange={(e) => setIncConcepto(e.target.value)}
-                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[44px]"
-                >
-                  {propertyIncomeItems.length > 0 ? (
-                    propertyIncomeItems.map((item) => (
-                      <option key={item.id || item.nombre} value={item.nombre}>
-                        {item.nombre}
-                      </option>
-                    ))
-                  ) : (
-                    <>
-                      <option value="Venta Cosecha Soya">Venta Cosecha Soya</option>
-                      <option value="Venta Cosecha Maíz">Venta Cosecha Maíz</option>
-                      <option value="Venta Cosecha Trigo">Venta Cosecha Trigo</option>
-                      <option value="Venta Cosecha Sorgo">Venta Cosecha Sorgo</option>
-                      <option value="Venta Cosecha Girasol">Venta Cosecha Girasol</option>
-                      <option value="Venta de Semilla">Venta de Semilla</option>
-                      <option value="Otros Ingresos del Lote">Otros Ingresos del Lote</option>
-                    </>
-                  )}
-                </select>
-              </div>
+              <VisualIncomeItemPicker
+                items={propertyIncomeItems}
+                selectedItemName={incConcepto}
+                onSelectItem={(item) => {
+                  setIncConcepto(item.nombre);
+                  if (item.unidad) setIncUnidad(item.unidad);
+                  if (item.precioPredeterminado || item.precio) {
+                    setIncPrecio(item.precioPredeterminado || item.precio);
+                  }
+                  if (item.moneda) {
+                    setIncMoneda(item.moneda);
+                  }
+                }}
+                label="Concepto / Producto de Cosecha"
+                required
+              />
 
               {/* Fecha */}
               <div>
@@ -722,7 +720,7 @@ export const PropertyView: React.FC<Props> = ({
               </div>
 
               {/* Cantidad y Unidad */}
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-stone-700 mb-1">
                     Cantidad <span className="text-red-500">*</span>
@@ -741,21 +739,35 @@ export const PropertyView: React.FC<Props> = ({
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-stone-700 mb-1">Unidad</label>
-                  <select
-                    value={incUnidad}
-                    onChange={(e) => setIncUnidad(e.target.value)}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                  >
-                    <option value="toneladas">Toneladas (t)</option>
-                    <option value="quintales">Quintales (qq)</option>
-                    <option value="kg">Kilogramos (kg)</option>
-                    <option value="bolsas">Bolsas</option>
-                  </select>
+                  <div className="grid grid-cols-2 gap-1 bg-stone-100 p-1 rounded-xl border border-stone-200">
+                    {[
+                      { val: 'toneladas', label: 'Toneladas (t)' },
+                      { val: 'quintales', label: 'Quintales (qq)' },
+                      { val: 'kg', label: 'Kilos (kg)' },
+                      { val: 'bolsas', label: 'Bolsas' },
+                    ].map((u) => {
+                      const isSel = incUnidad.toLowerCase().startsWith(u.val.slice(0, 3));
+                      return (
+                        <button
+                          key={u.val}
+                          type="button"
+                          onClick={() => setIncUnidad(u.val)}
+                          className={`py-2 px-1.5 rounded-lg text-[11px] font-semibold text-center transition cursor-pointer select-none ${
+                            isSel
+                              ? 'bg-emerald-50 text-emerald-900 border border-emerald-600 font-extrabold shadow-2xs'
+                              : 'bg-white/70 hover:bg-white text-stone-600 border border-transparent font-medium'
+                          }`}
+                        >
+                          {u.label}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 
               {/* Precio y Moneda */}
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-stone-700 mb-1">
                     Precio Unitario <span className="text-red-500">*</span>
@@ -774,14 +786,28 @@ export const PropertyView: React.FC<Props> = ({
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-stone-700 mb-1">Moneda</label>
-                  <select
-                    value={incMoneda}
-                    onChange={(e) => setIncMoneda(e.target.value as Currency)}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                  >
-                    <option value="BOB">BOB (Bs)</option>
-                    <option value="USD">USD ($)</option>
-                  </select>
+                  <div className="flex bg-stone-100 p-1 rounded-xl border border-stone-200 gap-1 min-h-[44px] items-center">
+                    {[
+                      { val: 'USD', label: 'USD ($)' },
+                      { val: 'BOB', label: 'BOB (Bs)' },
+                    ].map((m) => {
+                      const isSel = incMoneda === m.val;
+                      return (
+                        <button
+                          key={m.val}
+                          type="button"
+                          onClick={() => setIncMoneda(m.val as Currency)}
+                          className={`flex-1 py-2 px-2 rounded-lg text-xs transition cursor-pointer select-none ${
+                            isSel
+                              ? 'bg-emerald-50 text-emerald-900 border border-emerald-600 font-extrabold shadow-2xs'
+                              : 'bg-white/70 hover:bg-white text-stone-600 border border-transparent font-medium'
+                          }`}
+                        >
+                          {m.label}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 
@@ -849,58 +875,29 @@ export const PropertyView: React.FC<Props> = ({
             </div>
 
             <form onSubmit={handleExpenseSubmit} className="space-y-4">
-              {/* Lote */}
-              <div>
-                <label className="block text-xs font-bold text-stone-700 mb-1">
-                  Lote Destino <span className="text-red-500">*</span>
-                </label>
-                <select
-                  required
-                  value={expLotId}
-                  onChange={(e) => setExpLotId(e.target.value)}
-                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none font-bold text-rose-950 min-h-[44px]"
-                >
-                  <option value="">-- Seleccionar Lote --</option>
-                  {lots.map((l) => (
-                    <option key={l.id} value={l.id}>
-                      {l.nombre} ({l.superficieHectareas} ha)
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {/* Lote Destino */}
+              <VisualLotPicker
+                lots={lots}
+                selectedLotId={expLotId}
+                onSelect={(id) => setExpLotId(id)}
+                label="Lote Destino"
+                required
+              />
 
-              {/* Ítem / Rubro */}
-              <div>
-                <label className="block text-xs font-bold text-stone-700 mb-1">
-                  Insumo o Concepto de Gasto <span className="text-red-500">*</span>
-                </label>
-                <select
-                  value={expItem}
-                  onChange={(e) => setExpItem(e.target.value)}
-                  className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none font-semibold min-h-[44px]"
-                >
-                  {propertyExpenseItems.length > 0 ? (
-                    propertyExpenseItems.map((item) => (
-                      <option key={item.id || item.nombre} value={item.nombre}>
-                        {item.nombre}
-                      </option>
-                    ))
-                  ) : (
-                    <>
-                      <option value="Semillas">Semillas</option>
-                      <option value="Fertilizante Urea">Fertilizante Urea</option>
-                      <option value="Fertilizante Fosfato">Fertilizante Fosfato</option>
-                      <option value="Herbicida">Herbicida</option>
-                      <option value="Insecticida">Insecticida</option>
-                      <option value="Fungicida">Fungicida</option>
-                      <option value="Inoculante">Inoculante</option>
-                      <option value="Mano de obra lote">Mano de obra lote</option>
-                      <option value="Análisis de suelo">Análisis de suelo</option>
-                      <option value="Otros insumos">Otros insumos</option>
-                    </>
-                  )}
-                </select>
-              </div>
+              {/* Selector Visual de Insumo / Rubro */}
+              <VisualExpenseItemPicker
+                items={propertyExpenseItems}
+                selectedItemName={expItem}
+                onSelectItem={(item) => {
+                  setExpItem(item.nombre);
+                  if (item.unidad) setExpUnidad(item.unidad);
+                  if (item.precioDefecto) setExpPrecio(item.precioDefecto);
+                  if (item.moneda) setExpMoneda(item.moneda);
+                }}
+                label="Insumo o Concepto de Gasto"
+                defaultIcon="semillas"
+                required
+              />
 
               {/* Fecha */}
               <div>
@@ -1164,13 +1161,18 @@ export const PropertyView: React.FC<Props> = ({
                                 key={j.id}
                                 className="flex items-center justify-between p-2 rounded-lg bg-amber-50/50 border border-amber-100/70"
                               >
-                                <div className="min-w-0">
-                                  <span className="font-bold text-slate-800 block truncate">
-                                    {j.maquinariaNombre}
-                                  </span>
-                                  <span className="text-[11px] text-slate-500">
-                                    {formatDateDDMMAAAA(j.fecha)} &bull; {j.cantidad} {j.unidad}
-                                  </span>
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <div className="w-6 h-6 rounded-md bg-white border border-amber-200/80 flex items-center justify-center shrink-0">
+                                    <VisualIcon name={j.icono || 'tractor'} size="xs" />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <span className="font-bold text-slate-800 block truncate">
+                                      {j.maquinariaNombre}
+                                    </span>
+                                    <span className="text-[11px] text-slate-500">
+                                      {formatDateDDMMAAAA(j.fecha)} &bull; {j.cantidad} {j.unidad}
+                                    </span>
+                                  </div>
                                 </div>
                                 <span className="font-bold font-mono text-rose-700 shrink-0 ml-2">
                                   {j.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
@@ -1205,11 +1207,16 @@ export const PropertyView: React.FC<Props> = ({
                                 key={i.id}
                                 className="flex items-center justify-between p-2 rounded-lg bg-emerald-50/50 border border-emerald-100/70"
                               >
-                                <div className="min-w-0">
-                                  <span className="font-bold text-slate-800 block truncate">{i.concepto}</span>
-                                  <span className="text-[11px] text-slate-500">
-                                    {formatDateDDMMAAAA(i.fecha)} &bull; {i.cantidad} {i.unidad}
-                                  </span>
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <div className="w-6 h-6 rounded-md bg-white border border-emerald-200/80 flex items-center justify-center shrink-0">
+                                    <VisualIcon name="granos" size="xs" />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <span className="font-bold text-slate-800 block truncate">{i.concepto}</span>
+                                    <span className="text-[11px] text-slate-500">
+                                      {formatDateDDMMAAAA(i.fecha)} &bull; {i.cantidad} {i.unidad}
+                                    </span>
+                                  </div>
                                 </div>
                                 <span className="font-bold font-mono text-emerald-700 shrink-0 ml-2">
                                   + {i.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
@@ -1241,11 +1248,16 @@ export const PropertyView: React.FC<Props> = ({
                                 key={e.id}
                                 className="flex items-center justify-between p-2 rounded-lg bg-rose-50/40 border border-rose-100/70"
                               >
-                                <div className="min-w-0">
-                                  <span className="font-bold text-slate-800 block truncate">{e.itemGasto}</span>
-                                  <span className="text-[11px] text-slate-500">
-                                    {formatDateDDMMAAAA(e.fecha)} &bull; {e.cantidad} {e.unidad}
-                                  </span>
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <div className="w-6 h-6 rounded-md bg-white border border-rose-200/80 flex items-center justify-center shrink-0">
+                                    <VisualIcon name={e.icono || (itemsConfig.find(it => it.nombre.toLowerCase() === e.itemGasto.toLowerCase())?.icono) || 'semillas'} size="xs" />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <span className="font-bold text-slate-800 block truncate">{e.itemGasto}</span>
+                                    <span className="text-[11px] text-slate-500">
+                                      {formatDateDDMMAAAA(e.fecha)} &bull; {e.cantidad} {e.unidad}
+                                    </span>
+                                  </div>
                                 </div>
                                 <span className="font-bold font-mono text-rose-700 shrink-0 ml-2">
                                   - {e.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
@@ -1308,13 +1320,18 @@ export const PropertyView: React.FC<Props> = ({
                 className="rounded-2xl border border-slate-200/80 bg-white p-4 space-y-2.5 shadow-xs"
               >
                 <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-slate-800">
-                      {formatDateDDMMAAAA(j.fecha)}
-                    </span>
-                    <span className="text-[11px] font-bold text-slate-900 bg-slate-100 px-2 py-0.5 rounded-md">
-                      {j.maquinariaNombre}
-                    </span>
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-slate-50 border border-slate-200/80 flex items-center justify-center shrink-0 shadow-2xs">
+                      <VisualIcon name={j.icono || 'tractor'} size="xs" />
+                    </div>
+                    <div>
+                      <span className="text-xs font-bold text-slate-800">
+                        {formatDateDDMMAAAA(j.fecha)}
+                      </span>
+                      <span className="text-[11px] font-bold text-slate-900 bg-slate-100 px-2 py-0.5 rounded-md ml-2">
+                        {j.maquinariaNombre}
+                      </span>
+                    </div>
                   </div>
                   <span className="text-[10px] bg-amber-100 text-amber-900 font-bold px-2 py-0.5 rounded-md">
                     Maq. Propia
@@ -1465,18 +1482,32 @@ export const PropertyView: React.FC<Props> = ({
                   className="rounded-2xl border border-slate-200/80 bg-white p-4 space-y-2.5 shadow-xs"
                 >
                   <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-xs font-bold text-slate-500 shrink-0">
-                          {formatDateDDMMAAAA(m.fecha)}
-                        </span>
-                        <h4 className="text-sm font-bold text-slate-900 truncate">
-                          {m.titulo}
-                        </h4>
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 shadow-2xs border ${
+                        m.tipo === 'ingreso'
+                          ? 'bg-emerald-50 border-emerald-200/80'
+                          : m.tipo === 'gasto_directo'
+                          ? 'bg-rose-50 border-rose-200/80'
+                          : 'bg-amber-50 border-amber-200/80'
+                      }`}>
+                        <VisualIcon
+                          name={m.icono || (m.tipo === 'ingreso' ? 'granos' : m.tipo === 'gasto_directo' ? 'semillas' : 'tractor')}
+                          size="sm"
+                        />
                       </div>
-                      <span className="text-xs text-emerald-800 font-semibold block mt-0.5">
-                        Lote: {m.loteNombre}
-                      </span>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xs font-bold text-slate-500 shrink-0">
+                            {formatDateDDMMAAAA(m.fecha)}
+                          </span>
+                          <h4 className="text-sm font-bold text-slate-900 truncate">
+                            {m.titulo}
+                          </h4>
+                        </div>
+                        <span className="text-xs text-emerald-800 font-semibold block mt-0.5">
+                          Lote: {m.loteNombre}
+                        </span>
+                      </div>
                     </div>
 
                     <span

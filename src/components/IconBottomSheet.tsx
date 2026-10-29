@@ -6,9 +6,10 @@ import { ICON_CATALOG, IconCategory, IconDefinition, searchIcons } from '../serv
 interface IconBottomSheetProps {
   isOpen: boolean;
   onClose: () => void;
-  onSelectIcon: (iconId: string) => void;
+  onSelectIcon: (icon: IconDefinition | any) => void;
   selectedIconId?: string;
   defaultCategory?: IconCategory | 'todos';
+  category?: IconCategory | 'todos';
   title?: string;
 }
 
@@ -18,20 +19,33 @@ export const IconBottomSheet: React.FC<IconBottomSheetProps> = ({
   onSelectIcon,
   selectedIconId,
   defaultCategory = 'todos',
-  title = 'Elegir icono visual',
+  category,
+  title,
 }) => {
+  const initialCat = category || defaultCategory;
   const [searchTerm, setSearchTerm] = useState('');
-  const [activeCategory, setActiveCategory] = useState<IconCategory | 'todos'>(defaultCategory);
+  const [activeCategory, setActiveCategory] = useState<IconCategory | 'todos'>(initialCat);
   const [tempSelectedId, setTempSelectedId] = useState<string>(selectedIconId || '');
+
+  // Dynamic context-aware sheet title
+  const sheetTitle = useMemo(() => {
+    if (title) return title;
+    const cat = category || activeCategory;
+    if (cat === 'maquinaria') return 'Elegir icono de maquinaria';
+    if (cat === 'implemento') return 'Elegir icono de implemento';
+    if (cat === 'gasto') return 'Elegir icono de gasto';
+    if (cat === 'ingreso') return 'Elegir icono de ingreso agrícola';
+    return 'Elegir icono visual';
+  }, [title, category, activeCategory]);
 
   // Reset states when opening
   React.useEffect(() => {
     if (isOpen) {
       setSearchTerm('');
-      setActiveCategory(defaultCategory);
+      setActiveCategory(category || defaultCategory);
       setTempSelectedId(selectedIconId || '');
     }
-  }, [isOpen, selectedIconId, defaultCategory]);
+  }, [isOpen, selectedIconId, category, defaultCategory]);
 
   const filteredIcons = useMemo(() => {
     return searchIcons(searchTerm, activeCategory);
@@ -41,7 +55,7 @@ export const IconBottomSheet: React.FC<IconBottomSheetProps> = ({
 
   const handleSelect = (icon: IconDefinition) => {
     setTempSelectedId(icon.id);
-    onSelectIcon(icon.id);
+    onSelectIcon(icon);
     onClose();
   };
 
@@ -60,7 +74,7 @@ export const IconBottomSheet: React.FC<IconBottomSheetProps> = ({
         {/* Header */}
         <div className="px-4 py-2 flex items-center justify-between border-b border-stone-100">
           <div>
-            <h3 className="text-base font-bold text-stone-900 tracking-tight">{title}</h3>
+            <h3 className="text-base font-bold text-stone-900 tracking-tight">{sheetTitle}</h3>
             <p className="text-[11px] text-stone-500">Selecciona una imagen realista para identificar el registro</p>
           </div>
           <button
@@ -80,7 +94,7 @@ export const IconBottomSheet: React.FC<IconBottomSheetProps> = ({
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Buscar tractor, sembradora, diésel, filtro..."
+              placeholder="Buscar soya, maíz, diésel, tractor..."
               className="w-full pl-9 pr-8 py-2 rounded-xl border border-stone-200 bg-stone-50 text-xs text-stone-900 focus:bg-white focus:border-emerald-600 focus:outline-none transition min-h-[38px]"
             />
             {searchTerm && (
@@ -97,11 +111,11 @@ export const IconBottomSheet: React.FC<IconBottomSheetProps> = ({
 
         {/* Category Tabs (iOS Segmented Style) */}
         <div className="px-4 pb-2">
-          <div className="bg-stone-100 p-1 rounded-xl flex text-[11px] font-semibold text-stone-600">
+          <div className="bg-stone-100 p-1 rounded-xl flex text-[11px] font-semibold text-stone-600 overflow-x-auto">
             <button
               type="button"
               onClick={() => setActiveCategory('todos')}
-              className={`flex-1 py-1.5 rounded-lg transition cursor-pointer ${
+              className={`flex-1 py-1.5 px-2 rounded-lg transition cursor-pointer whitespace-nowrap ${
                 activeCategory === 'todos' ? 'bg-white text-stone-900 shadow-xs' : 'hover:text-stone-900'
               }`}
             >
@@ -109,8 +123,26 @@ export const IconBottomSheet: React.FC<IconBottomSheetProps> = ({
             </button>
             <button
               type="button"
+              onClick={() => setActiveCategory('ingreso')}
+              className={`flex-1 py-1.5 px-2 rounded-lg transition cursor-pointer whitespace-nowrap ${
+                activeCategory === 'ingreso' ? 'bg-white text-emerald-800 shadow-xs font-bold' : 'hover:text-stone-900'
+              }`}
+            >
+              Ingresos
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveCategory('gasto')}
+              className={`flex-1 py-1.5 px-2 rounded-lg transition cursor-pointer whitespace-nowrap ${
+                activeCategory === 'gasto' ? 'bg-white text-emerald-800 shadow-xs font-bold' : 'hover:text-stone-900'
+              }`}
+            >
+              Gastos
+            </button>
+            <button
+              type="button"
               onClick={() => setActiveCategory('maquinaria')}
-              className={`flex-1 py-1.5 rounded-lg transition cursor-pointer ${
+              className={`flex-1 py-1.5 px-2 rounded-lg transition cursor-pointer whitespace-nowrap ${
                 activeCategory === 'maquinaria' ? 'bg-white text-emerald-800 shadow-xs' : 'hover:text-stone-900'
               }`}
             >
@@ -119,20 +151,11 @@ export const IconBottomSheet: React.FC<IconBottomSheetProps> = ({
             <button
               type="button"
               onClick={() => setActiveCategory('implemento')}
-              className={`flex-1 py-1.5 rounded-lg transition cursor-pointer ${
+              className={`flex-1 py-1.5 px-2 rounded-lg transition cursor-pointer whitespace-nowrap ${
                 activeCategory === 'implemento' ? 'bg-white text-emerald-800 shadow-xs' : 'hover:text-stone-900'
               }`}
             >
               Implementos
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveCategory('gasto')}
-              className={`flex-1 py-1.5 rounded-lg transition cursor-pointer ${
-                activeCategory === 'gasto' ? 'bg-white text-emerald-800 shadow-xs' : 'hover:text-stone-900'
-              }`}
-            >
-              Gastos
             </button>
           </div>
         </div>
@@ -152,7 +175,7 @@ export const IconBottomSheet: React.FC<IconBottomSheetProps> = ({
                     key={icon.id}
                     type="button"
                     onClick={() => handleSelect(icon)}
-                    className={`flex flex-col items-center justify-between p-2.5 rounded-2xl border text-center transition cursor-pointer relative group ${
+                    className={`flex flex-col items-center justify-between p-2 rounded-2xl border text-center transition cursor-pointer relative group ${
                       isSelected
                         ? 'border-emerald-600 bg-emerald-50/90 ring-2 ring-emerald-500/30 shadow-xs'
                         : 'border-stone-200/90 bg-white hover:bg-stone-50 hover:border-stone-300'
@@ -160,14 +183,14 @@ export const IconBottomSheet: React.FC<IconBottomSheetProps> = ({
                   >
                     {/* Active check badge */}
                     {isSelected && (
-                      <div className="absolute top-1.5 right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-emerald-600 text-white shadow-xs">
+                      <div className="absolute top-1.5 right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-emerald-600 text-white shadow-xs z-10">
                         <Check className="h-2.5 w-2.5 stroke-[3]" />
                       </div>
                     )}
 
                     {/* Realistic Visual Icon */}
-                    <div className="p-2 flex items-center justify-center">
-                      <VisualIcon iconId={icon.id} size={48} />
+                    <div className="p-1 flex items-center justify-center min-h-[58px]">
+                      <VisualIcon iconId={icon.id} size={54} />
                     </div>
 
                     {/* Icon Label */}

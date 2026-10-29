@@ -1600,6 +1600,7 @@ export async function getIncomes(campanaId?: string, modulo?: 'maquinarias' | 'p
         loteId: i.loteId || undefined,
         loteNombre: i.loteNombre || undefined,
         concepto: String(i.descripcion || i.concepto || i.item || 'Ingreso Cosecha'),
+        icono: i.icono || i.Icono || undefined,
         cantidad: cant,
         unidad: String(i.unidad || ''),
         precio: prec,
@@ -1650,6 +1651,7 @@ export async function createIncome(income: Omit<Income, 'id'>): Promise<Income> 
     tipoCambio: tcNum,
     observaciones: income.observacion || '',
     observacion: income.observacion || '',
+    ...(income.icono ? { icono: income.icono } : {}),
     ...(income.loteId ? { loteId: income.loteId } : {}),
     ...(income.maquinariaId ? { maquinaId: income.maquinariaId, maquinariaId: income.maquinariaId } : {}),
   };
