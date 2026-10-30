@@ -40,6 +40,7 @@ import {
   ItemConfig,
   Asset,
   AssetImprovement,
+  ImplementItem,
   ExchangeRateConfig,
   Currency,
   UserSession,
@@ -97,7 +98,7 @@ interface Props {
   assets: Asset[];
   exchangeRate: ExchangeRateConfig;
   currency: Currency;
-  onRefreshData: () => void;
+  onRefreshData: () => void | Promise<void>;
   onRevokeAuthorization?: () => void;
 }
 
@@ -261,6 +262,29 @@ export const AdminView: React.FC<Props> = ({
   const [revoking, setRevoking] = useState(false);
   const [showRevokeAdminModal, setShowRevokeAdminModal] = useState(false);
 
+  // In-place reauthorization state (preserves open modal and form data on auth failure)
+  const [showReauthModal, setShowReauthModal] = useState(false);
+  const [reauthPassword, setReauthPassword] = useState('');
+  const [showReauthPassword, setShowReauthPassword] = useState(false);
+  const [reauthorizing, setReauthorizing] = useState(false);
+  const [reauthError, setReauthError] = useState<string | null>(null);
+
+  const isAuthError = (err: unknown): boolean => {
+    const msg = String(err instanceof Error ? err.message : err || '').toLowerCase();
+    return (
+      msg.includes('autorización administrativa') ||
+      msg.includes('autorizacion administrativa') ||
+      msg.includes('autorización de administrador') ||
+      msg.includes('autorizacion de administrador') ||
+      msg.includes('contrasena_admin') ||
+      msg.includes('contraseña de administrador') ||
+      msg.includes('contrasena de administrador') ||
+      msg.includes('unauthorized_admin') ||
+      msg.includes('token administrativo') ||
+      msg.includes('credencial administrativa')
+    );
+  };
+
   useEffect(() => {
     if (hasAdminAuthorization()) {
       verifyAdminAuthorization()
@@ -268,12 +292,54 @@ export const AdminView: React.FC<Props> = ({
           setIsAuthorized(valid);
         })
         .catch(() => {
-          setIsAuthorized(false);
+          setIsAuthorized(hasAdminAuthorization());
         });
     } else {
       setIsAuthorized(false);
     }
   }, []);
+
+  const handleAuthorizeDevice = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminPasswordInput.trim()) {
+      setAuthError('Por favor ingresa la contraseña de administrador.');
+      return;
+    }
+    setAuthorizing(true);
+    setAuthError(null);
+    try {
+      await authorizeAdminDevice(adminPasswordInput.trim());
+      setIsAuthorized(true);
+      setAdminPasswordInput('');
+      setSuccessMsg('Dispositivo autorizado como Administrador.');
+      onRefreshData();
+    } catch (err: unknown) {
+      setAuthError(err instanceof Error ? err.message : 'Error al autorizar dispositivo');
+    } finally {
+      setAuthorizing(false);
+    }
+  };
+
+  const handleReauthorize = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reauthPassword.trim()) {
+      setReauthError('Por favor ingresa la contraseña de administrador.');
+      return;
+    }
+    setReauthorizing(true);
+    setReauthError(null);
+    try {
+      await authorizeAdminDevice(reauthPassword.trim());
+      setIsAuthorized(true);
+      setShowReauthModal(false);
+      setReauthPassword('');
+      setSuccessMsg('Dispositivo autorizado. Puedes guardar tus cambios ahora.');
+    } catch (err: unknown) {
+      setReauthError(err instanceof Error ? err.message : 'Error al autorizar dispositivo');
+    } finally {
+      setReauthorizing(false);
+    }
+  };
 
   const handleRevokeDevice = async () => {
     setRevoking(true);
@@ -385,10 +451,21 @@ export const AdminView: React.FC<Props> = ({
 
   // Activos Patrimoniales Navigation and Details State
   const [activosTab, setActivosTab] = useState<'maquinarias' | 'propiedad'>('maquinarias');
+  const [activosMaqSubFilter, setActivosMaqSubFilter] = useState<'TODOS' | 'MAQUINAS' | 'IMPLEMENTOS'>('TODOS');
   const [selectedEntityForDetail, setSelectedEntityForDetail] = useState<{
-    type: 'maquinaria' | 'lote';
-    entity: Machine | Lot;
+    type: 'maquinaria' | 'lote' | 'implemento';
+    entity: Machine | Lot | ImplementItem;
   } | null>(null);
+
+  // Implement Creation/Edit Modal State
+  const [showImplementForm, setShowImplementForm] = useState(false);
+  const [editingImplement, setEditingImplement] = useState<ImplementItem | null>(null);
+  const [impFormNombre, setImpFormNombre] = useState('');
+  const [impFormIcono, setImpFormIcono] = useState('implemento');
+  const [impFormValorInicial, setImpFormValorInicial] = useState('');
+  const [impFormFecha, setImpFormFecha] = useState(getLocalDateString());
+  const [showImpFormIconSheet, setShowImpFormIconSheet] = useState(false);
+  const [isSavingImplement, setIsSavingImplement] = useState(false);
 
   // Asset Improvement Creation Form State
   const [showAddImprovementModal, setShowAddImprovementModal] = useState(false);
@@ -446,6 +523,30 @@ export const AdminView: React.FC<Props> = ({
     return bySub;
   };
 
+  const findAssetForImplement = (imp: ImplementItem, allAssets: Asset[]): Asset | undefined => {
+    if (!imp) return undefined;
+    if (imp.asset) {
+      const direct = allAssets.find((a) => a.id === imp.asset?.id);
+      if (direct) return direct;
+    }
+    const byRef = allAssets.find(
+      (a) =>
+        String(a.tipo || '').toUpperCase() === 'IMPLEMENTO' &&
+        ((a.referenciaId && (a.referenciaId === imp.referenciaId || a.referenciaId === imp.id)) ||
+          (a.identificador && (a.identificador === imp.referenciaId || a.identificador === imp.id)) ||
+          a.id === imp.id)
+    );
+    if (byRef) return byRef;
+
+    const impName = imp.nombre.trim().toLowerCase();
+    const byName = allAssets.find(
+      (a) =>
+        String(a.tipo || '').toUpperCase() === 'IMPLEMENTO' &&
+        a.nombre.trim().toLowerCase() === impName
+    );
+    return byName;
+  };
+
   const getBaseValueForMachine = (m: Machine, allAssets: Asset[]): number => {
     if (m.valorPatrimonial && m.valorPatrimonial > 0) {
       return m.valorPatrimonial;
@@ -467,6 +568,92 @@ export const AdminView: React.FC<Props> = ({
     }
     return 0;
   };
+
+  const getBaseValueForImplement = (imp: ImplementItem, allAssets: Asset[]): number => {
+    const linked = findAssetForImplement(imp, allAssets);
+    if (linked?.valorInicial && linked.valorInicial > 0) {
+      return linked.valorInicial;
+    }
+    if (imp.baseVal && imp.baseVal > 0) {
+      return imp.baseVal;
+    }
+    return 0;
+  };
+
+  // Reusable collection of Agricultural Implements (existing in Activos + machine job types without duplicates)
+  const implementsList: ImplementItem[] = useMemo(() => {
+    const result: ImplementItem[] = [];
+    const registeredNames = new Set<string>();
+
+    // 1. Assets of type IMPLEMENTO from the Activos sheet
+    const implementAssets = (assets || []).filter(
+      (a) => String(a.tipo || '').toUpperCase() === 'IMPLEMENTO' || String(a.tipo || '').toLowerCase() === 'implemento'
+    );
+
+    for (const a of implementAssets) {
+      const normName = a.nombre.trim().toLowerCase();
+      registeredNames.add(normName);
+      if (a.referenciaId) {
+        registeredNames.add(a.referenciaId.trim().toLowerCase());
+      }
+
+      const baseVal = a.valorInicial || 0;
+      const imps = a.mejoras || [];
+      const sumM = imps.reduce((acc, m) => acc + (m.costo || 0), 0);
+      const totVal = baseVal > 0 ? baseVal + sumM : sumM;
+      const resolvedIcon = a.icono || getIconDefinition(a.nombre, 'implemento').id || 'implemento';
+
+      result.push({
+        id: a.id,
+        nombre: a.nombre,
+        icono: resolvedIcon,
+        referenciaId: a.referenciaId || a.id,
+        asset: a,
+        baseVal,
+        mejoras: imps,
+        sumMejoras: sumM,
+        totVal,
+        origen: 'activo',
+      });
+    }
+
+    // 2. Discover implements from machineJobTypes and default catalog
+    const jobSources: Array<{ id?: string; nombre: string; icono?: string }> = [
+      ...(machineJobTypes || []),
+      ...NEW_HOLLAND_DEFAULT_JOBS,
+    ];
+
+    for (const j of jobSources) {
+      const rawName = j.nombre.trim();
+      if (!rawName) continue;
+      const norm = rawName.toLowerCase();
+
+      // Check if already registered
+      if (registeredNames.has(norm)) continue;
+      if (j.id && registeredNames.has(j.id.toLowerCase())) continue;
+
+      registeredNames.add(norm);
+      if (j.id) registeredNames.add(j.id.toLowerCase());
+
+      const resolvedIcon = j.icono || getIconDefinition(rawName, 'implemento').id || 'implemento';
+
+      result.push({
+        id: j.id || `imp_job_${norm.replace(/[^a-z0-9]/g, '_')}`,
+        nombre: rawName,
+        icono: resolvedIcon,
+        referenciaId: j.id || `imp_job_${norm.replace(/[^a-z0-9]/g, '_')}`,
+        asset: undefined,
+        baseVal: 0,
+        mejoras: [],
+        sumMejoras: 0,
+        totVal: 0,
+        origen: 'labor',
+      });
+    }
+
+    return result;
+  }, [assets, machineJobTypes]);
+
 
   // Machine Deletion Modal State
   const [deletingMachine, setDeletingMachine] = useState<Machine | null>(null);
@@ -576,6 +763,10 @@ export const AdminView: React.FC<Props> = ({
       setShowJobTypeModal(false);
       onRefreshData();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al guardar el trabajo');
     } finally {
       setIsSavingJobType(false);
@@ -592,6 +783,10 @@ export const AdminView: React.FC<Props> = ({
       setSuccessMsg('Labor eliminada de la máquina.');
       onRefreshData();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar labor');
     }
   };
@@ -604,6 +799,10 @@ export const AdminView: React.FC<Props> = ({
       setSuccessMsg('Se cargaron exitosamente las 10 labores oficiales New Holland TS115.');
       onRefreshData();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al cargar labores oficiales');
     } finally {
       setSeedingMachineId(null);
@@ -635,6 +834,10 @@ export const AdminView: React.FC<Props> = ({
       setShowCampaignForm(false);
       onRefreshData();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al guardar campaña');
     } finally {
       setSaving(false);
@@ -649,6 +852,10 @@ export const AdminView: React.FC<Props> = ({
       setSuccessMsg('Campaña activa actualizada exitosamente.');
       onRefreshData();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al cambiar campaña activa');
     } finally {
       setSaving(false);
@@ -676,8 +883,9 @@ export const AdminView: React.FC<Props> = ({
     setSaving(true);
     try {
       const valPatNum = parseDecimalNumber(lotValorPatrimonial);
+      let savedLot: Lot;
       if (editingLotId) {
-        await updateLot(editingLotId, {
+        savedLot = await updateLot(editingLotId, {
           nombre: lotNombre.trim(),
           superficieHectareas: parsedSup,
           superficie: parsedSup,
@@ -686,9 +894,8 @@ export const AdminView: React.FC<Props> = ({
           observaciones: lotObs.trim(),
           valorPatrimonial: valPatNum > 0 ? valPatNum : undefined,
         });
-        setSuccessMsg('Lote actualizado exitosamente.');
       } else {
-        await createLot({
+        savedLot = await createLot({
           nombre: lotNombre.trim(),
           superficieHectareas: parsedSup,
           superficie: parsedSup,
@@ -697,7 +904,6 @@ export const AdminView: React.FC<Props> = ({
           observaciones: lotObs.trim(),
           valorPatrimonial: valPatNum > 0 ? valPatNum : undefined,
         });
-        setSuccessMsg('Lote creado exitosamente.');
       }
 
       setLotNombre('');
@@ -708,8 +914,20 @@ export const AdminView: React.FC<Props> = ({
       setLotValorPatrimonial('');
       setEditingLotId(null);
       setShowLotForm(false);
-      onRefreshData();
+
+      // Sincronizar inmediatamente desde Google Sheets
+      await onRefreshData();
+
+      setSuccessMsg(
+        editingLotId
+          ? `Lote "${savedLot.nombre}" guardado y sincronizado exitosamente.`
+          : `Lote "${savedLot.nombre}" creado exitosamente.`
+      );
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al guardar el lote');
     } finally {
       setSaving(false);
@@ -735,6 +953,10 @@ export const AdminView: React.FC<Props> = ({
       setSuccessMsg('Lote eliminado correctamente.');
       onRefreshData();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar el lote');
     }
   };
@@ -759,8 +981,9 @@ export const AdminView: React.FC<Props> = ({
 
     setSaving(true);
     try {
+      let savedMachine: Machine;
       if (editingMachineId) {
-        await updateMachine(editingMachineId, {
+        savedMachine = await updateMachine(editingMachineId, {
           nombre: mNombre.trim(),
           identificacion: mIdentificacion.trim(),
           tipo: mTipo,
@@ -772,9 +995,8 @@ export const AdminView: React.FC<Props> = ({
           observaciones: mObs.trim(),
           valorPatrimonial: valPatNum > 0 ? valPatNum : undefined,
         });
-        setSuccessMsg('Maquinaria actualizada.');
       } else {
-        await createMachine({
+        savedMachine = await createMachine({
           nombre: mNombre.trim(),
           identificacion: mIdentificacion.trim() || 'TR-01',
           tipo: mTipo,
@@ -786,7 +1008,6 @@ export const AdminView: React.FC<Props> = ({
           observaciones: mObs.trim(),
           valorPatrimonial: valPatNum > 0 ? valPatNum : undefined,
         });
-        setSuccessMsg('Maquinaria creada exitosamente.');
       }
 
       setEditingMachineId(null);
@@ -795,8 +1016,20 @@ export const AdminView: React.FC<Props> = ({
       setMIcono('tractor');
       setMValorPatrimonial('');
       setShowMachineForm(false);
-      onRefreshData();
+
+      // Sincronizar inmediatamente desde Google Sheets
+      await onRefreshData();
+
+      setSuccessMsg(
+        editingMachineId
+          ? `Maquinaria "${savedMachine.nombre}" guardada y sincronizada exitosamente.`
+          : `Maquinaria "${savedMachine.nombre}" registrada exitosamente.`
+      );
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al guardar maquinaria');
     } finally {
       setSaving(false);
@@ -836,6 +1069,10 @@ export const AdminView: React.FC<Props> = ({
       setDeletingMachine(null);
       onRefreshData();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar la maquinaria');
     } finally {
       setIsDeleting(false);
@@ -867,6 +1104,10 @@ export const AdminView: React.FC<Props> = ({
       }
       onRefreshData();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al guardar el tipo de cambio');
     } finally {
       setSaving(false);
@@ -892,9 +1133,84 @@ export const AdminView: React.FC<Props> = ({
       setShowAssetForm(false);
       onRefreshData();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al guardar activo');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleOpenEditImplement = (imp: ImplementItem) => {
+    setEditingImplement(imp);
+    setImpFormNombre(imp.nombre);
+    setImpFormIcono(imp.icono || 'implemento');
+    const baseVal = getBaseValueForImplement(imp, assets);
+    setImpFormValorInicial(baseVal > 0 ? String(baseVal) : '');
+    const linked = findAssetForImplement(imp, assets);
+    setImpFormFecha(linked?.fechaAdquisicion || getLocalDateString());
+    setShowImplementForm(true);
+  };
+
+  const handleSaveImplement = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    if (!impFormNombre.trim()) {
+      setErrorMsg('El nombre del implemento es obligatorio.');
+      return;
+    }
+    const valNum = parseDecimalNumber(impFormValorInicial);
+
+    setSaving(true);
+    setIsSavingImplement(true);
+    try {
+      const existing = editingImplement
+        ? findAssetForImplement(editingImplement, assets)
+        : assets.find(
+            (a) =>
+              String(a.tipo || '').toUpperCase() === 'IMPLEMENTO' &&
+              a.nombre.trim().toLowerCase() === impFormNombre.trim().toLowerCase()
+          );
+
+      if (existing) {
+        await updateAsset(existing.id, {
+          nombre: impFormNombre.trim(),
+          tipo: 'IMPLEMENTO',
+          referenciaId: editingImplement?.referenciaId || existing.referenciaId || `imp_${Date.now()}`,
+          valorInicial: valNum,
+          moneda: 'USD',
+          fechaAdquisicion: impFormFecha,
+        });
+        setSuccessMsg(`Implemento "${impFormNombre.trim()}" actualizado.`);
+      } else {
+        await createAsset({
+          tipo: 'IMPLEMENTO',
+          nombre: impFormNombre.trim(),
+          identificador: editingImplement?.referenciaId || `imp_${Date.now()}`,
+          referenciaId: editingImplement?.referenciaId || `imp_${Date.now()}`,
+          icono: impFormIcono,
+          valorInicial: valNum,
+          moneda: 'USD',
+          fechaAdquisicion: impFormFecha,
+        });
+        setSuccessMsg(`Implemento "${impFormNombre.trim()}" registrado exitosamente.`);
+      }
+
+      setShowImplementForm(false);
+      setEditingImplement(null);
+      await onRefreshData();
+    } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
+      setErrorMsg(err instanceof Error ? err.message : 'Error al guardar el implemento agrícola');
+    } finally {
+      setSaving(false);
+      setIsSavingImplement(false);
     }
   };
 
@@ -913,21 +1229,27 @@ export const AdminView: React.FC<Props> = ({
     setErrorMsg(null);
     try {
       const isMachine = selectedEntityForDetail.type === 'maquinaria';
+      const isImplement = selectedEntityForDetail.type === 'implemento';
       const entity = selectedEntityForDetail.entity;
       let targetAsset = isMachine
         ? findAssetForMachine(entity as Machine, assets)
+        : isImplement
+        ? findAssetForImplement(entity as ImplementItem, assets)
         : findAssetForLot(entity as Lot, assets);
 
       if (!targetAsset) {
         const baseVal = isMachine
           ? (entity as Machine).valorPatrimonial || 0
+          : isImplement
+          ? (entity as ImplementItem).baseVal || 0
           : (entity as Lot).valorPatrimonial || 0;
 
         targetAsset = await createAsset({
-          tipo: isMachine ? 'MAQUINARIA' : 'LOTE',
+          tipo: isMachine ? 'MAQUINARIA' : (isImplement ? 'IMPLEMENTO' : 'LOTE'),
           nombre: entity.nombre.trim(),
           identificador: entity.id,
-          referenciaId: entity.id,
+          referenciaId: (entity as any).referenciaId || entity.id,
+          icono: (entity as any).icono || undefined,
           valorInicial: baseVal,
           moneda: 'USD',
           fechaAdquisicion: getLocalDateString(),
@@ -945,8 +1267,12 @@ export const AdminView: React.FC<Props> = ({
       setImpDesc('');
       setImpCosto('');
       setShowAddImprovementModal(false);
-      onRefreshData();
+      await onRefreshData();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al registrar la mejora');
     } finally {
       setSaving(false);
@@ -985,6 +1311,10 @@ export const AdminView: React.FC<Props> = ({
       setEditingImprovement(null);
       onRefreshData();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al actualizar la mejora');
     } finally {
       setSaving(false);
@@ -1005,13 +1335,16 @@ export const AdminView: React.FC<Props> = ({
       setDeletingImprovement(null);
       onRefreshData();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar la mejora');
     } finally {
       setIsDeletingImprovement(false);
     }
   };
 
-  // Submit Item Config
   // Submit Item Config
   const handleItemSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1049,6 +1382,10 @@ export const AdminView: React.FC<Props> = ({
       setItemPrecio('');
       onRefreshData();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsAuthorized(false);
+        setShowReauthModal(true);
+      }
       setErrorMsg(err instanceof Error ? err.message : 'Error al guardar el ítem');
     } finally {
       setSaving(false);
@@ -1127,6 +1464,189 @@ export const AdminView: React.FC<Props> = ({
     });
   }, [itemsConfig, itemClassTab, filterModulo, showInactiveItems, itemSearch]);
 
+  // In-place reauthorization modal: preserves active screen, modals and input fields
+  const renderReauthModal = () => {
+    if (!showReauthModal) return null;
+    return (
+      <div className="fixed inset-0 z-60 flex items-center justify-center bg-stone-900/50 backdrop-blur-xs p-4 animate-fadeIn">
+        <div className="w-full max-w-sm rounded-2xl bg-white p-5 sm:p-6 shadow-2xl border border-stone-200/90 text-center space-y-4">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-50 text-amber-700 mx-auto border border-amber-200">
+            <ShieldCheck className="h-6 w-6" />
+          </div>
+          <div>
+            <h3 className="text-sm sm:text-base font-bold text-stone-900">
+              Autorización Requerida
+            </h3>
+            <p className="text-xs text-stone-500 mt-1 leading-relaxed">
+              Ingresa la contraseña de administrador (CONTRASENA_ADMIN) para completar esta operación sin perder los datos editados.
+            </p>
+          </div>
+
+          {reauthError && (
+            <div className="rounded-xl border border-red-200 bg-red-50 p-2.5 text-xs text-red-800 text-left flex items-start gap-2">
+              <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+              <span className="flex-1">{reauthError}</span>
+            </div>
+          )}
+
+          <form onSubmit={handleReauthorize} className="space-y-3.5 text-left">
+            <div className="space-y-1">
+              <label className="block text-xs font-semibold text-stone-700">
+                Contraseña de Administrador
+              </label>
+              <div className="relative">
+                <input
+                  type={showReauthPassword ? 'text' : 'password'}
+                  value={reauthPassword}
+                  onChange={(e) => {
+                    setReauthPassword(e.target.value);
+                    if (reauthError) setReauthError(null);
+                  }}
+                  placeholder="CONTRASENA_ADMIN"
+                  autoFocus
+                  className="w-full rounded-xl border border-stone-200 bg-stone-50/50 px-3.5 py-2.5 pr-10 text-xs sm:text-sm text-stone-900 focus:bg-white focus:border-emerald-600 focus:outline-none transition min-h-[42px]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowReauthPassword(!showReauthPassword)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-stone-400 hover:text-stone-600 transition cursor-pointer"
+                >
+                  {showReauthPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                disabled={reauthorizing}
+                onClick={() => {
+                  setShowReauthModal(false);
+                  setReauthPassword('');
+                  setReauthError(null);
+                }}
+                className="flex-1 py-2.5 rounded-xl border border-stone-200 bg-stone-100 text-xs font-semibold text-stone-700 hover:bg-stone-200 transition cursor-pointer min-h-[40px]"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={reauthorizing || !reauthPassword.trim()}
+                className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-[#367C2B] hover:bg-emerald-800 text-xs font-semibold text-white transition cursor-pointer shadow-xs min-h-[40px] disabled:opacity-50"
+              >
+                {reauthorizing ? (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    <span>Autorizando...</span>
+                  </>
+                ) : (
+                  <span>Autorizar</span>
+                )}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  };
+
+  // AUTHORIZATION GATE: If device is not authorized and not in mid-edit reauthorization
+  if (!isAuthorized && !showReauthModal) {
+    return (
+      <div className="space-y-6 max-w-md mx-auto w-full px-2 py-4 animate-fadeIn">
+        {/* Navigation Bar */}
+        <div className="flex items-center justify-between pb-3 border-b border-stone-200">
+          <button
+            type="button"
+            onClick={() => {
+              if (onRevokeAuthorization) {
+                onRevokeAuthorization();
+              }
+            }}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-stone-200 text-xs font-semibold text-stone-700 hover:bg-stone-50 transition cursor-pointer shrink-0 min-h-[38px]"
+          >
+            <ArrowLeft className="h-4 w-4 text-emerald-700" />
+            <span>Volver a Inicio</span>
+          </button>
+        </div>
+
+        {/* Authorization Card */}
+        <div className="rounded-2xl border border-stone-200/90 bg-white p-5 sm:p-6 shadow-xs space-y-5">
+          <div className="text-center space-y-2">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700 mx-auto border border-emerald-100">
+              <ShieldCheck className="h-7 w-7" />
+            </div>
+            <h2 className="text-base sm:text-lg font-bold text-stone-900 tracking-tight">
+              Autorización Administrativa
+            </h2>
+            <p className="text-xs text-stone-500 leading-relaxed max-w-xs mx-auto">
+              Ingresa la contraseña de administrador (CONTRASENA_ADMIN) para autorizar este dispositivo y acceder a las opciones de administración.
+            </p>
+          </div>
+
+          {authError && (
+            <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-start gap-2 animate-fadeIn">
+              <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+              <span className="flex-1 leading-snug">{authError}</span>
+            </div>
+          )}
+
+          <form onSubmit={handleAuthorizeDevice} className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-stone-700">
+                Contraseña de Administrador
+              </label>
+              <div className="relative">
+                <input
+                  type={showAdminPassword ? 'text' : 'password'}
+                  value={adminPasswordInput}
+                  onChange={(e) => {
+                    setAdminPasswordInput(e.target.value);
+                    if (authError) setAuthError(null);
+                  }}
+                  placeholder="Ingresa CONTRASENA_ADMIN"
+                  autoComplete="current-password"
+                  autoFocus
+                  className="w-full rounded-xl border border-stone-200 bg-stone-50/50 px-3.5 py-2.5 pr-10 text-xs sm:text-sm text-stone-900 focus:bg-white focus:border-emerald-600 focus:outline-none transition min-h-[44px]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowAdminPassword(!showAdminPassword)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1.5 text-stone-400 hover:text-stone-600 transition cursor-pointer"
+                  title={showAdminPassword ? 'Ocultar' : 'Mostrar'}
+                >
+                  {showAdminPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={authorizing || !adminPasswordInput.trim()}
+              className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#367C2B] hover:bg-emerald-800 text-white font-semibold py-3 text-xs sm:text-sm shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[44px]"
+            >
+              {authorizing ? (
+                <>
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  <span>Autorizando dispositivo...</span>
+                </>
+              ) : (
+                <>
+                  <ShieldCheck className="h-4 w-4" />
+                  <span>Autorizar Dispositivo</span>
+                </>
+              )}
+            </button>
+          </form>
+
+          <p className="text-[11px] text-stone-400 text-center leading-relaxed">
+            Una vez autorizado, este dispositivo conservará la sesión administrativa de forma persistente.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   // RENDER LEVEL 3: Financial Reports Screen
   if (screen === 'reports') {
     const backLabel =
@@ -1157,6 +1677,7 @@ export const AdminView: React.FC<Props> = ({
           currency={currency}
           exchangeRate={exchangeRate}
         />
+        {renderReauthModal()}
       </div>
     );
   }
@@ -1311,6 +1832,7 @@ export const AdminView: React.FC<Props> = ({
         </div>
 
         <AppsScriptModal isOpen={showScriptModal} onClose={() => setShowScriptModal(false)} />
+        {renderReauthModal()}
       </div>
     );
   }
@@ -1586,6 +2108,7 @@ export const AdminView: React.FC<Props> = ({
             </div>
           </div>
         )}
+        {renderReauthModal()}
       </div>
     );
   }
@@ -1813,6 +2336,7 @@ export const AdminView: React.FC<Props> = ({
             </div>
           </div>
         )}
+        {renderReauthModal()}
       </div>
     );
   }
@@ -2827,18 +3351,25 @@ export const AdminView: React.FC<Props> = ({
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">Tipo de Equipo</label>
-                <SegmentedControl
-                  options={[
-                    { value: 'Tractor', label: 'Tractor' },
-                    { value: 'Cosechadora', label: 'Cosechadora' },
-                    { value: 'Fumigadora', label: 'Fumigadora' },
-                    { value: 'Camión', label: 'Camión' },
-                    { value: 'Otro', label: 'Otro' },
-                  ]}
+                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  Tipo de Equipo <span className="text-red-500">*</span>
+                </label>
+                <select
                   value={mTipo}
-                  onChange={(val) => setMTipo(val)}
-                />
+                  onChange={(e) => setMTipo(e.target.value)}
+                  className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px] text-stone-800"
+                >
+                  <option value="Tractor">Tractor</option>
+                  <option value="Cosechadora">Cosechadora</option>
+                  <option value="Fumigadora">Fumigadora</option>
+                  <option value="Camión">Camión</option>
+                  <option value="Vehículo">Vehículo</option>
+                  <option value="Otro">Otro</option>
+                  {mTipo &&
+                    !['Tractor', 'Cosechadora', 'Fumigadora', 'Camión', 'Vehículo', 'Otro'].includes(mTipo) && (
+                      <option value={mTipo}>{mTipo} (Histórico)</option>
+                    )}
+                </select>
               </div>
 
               <div>
@@ -3592,7 +4123,7 @@ export const AdminView: React.FC<Props> = ({
           <div>
             <SegmentedControl
               options={[
-                { value: 'maquinarias', label: `Maquinarias (${machines.length})` },
+                { value: 'maquinarias', label: `Maquinarias (${machines.length + implementsList.length})` },
                 { value: 'propiedad', label: `Propiedad (${lots.length})` },
               ]}
               value={activosTab}
@@ -3602,20 +4133,36 @@ export const AdminView: React.FC<Props> = ({
             />
           </div>
 
-          {/* TAB 1: MAQUINARIAS */}
+          {/* TAB 1: MAQUINARIAS E IMPLEMENTOS AGRÍCOLAS */}
           {activosTab === 'maquinarias' && (() => {
-            const totalBase = machines.reduce((acc, m) => {
-              const bVal = getBaseValueForMachine(m, assets);
-              return acc + bVal;
+            const mBase = machines.reduce((acc, m) => acc + getBaseValueForMachine(m, assets), 0);
+            const mMejoras = machines.reduce((acc, m) => {
+              const linked = findAssetForMachine(m, assets);
+              return acc + (linked?.mejoras || []).reduce((a, b) => a + (b.costo || 0), 0);
             }, 0);
 
-            const totalMejoras = machines.reduce((acc, m) => {
-              const linked = findAssetForMachine(m, assets);
-              const sumM = (linked?.mejoras || []).reduce((a, b) => a + (b.costo || 0), 0);
-              return acc + sumM;
+            const iBase = implementsList.reduce((acc, imp) => acc + getBaseValueForImplement(imp, assets), 0);
+            const iMejoras = implementsList.reduce((acc, imp) => {
+              const linked = findAssetForImplement(imp, assets);
+              const imps = linked?.mejoras || imp.mejoras || [];
+              return acc + imps.reduce((a, b) => a + (b.costo || 0), 0);
             }, 0);
+
+            let totalBase = mBase + iBase;
+            let totalMejoras = mMejoras + iMejoras;
+
+            if (activosMaqSubFilter === 'MAQUINAS') {
+              totalBase = mBase;
+              totalMejoras = mMejoras;
+            } else if (activosMaqSubFilter === 'IMPLEMENTOS') {
+              totalBase = iBase;
+              totalMejoras = iMejoras;
+            }
 
             const totalPat = totalBase + totalMejoras;
+
+            const showMachines = activosMaqSubFilter === 'TODOS' || activosMaqSubFilter === 'MAQUINAS';
+            const showImplements = activosMaqSubFilter === 'TODOS' || activosMaqSubFilter === 'IMPLEMENTOS';
 
             return (
               <div className="space-y-3">
@@ -3651,49 +4198,146 @@ export const AdminView: React.FC<Props> = ({
                   </div>
                 </div>
 
-                {/* Machine Asset Cards - iOS Thin Rows */}
+                {/* Sub-filter and Action Bar */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="flex-1">
+                    <SegmentedControl
+                      options={[
+                        { value: 'TODOS', label: `Todos (${machines.length + implementsList.length})` },
+                        { value: 'MAQUINAS', label: `Máquinas (${machines.length})` },
+                        { value: 'IMPLEMENTOS', label: `Implementos (${implementsList.length})` },
+                      ]}
+                      value={activosMaqSubFilter}
+                      onChange={(val) => setActivosMaqSubFilter(val as any)}
+                      variant="green"
+                      className="w-full text-xs"
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingImplement(null);
+                      setImpFormNombre('');
+                      setImpFormIcono('implemento');
+                      setImpFormValorInicial('');
+                      setImpFormFecha(getLocalDateString());
+                      setShowImplementForm(true);
+                    }}
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition shadow-2xs cursor-pointer min-h-[38px] shrink-0"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>Registrar Implemento</span>
+                  </button>
+                </div>
+
+                {/* Cards List */}
                 <div className="space-y-2">
-                  {machines.map((m) => {
-                    const linked = findAssetForMachine(m, assets);
-                    const baseVal = getBaseValueForMachine(m, assets);
-                    const imps = linked?.mejoras || [];
-                    const sumImps = imps.reduce((a, b) => a + (b.costo || 0), 0);
-                    const totVal = baseVal > 0 ? baseVal + sumImps : (sumImps > 0 ? sumImps : 0);
+                  {/* Machines */}
+                  {showMachines &&
+                    machines.map((m) => {
+                      const linked = findAssetForMachine(m, assets);
+                      const baseVal = getBaseValueForMachine(m, assets);
+                      const imps = linked?.mejoras || [];
+                      const sumImps = imps.reduce((a, b) => a + (b.costo || 0), 0);
+                      const totVal = baseVal > 0 ? baseVal + sumImps : (sumImps > 0 ? sumImps : 0);
 
-                    return (
-                      <div
-                        key={m.id}
-                        onClick={() => setSelectedEntityForDetail({ type: 'maquinaria', entity: m })}
-                        className="rounded-2xl border border-stone-200/80 bg-white p-3 hover:border-emerald-500/50 hover:bg-stone-50/80 transition cursor-pointer shadow-2xs flex items-center justify-between gap-2.5 group min-h-[52px]"
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                          <div className="shrink-0 flex items-center justify-center p-1.5 rounded-xl bg-stone-50 border border-stone-200/80">
-                            <VisualIcon name={m.icono || 'tractor'} size="sm" />
+                      return (
+                        <div
+                          key={`m_${m.id}`}
+                          onClick={() => setSelectedEntityForDetail({ type: 'maquinaria', entity: m })}
+                          className="rounded-2xl border border-stone-200/80 bg-white p-3 hover:border-emerald-500/50 hover:bg-stone-50/80 transition cursor-pointer shadow-2xs flex items-center justify-between gap-2.5 group min-h-[52px]"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                            <div className="shrink-0 flex items-center justify-center p-1.5 rounded-xl bg-stone-50 border border-stone-200/80">
+                              <VisualIcon name={m.icono || 'tractor'} size="sm" />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <h4 className="text-xs sm:text-sm font-bold text-stone-900 group-hover:text-emerald-800 transition truncate">
+                                  {m.nombre}
+                                </h4>
+                                <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                  Máquina
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-stone-500 truncate mt-0.5">
+                                {baseVal > 0 ? `Base: USD ${baseVal.toLocaleString()}` : 'Sin valor'}
+                                {sumImps > 0 ? <span className="text-emerald-700 font-semibold"> &bull; Mejoras: USD {sumImps.toLocaleString()}</span> : null}
+                              </p>
+                            </div>
                           </div>
-                          <div className="min-w-0 flex-1">
-                            <h4 className="text-xs sm:text-sm font-bold text-stone-900 group-hover:text-emerald-800 transition truncate">
-                              {m.nombre}
-                            </h4>
-                            <p className="text-[11px] text-stone-500 truncate mt-0.5">
-                              {baseVal > 0 ? `Base: USD ${baseVal.toLocaleString()}` : 'Sin valor'}
-                              {sumImps > 0 ? <span className="text-emerald-700 font-semibold"> &bull; Mejoras: USD {sumImps.toLocaleString()}</span> : null}
-                            </p>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-xs sm:text-sm font-black font-mono text-emerald-950">
+                              {totVal > 0 ? `USD ${totVal.toLocaleString()}` : <span className="text-stone-400 font-normal text-xs">Sin valor</span>}
+                            </span>
+                            <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0" />
                           </div>
                         </div>
+                      );
+                    })}
 
-                        <div className="flex items-center gap-2 shrink-0">
-                          <span className="text-xs sm:text-sm font-black font-mono text-emerald-950">
-                            {totVal > 0 ? `USD ${totVal.toLocaleString()}` : <span className="text-stone-400 font-normal text-xs">Sin valor</span>}
-                          </span>
-                          <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0" />
+                  {/* Agricultural Implements */}
+                  {showImplements &&
+                    implementsList.map((imp) => {
+                      const linked = findAssetForImplement(imp, assets);
+                      const baseVal = getBaseValueForImplement(imp, assets);
+                      const imps = linked?.mejoras || imp.mejoras || [];
+                      const sumImps = imps.reduce((a, b) => a + (b.costo || 0), 0);
+                      const totVal = baseVal > 0 ? baseVal + sumImps : (sumImps > 0 ? sumImps : 0);
+
+                      return (
+                        <div
+                          key={`imp_${imp.id}`}
+                          onClick={() => setSelectedEntityForDetail({ type: 'implemento', entity: imp })}
+                          className="rounded-2xl border border-stone-200/80 bg-white p-3 hover:border-emerald-500/50 hover:bg-stone-50/80 transition cursor-pointer shadow-2xs flex items-center justify-between gap-2.5 group min-h-[52px]"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                            <div className="shrink-0 flex items-center justify-center p-1.5 rounded-xl bg-amber-50/80 border border-amber-200/60">
+                              <VisualIcon name={imp.icono || 'implemento'} size="sm" />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <h4 className="text-xs sm:text-sm font-bold text-stone-900 group-hover:text-emerald-800 transition truncate">
+                                  {imp.nombre}
+                                </h4>
+                                <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-amber-50 text-amber-900 border border-amber-200/70">
+                                  Implemento
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-stone-500 truncate mt-0.5">
+                                {baseVal > 0 ? `Base: USD ${baseVal.toLocaleString()}` : 'Sin valor'}
+                                {sumImps > 0 ? <span className="text-emerald-700 font-semibold"> &bull; Mejoras: USD {sumImps.toLocaleString()}</span> : null}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-xs sm:text-sm font-black font-mono text-emerald-950">
+                              {totVal > 0 ? `USD ${totVal.toLocaleString()}` : <span className="text-stone-400 font-normal text-xs">Sin valor</span>}
+                            </span>
+                            <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0" />
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
 
-                  {machines.length === 0 && (
+                  {showMachines && machines.length === 0 && !showImplements && (
                     <div className="py-10 text-center text-xs text-stone-400 bg-stone-50 rounded-2xl border border-stone-200">
                       No hay máquinas registradas en la flota.
+                    </div>
+                  )}
+
+                  {showImplements && implementsList.length === 0 && !showMachines && (
+                    <div className="py-10 text-center text-xs text-stone-400 bg-stone-50 rounded-2xl border border-stone-200">
+                      No hay implementos agrícolas registrados. Presiona «Registrar Implemento» para agregar uno.
+                    </div>
+                  )}
+
+                  {machines.length === 0 && implementsList.length === 0 && (
+                    <div className="py-10 text-center text-xs text-stone-400 bg-stone-50 rounded-2xl border border-stone-200">
+                      No hay máquinas ni implementos registrados.
                     </div>
                   )}
                 </div>
@@ -3803,16 +4447,21 @@ export const AdminView: React.FC<Props> = ({
           {/* DETAIL MODAL / BOTTOM SHEET FOR ENTITY */}
           {selectedEntityForDetail && (() => {
             const isMachine = selectedEntityForDetail.type === 'maquinaria';
+            const isImplement = selectedEntityForDetail.type === 'implemento';
             const entity = selectedEntityForDetail.entity;
             const linkedAsset = isMachine
               ? findAssetForMachine(entity as Machine, assets)
+              : isImplement
+              ? findAssetForImplement(entity as ImplementItem, assets)
               : findAssetForLot(entity as Lot, assets);
 
             const baseVal = isMachine
               ? getBaseValueForMachine(entity as Machine, assets)
+              : isImplement
+              ? getBaseValueForImplement(entity as ImplementItem, assets)
               : getBaseValueForLot(entity as Lot, assets);
 
-            const imps = linkedAsset?.mejoras || [];
+            const imps = linkedAsset?.mejoras || (isImplement ? (entity as ImplementItem).mejoras : []) || [];
             const sumImps = imps.reduce((a, b) => a + (b.costo || 0), 0);
             const totVal = baseVal > 0 ? baseVal + sumImps : sumImps;
 
@@ -3821,7 +4470,13 @@ export const AdminView: React.FC<Props> = ({
                 isOpen={Boolean(selectedEntityForDetail)}
                 onClose={() => setSelectedEntityForDetail(null)}
                 title={entity.nombre}
-                subtitle={isMachine ? 'Ficha Patrimonial — Maquinaria' : 'Ficha Patrimonial — Terreno / Lote'}
+                subtitle={
+                  isMachine
+                    ? 'Ficha Patrimonial — Maquinaria'
+                    : isImplement
+                    ? 'Ficha Patrimonial — Implemento Agrícola'
+                    : 'Ficha Patrimonial — Terreno / Lote'
+                }
                 errorMsg={errorMsg}
                 onErrorDismiss={() => setErrorMsg(null)}
               >
@@ -3840,7 +4495,11 @@ export const AdminView: React.FC<Props> = ({
                       <div className="text-right">
                         <span className="text-[10px] font-bold text-stone-400 block">Categoría</span>
                         <span className="text-xs font-semibold text-stone-200">
-                          {isMachine ? (entity as Machine).tipo || 'Equipo' : `${(entity as Lot).superficieHectareas} ha`}
+                          {isMachine
+                            ? (entity as Machine).tipo || 'Equipo'
+                            : isImplement
+                            ? 'Implemento Agrícola'
+                            : `${(entity as Lot).superficieHectareas} ha`}
                         </span>
                       </div>
                     </div>
@@ -3870,6 +4529,8 @@ export const AdminView: React.FC<Props> = ({
                           setSelectedEntityForDetail(null);
                           if (targetEnt.type === 'maquinaria') {
                             handleEditMachine(targetEnt.entity as Machine);
+                          } else if (targetEnt.type === 'implemento') {
+                            handleOpenEditImplement(targetEnt.entity as ImplementItem);
                           } else {
                             handleEditLot(targetEnt.entity as Lot);
                           }
@@ -3877,7 +4538,7 @@ export const AdminView: React.FC<Props> = ({
                         className="text-[11px] font-bold text-emerald-400 hover:text-emerald-300 transition inline-flex items-center gap-1 cursor-pointer"
                       >
                         <Edit3 className="h-3 w-3" />
-                        <span>Configurar valor base inicial</span>
+                        <span>{baseVal > 0 ? 'Configurar valor base inicial' : 'Asignar valor inicial'}</span>
                       </button>
                     </div>
                   </div>
@@ -4176,8 +4837,138 @@ export const AdminView: React.FC<Props> = ({
               </div>
             </div>
           )}
+
+          {/* IMPLEMENT FORM MODAL */}
+          <IOSModal
+            isOpen={showImplementForm}
+            onClose={() => {
+              setShowImplementForm(false);
+              setEditingImplement(null);
+              setImpFormNombre('');
+              setImpFormValorInicial('');
+              setErrorMsg(null);
+            }}
+            title={editingImplement ? 'Editar Implemento Agrícola' : 'Registrar Implemento Agrícola'}
+            subtitle="Configura el nombre, icono y valor patrimonial en USD"
+            errorMsg={errorMsg}
+            onErrorDismiss={() => setErrorMsg(null)}
+          >
+            <form onSubmit={handleSaveImplement} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  Nombre del Implemento *
+                </label>
+                <input
+                  type="text"
+                  value={impFormNombre}
+                  onChange={(e) => setImpFormNombre(e.target.value)}
+                  placeholder="Ej: Romplow 18 discos, Sembradora John Deere, Rastra tándem..."
+                  required
+                  className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  Icono del Implemento
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowImpFormIconSheet(true)}
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-stone-300 bg-stone-50/50 hover:bg-white transition min-h-[44px] cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="shrink-0 flex items-center justify-center p-1 rounded-lg bg-white border border-stone-200">
+                      <VisualIcon name={impFormIcono || 'implemento'} size="sm" />
+                    </div>
+                    <span className="text-xs font-semibold text-stone-800 truncate">
+                      {getIconDefinition(impFormIcono || 'implemento').label}
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-bold text-emerald-700 shrink-0">Elegir icono</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Valor Patrimonial Inicial (USD)
+                    <span className="text-[10px] font-normal text-stone-500 ml-1">(Opcional)</span>
+                  </label>
+                  <div className="relative">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-bold text-stone-400">
+                      USD
+                    </span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      value={impFormValorInicial}
+                      onChange={(e) => setImpFormValorInicial(e.target.value)}
+                      placeholder="Ej. 18000"
+                      className="w-full text-xs pl-12 pr-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white focus:border-emerald-600 focus:outline-none font-bold text-emerald-950 font-mono min-h-[42px]"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Fecha de Adquisición
+                  </label>
+                  <input
+                    type="date"
+                    value={impFormFecha}
+                    onChange={(e) => setImpFormFecha(e.target.value)}
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white min-h-[42px]"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-2.5 pt-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowImplementForm(false);
+                    setEditingImplement(null);
+                    setImpFormNombre('');
+                    setImpFormValorInicial('');
+                  }}
+                  className="flex-1 py-3 rounded-xl border border-stone-300 bg-stone-100 hover:bg-stone-200 text-xs font-bold text-stone-700 transition cursor-pointer min-h-[44px]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingImplement}
+                  className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-xs font-bold text-white shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[44px]"
+                >
+                  {isSavingImplement ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <span>Guardando...</span>
+                    </>
+                  ) : (
+                    <span>{editingImplement ? 'Guardar Cambios' : 'Registrar Implemento'}</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </IOSModal>
+
+          <IconBottomSheet
+            isOpen={showImpFormIconSheet}
+            onClose={() => setShowImpFormIconSheet(false)}
+            category="implemento"
+            selectedIconId={impFormIcono}
+            onSelectIcon={(icon) => {
+              setImpFormIcono(icon.id);
+              setShowImpFormIconSheet(false);
+            }}
+            title="Elegir icono de implemento agrícola"
+          />
         </div>
       )}
+      {renderReauthModal()}
     </div>
   );
 };

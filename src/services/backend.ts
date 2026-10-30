@@ -337,10 +337,14 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
 
       // Check for expired or revoked administrative token or changed CONTRASENA_ADMIN
       if (
+        code === 'UNAUTHORIZED_ADMIN' ||
+        errStr.includes('autorización administrativa') ||
+        errStr.includes('autorizacion administrativa') ||
         errStr.includes('autorización de administrador') ||
         errStr.includes('autorizacion de administrador') ||
         errStr.includes('token administrativo') ||
-        errStr.includes('credencial administrativa')
+        errStr.includes('credencial administrativa') ||
+        errStr.includes('contrasena_admin')
       ) {
         setAdminToken(null);
       }
@@ -470,7 +474,8 @@ export async function verifyAdminAuthorization(): Promise<boolean> {
       setAdminToken(null);
       return false;
     }
-    return false;
+    // Si fue un fallo transitorio de red o conexión, conservar la credencial existente
+    return true;
   }
 }
 
@@ -934,9 +939,12 @@ export async function createMachine(machine: Omit<Machine, 'id'>): Promise<Machi
       : 'h';
   const tarifaNum = parseDecimalNumber(machine.tarifa);
   const valPat = parseDecimalNumber(machine.valorPatrimonial);
+  const isActivo = machine.estado ? machine.estado === 'operativo' : (machine.activo !== false);
 
   const machineData = {
     ...machine,
+    identificacion: machine.identificacion ? String(machine.identificacion).trim() : 'TR-01',
+    nombre: String(machine.nombre || '').trim(),
     unidad: codeUnidad,
     unidadCobro: codeUnidad,
     unidad_cobro: codeUnidad,
@@ -944,6 +952,8 @@ export async function createMachine(machine: Omit<Machine, 'id'>): Promise<Machi
     tarifa: tarifaNum,
     costo: tarifaNum,
     precio: tarifaNum,
+    activo: isActivo,
+    estado: machine.estado || (isActivo ? 'operativo' : 'inactivo'),
     ...(valPat > 0 ? { valorPatrimonial: valPat, valorTotalUsd: valPat } : {}),
   };
 
@@ -953,11 +963,15 @@ export async function createMachine(machine: Omit<Machine, 'id'>): Promise<Machi
     maquinaria: machineData,
   };
 
-  const res = await callGAS<any>('machine.save', payload);
+  const res = await callGAS<any>('machine.save', payload, false);
+  if (!res || (typeof res === 'object' && res.ok === false)) {
+    throw new Error(res?.error || 'El backend de Google Sheets no confirmó la creación de la maquinaria.');
+  }
+
   clearMemoryCache();
   const created = normalizeMachine(res);
   if (valPat > 0 && created.id) {
-    upsertAssetForEntity(created.id, 'MAQUINARIA', created.nombre, valPat).catch(() => {});
+    await upsertAssetForEntity(created.id, 'MAQUINARIA', created.nombre, valPat);
   }
   return {
     ...created,
@@ -970,11 +984,14 @@ export async function updateMachine(id: string, machine: Partial<Machine>): Prom
   const codeUnidad: 'h' | 'ha' = (rawU.includes('ha') || rawU.includes('hect')) ? 'ha' : 'h';
   const tarifaNum = parseDecimalNumber(machine.tarifa);
   const valPat = machine.valorPatrimonial !== undefined ? parseDecimalNumber(machine.valorPatrimonial) : undefined;
+  const isActivo = machine.estado ? machine.estado === 'operativo' : (machine.activo !== false);
 
   const { id: _, ...restMachine } = machine as any;
   const machineData = {
     id,
     ...restMachine,
+    identificacion: machine.identificacion !== undefined ? String(machine.identificacion).trim() : id,
+    nombre: String(machine.nombre || '').trim(),
     unidad: codeUnidad,
     unidadCobro: codeUnidad,
     unidad_cobro: codeUnidad,
@@ -982,25 +999,52 @@ export async function updateMachine(id: string, machine: Partial<Machine>): Prom
     tarifa: tarifaNum,
     costo: tarifaNum,
     precio: tarifaNum,
+    activo: isActivo,
+    estado: machine.estado || (isActivo ? 'operativo' : 'inactivo'),
     ...(valPat !== undefined ? { valorPatrimonial: valPat, valorTotalUsd: valPat } : {}),
   };
 
   const payload = {
     id,
+    maquinariaId: id,
     ...machineData,
     machine: machineData,
     maquinaria: machineData,
   };
 
-  const res = await callGAS<any>('machine.save', payload);
-  clearMemoryCache();
-  const updated = normalizeMachine(res);
-  if (valPat !== undefined && id) {
-    upsertAssetForEntity(id, 'MAQUINARIA', machine.nombre || updated.nombre, valPat).catch(() => {});
+  const res = await callGAS<any>('machine.save', payload, false);
+  if (!res || (typeof res === 'object' && res.ok === false)) {
+    throw new Error(res?.error || 'El backend de Google Sheets no confirmó la actualización de la maquinaria.');
   }
+
+  // Clear memory cache so all subsequent catalog/asset reads fetch fresh from Sheets
+  clearMemoryCache();
+
+  // Synchronously await patrimonial asset update
+  if (valPat !== undefined && id) {
+    await upsertAssetForEntity(id, 'MAQUINARIA', machine.nombre || res?.nombre || '', valPat);
+  }
+
+  const updated = normalizeMachine(res);
+
+  // Verification step: verify fresh persistence in Google Sheets
+  const freshMachines = await getMachines(false);
+  const found = freshMachines.find(
+    (m) =>
+      m.id === id ||
+      m.identificacion === id ||
+      (machineData.identificacion && m.identificacion === machineData.identificacion)
+  );
+
+  if (!found) {
+    throw new Error(
+      `No se pudo verificar la maquinaria "${machineData.nombre}" en Google Sheets tras guardar los cambios.`
+    );
+  }
+
   return {
-    ...updated,
-    valorPatrimonial: valPat !== undefined ? valPat : updated.valorPatrimonial,
+    ...found,
+    valorPatrimonial: valPat !== undefined ? valPat : (found.valorPatrimonial ?? updated.valorPatrimonial),
   };
 }
 
@@ -1170,7 +1214,7 @@ export async function createLot(lot: Omit<Lot, 'id'>): Promise<Lot> {
   const valPat = parseDecimalNumber(lot.valorPatrimonial);
   const lotData = {
     ...lot,
-    nombre: lot.nombre,
+    nombre: String(lot.nombre || '').trim(),
     superficie: supNum,
     superficieHectareas: supNum,
     hectareas: supNum,
@@ -1190,11 +1234,15 @@ export async function createLot(lot: Omit<Lot, 'id'>): Promise<Lot> {
     lote: lotData,
   };
 
-  const res = await callGAS<any>('lot.save', payload);
+  const res = await callGAS<any>('lot.save', payload, false);
+  if (!res || (typeof res === 'object' && res.ok === false)) {
+    throw new Error(res?.error || 'El backend de Google Sheets no confirmó la creación del lote.');
+  }
+
   clearMemoryCache();
   const created = normalizeLot(res);
   if (valPat > 0 && created.id) {
-    upsertAssetForEntity(created.id, 'LOTE', created.nombre, valPat).catch(() => {});
+    await upsertAssetForEntity(created.id, 'LOTE', created.nombre, valPat);
   }
   return {
     ...created,
@@ -1209,6 +1257,7 @@ export async function updateLot(id: string, lot: Partial<Lot>): Promise<Lot> {
   const lotData = {
     id,
     ...restLot,
+    nombre: String(lot.nombre || '').trim(),
     superficie: supNum,
     superficieHectareas: supNum,
     hectareas: supNum,
@@ -1223,20 +1272,39 @@ export async function updateLot(id: string, lot: Partial<Lot>): Promise<Lot> {
 
   const payload = {
     id,
+    loteId: id,
     ...lotData,
     lot: lotData,
     lote: lotData,
   };
 
-  const res = await callGAS<any>('lot.save', payload);
-  clearMemoryCache();
-  const updated = normalizeLot(res);
-  if (valPat !== undefined && id) {
-    upsertAssetForEntity(id, 'LOTE', lot.nombre || updated.nombre, valPat).catch(() => {});
+  const res = await callGAS<any>('lot.save', payload, false);
+  if (!res || (typeof res === 'object' && res.ok === false)) {
+    throw new Error(res?.error || 'El backend de Google Sheets no confirmó la actualización del lote.');
   }
+
+  clearMemoryCache();
+
+  // Synchronously await asset sync
+  if (valPat !== undefined && id) {
+    await upsertAssetForEntity(id, 'LOTE', lot.nombre || res?.nombre || '', valPat);
+  }
+
+  const updated = normalizeLot(res);
+
+  // Verification step: verify fresh persistence in Google Sheets
+  const freshLots = await getLots(false);
+  const found = freshLots.find((l) => l.id === id);
+
+  if (!found) {
+    throw new Error(
+      `No se pudo verificar el lote "${lotData.nombre}" en Google Sheets tras guardar los cambios.`
+    );
+  }
+
   return {
-    ...updated,
-    valorPatrimonial: valPat !== undefined ? valPat : updated.valorPatrimonial,
+    ...found,
+    valorPatrimonial: valPat !== undefined ? valPat : (found.valorPatrimonial ?? updated.valorPatrimonial),
   };
 }
 
@@ -1885,9 +1953,11 @@ export async function getAssets(useCache = true): Promise<Asset[]> {
     const sumMejoras = normalizedMejoras.reduce((acc: number, m: AssetImprovement) => acc + m.costo, 0);
 
     let rawTipo = String(a.tipo || '').toUpperCase();
-    let normTipo: 'MAQUINARIA' | 'LOTE' | 'OTRO' = 'MAQUINARIA';
+    let normTipo: 'MAQUINARIA' | 'LOTE' | 'IMPLEMENTO' | 'OTRO' = 'MAQUINARIA';
     if (rawTipo.includes('LOT') || rawTipo.includes('TERREN') || rawTipo.includes('CAMP')) {
       normTipo = 'LOTE';
+    } else if (rawTipo.includes('IMP')) {
+      normTipo = 'IMPLEMENTO';
     } else if (rawTipo.includes('OTR') || rawTipo.includes('INFRA') || rawTipo.includes('SILO')) {
       normTipo = 'OTRO';
     }
@@ -1900,6 +1970,7 @@ export async function getAssets(useCache = true): Promise<Asset[]> {
       nombre: String(a.nombre || 'Activo'),
       identificador: refId,
       referenciaId: refId,
+      icono: a.icono ? String(a.icono).trim() : undefined,
       valorInicial: valIni,
       moneda: mon,
       fechaAdquisicion: String(a.fecha || a.fechaAdquisicion || '').slice(0, 10),
@@ -1911,10 +1982,12 @@ export async function getAssets(useCache = true): Promise<Asset[]> {
 }
 
 export async function createAsset(asset: Omit<Asset, 'id' | 'valorAcumulado' | 'mejoras'>): Promise<Asset> {
-  let gasTipo: 'MAQUINARIA' | 'LOTE' | 'OTRO' = 'MAQUINARIA';
+  let gasTipo: 'MAQUINARIA' | 'LOTE' | 'IMPLEMENTO' | 'OTRO' = 'MAQUINARIA';
   const rawTipo = String(asset.tipo || '').toUpperCase();
   if (rawTipo.includes('LOT') || rawTipo.includes('TERREN') || rawTipo.includes('CAMP')) {
     gasTipo = 'LOTE';
+  } else if (rawTipo.includes('IMP')) {
+    gasTipo = 'IMPLEMENTO';
   } else if (rawTipo.includes('OTR') || rawTipo.includes('INFRA') || rawTipo.includes('SILO')) {
     gasTipo = 'OTRO';
   } else {
@@ -1926,7 +1999,7 @@ export async function createAsset(asset: Omit<Asset, 'id' | 'valorAcumulado' | '
   const tcNum = resolveEffectiveExchangeRate();
   const refId = asset.referenciaId || asset.identificador || '';
 
-  const payload = {
+  const payload: Record<string, any> = {
     tipo: gasTipo,
     nombre: asset.nombre.trim(),
     referenciaId: refId,
@@ -1939,6 +2012,7 @@ export async function createAsset(asset: Omit<Asset, 'id' | 'valorAcumulado' | '
     tipoCambio: tcNum,
     fecha: asset.fechaAdquisicion || new Date().toISOString().slice(0, 10),
     fechaAdquisicion: asset.fechaAdquisicion || new Date().toISOString().slice(0, 10),
+    ...(asset.icono ? { icono: asset.icono } : {}),
   };
 
   const res = await callGAS<any>('asset.save', payload);
@@ -2063,9 +2137,10 @@ export async function deleteAssetImprovement(mejoraId: string, assetId?: string)
 
 export async function upsertAssetForEntity(
   referenciaId: string,
-  tipo: 'MAQUINARIA' | 'LOTE',
+  tipo: 'MAQUINARIA' | 'LOTE' | 'IMPLEMENTO',
   nombre: string,
-  valorPatrimonial?: number
+  valorPatrimonial?: number,
+  icono?: string
 ): Promise<void> {
   const val = parseDecimalNumber(valorPatrimonial);
   try {
@@ -2074,7 +2149,7 @@ export async function upsertAssetForEntity(
       (a) =>
         (a.referenciaId && a.referenciaId === referenciaId) ||
         (a.identificador && a.identificador === referenciaId) ||
-        a.nombre.trim().toLowerCase() === nombre.trim().toLowerCase()
+        (a.nombre && a.nombre.trim().toLowerCase() === nombre.trim().toLowerCase() && a.tipo === tipo)
     );
 
     if (existing) {
@@ -2082,7 +2157,7 @@ export async function upsertAssetForEntity(
         referenciaId,
         nombre: nombre.trim(),
         tipo,
-        valorInicial: val > 0 ? val : existing.valorInicial,
+        valorInicial: val !== undefined ? val : existing.valorInicial,
         moneda: 'USD',
       });
     } else if (val > 0) {
@@ -2091,6 +2166,7 @@ export async function upsertAssetForEntity(
         nombre: nombre.trim(),
         identificador: referenciaId,
         referenciaId,
+        icono,
         valorInicial: val,
         moneda: 'USD',
         fechaAdquisicion: new Date().toISOString().slice(0, 10),
@@ -2099,6 +2175,15 @@ export async function upsertAssetForEntity(
   } catch (err) {
     console.warn('[upsertAssetForEntity] Warning:', err);
   }
+}
+
+export async function upsertAssetForImplement(
+  referenciaId: string,
+  nombre: string,
+  valorPatrimonial?: number,
+  icono?: string
+): Promise<void> {
+  return upsertAssetForEntity(referenciaId, 'IMPLEMENTO', nombre, valorPatrimonial, icono);
 }
 
 // -------------------------------------------------------------

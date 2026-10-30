@@ -172,9 +172,12 @@ export const PropertyView: React.FC<Props> = ({
         item.tipo === 'ingreso_propiedad')
   );
 
-  // Build combined chronological movements for the Historial
+  const propertyExpenseDirects = propertyExpenses.filter((e) => !e.esTrabajoPropio && !e.trabajoId);
+  const propertyIncomeDirects = propertyIncomes.filter((i) => !i.trabajoId);
+
+  // Build combined chronological movements for the Historial (ONLY direct incomes and direct expenses)
   const allMovements: MovementItem[] = [
-    ...propertyIncomes.map((i) => ({
+    ...propertyIncomeDirects.map((i) => ({
       id: i.id,
       tipo: 'ingreso' as const,
       fecha: i.fecha,
@@ -193,51 +196,34 @@ export const PropertyView: React.FC<Props> = ({
         i.icono ||
         (itemsConfig.find((it) => it.nombre.toLowerCase() === i.concepto.toLowerCase())?.icono) ||
         getIconDefinition(i.concepto, 'ingreso').id,
+      creadoEn: i.creadoEn,
     })),
-    ...propertyExpenses.map((e) => {
-      const isJobLinked = Boolean(e.esTrabajoPropio || e.trabajoId);
-      return {
-        id: e.id,
-        tipo: (isJobLinked ? 'maquinaria_recibida' : 'gasto_directo') as 'gasto_directo' | 'maquinaria_recibida',
-        fecha: e.fecha,
-        loteId: e.loteId,
-        loteNombre: e.loteNombre || (lots.find((l) => l.id === e.loteId)?.nombre) || 'Lote',
-        titulo: e.itemGasto,
-        detalle: `${e.cantidad} ${e.unidad || ''} ${e.precio ? `@ ${e.moneda === 'USD' ? 'USD' : 'Bs'} ${e.precio}` : ''} ${e.observacion ? `• ${e.observacion}` : ''}`.trim(),
-        monto: e.total,
-        moneda: (e.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
-        tipoCambio: e.tipoCambio || e.tc || exchangeRate?.tasaBobPerUsd,
-        cantidad: e.cantidad,
-        unidad: e.unidad,
-        precioUnitario: e.precio,
-        observacion: e.observacion,
-        esTrabajoPropio: isJobLinked,
-        trabajoId: e.trabajoId,
-        icono: e.icono || (itemsConfig.find((it) => it.nombre.toLowerCase() === e.itemGasto.toLowerCase())?.icono) || 'semillas',
-      };
-    }),
-    ...linkedPropertyJobs
-      .filter((j) => !propertyExpenses.some((e) => e.trabajoId === j.id))
-      .map((j) => ({
-        id: j.id,
-        tipo: 'maquinaria_recibida' as const,
-        fecha: j.fecha,
-        loteId: j.loteId,
-        loteNombre: j.loteNombre || (lots.find((l) => l.id === j.loteId)?.nombre) || 'Lote',
-        titulo: `Labor: ${j.maquinariaNombre || 'Maquinaria'}`,
-        detalle: `${j.cantidad} ${j.unidad}s @ ${j.moneda === 'USD' ? 'USD' : 'Bs'} ${j.tarifa}/${j.unidad} ${j.observacion ? `• ${j.observacion}` : ''}`.trim(),
-        monto: j.total,
-        moneda: (j.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
-        tipoCambio: j.tipoCambio || j.tc || exchangeRate?.tasaBobPerUsd,
-        cantidad: j.cantidad,
-        unidad: j.unidad,
-        precioUnitario: j.tarifa,
-        observacion: j.observacion,
-        esTrabajoPropio: true,
-        trabajoId: j.id,
-        icono: j.icono || 'tractor',
-      })),
-  ].sort((a, b) => (b.fecha > a.fecha ? 1 : -1));
+    ...propertyExpenseDirects.map((e) => ({
+      id: e.id,
+      tipo: 'gasto_directo' as const,
+      fecha: e.fecha,
+      loteId: e.loteId,
+      loteNombre: e.loteNombre || (lots.find((l) => l.id === e.loteId)?.nombre) || 'Lote',
+      titulo: e.itemGasto,
+      detalle: `${e.cantidad} ${e.unidad || ''} ${e.precio ? `@ ${e.moneda === 'USD' ? 'USD' : 'Bs'} ${e.precio}` : ''} ${e.observacion ? `• ${e.observacion}` : ''}`.trim(),
+      monto: e.total,
+      moneda: (e.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
+      tipoCambio: e.tipoCambio || e.tc || exchangeRate?.tasaBobPerUsd,
+      cantidad: e.cantidad,
+      unidad: e.unidad,
+      precioUnitario: e.precio,
+      observacion: e.observacion,
+      esTrabajoPropio: false,
+      trabajoId: e.trabajoId,
+      icono: e.icono || (itemsConfig.find((it) => it.nombre.toLowerCase() === e.itemGasto.toLowerCase())?.icono) || 'semillas',
+      creadoEn: e.creadoEn,
+    })),
+  ].sort((a, b) => {
+    const timeA = a.creadoEn ? new Date(a.creadoEn).getTime() : new Date(a.fecha).getTime();
+    const timeB = b.creadoEn ? new Date(b.creadoEn).getTime() : new Date(b.fecha).getTime();
+    if (timeB !== timeA) return timeB - timeA;
+    return (b.id || '').localeCompare(a.id || '');
+  });
 
   // Total movements count
   const totalMovementsCount = allMovements.length;
@@ -288,6 +274,7 @@ export const PropertyView: React.FC<Props> = ({
       setSuccessMsg('Gasto agrícola registrado en el lote seleccionado.');
       setExpPrecio('');
       setExpObs('');
+      setCurrentScreen('main');
       onRefreshData();
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Error al registrar el gasto agrícola');
@@ -346,6 +333,7 @@ export const PropertyView: React.FC<Props> = ({
       setSuccessMsg('Ingreso de cosecha registrado exitosamente.');
       setIncPrecio('');
       setIncObs('');
+      setCurrentScreen('main');
       onRefreshData();
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Error al registrar el ingreso');
@@ -665,15 +653,15 @@ export const PropertyView: React.FC<Props> = ({
                 className="w-full bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl p-3.5 sm:p-4 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:scale-[0.99] transition cursor-pointer text-left min-h-[68px]"
               >
                 <div className="flex items-center gap-3.5 min-w-0">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-amber-50 text-amber-700 border border-amber-100/80 shrink-0">
-                    <Tractor className="h-5 w-5" />
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-rose-50 text-rose-700 border border-rose-100/80 shrink-0">
+                    <Tractor className="h-5 w-5 text-rose-700" />
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <h3 className="text-sm sm:text-base font-bold text-slate-900 leading-snug">
                         Trabajos de maquinaria
                       </h3>
-                      <span className="text-xs font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full shrink-0">
+                      <span className="text-xs font-bold bg-rose-100 text-rose-900 px-2 py-0.5 rounded-full shrink-0">
                         {linkedPropertyJobs.length}
                       </span>
                     </div>
@@ -1094,10 +1082,27 @@ export const PropertyView: React.FC<Props> = ({
             {lots.map((lot) => {
               const isExpanded = expandedLotId === lot.id;
               const lotMachineryJobs = linkedPropertyJobs.filter((j) => j.loteId === lot.id);
-              const lotIncomes = propertyIncomes.filter((i) => i.loteId === lot.id);
-              const lotExpensesDirect = propertyExpenses.filter(
-                (e) => e.loteId === lot.id && !e.esTrabajoPropio && !e.trabajoId
-              );
+              const lotIncomes = propertyIncomeDirects.filter((i) => i.loteId === lot.id);
+              const lotExpensesDirect = propertyExpenseDirects.filter((e) => e.loteId === lot.id);
+
+              const tcDefault = exchangeRate?.tasaBobPerUsd || 6.96;
+              const lotTotalIncomesUsd = lotIncomes.reduce((sum, i) => {
+                const tc = i.tipoCambio || i.tc || tcDefault;
+                return sum + (i.moneda === 'USD' ? i.total : i.total / tc);
+              }, 0);
+
+              const lotTotalDirectExpensesUsd = lotExpensesDirect.reduce((sum, e) => {
+                const tc = e.tipoCambio || e.tc || tcDefault;
+                return sum + (e.moneda === 'USD' ? e.total : e.total / tc);
+              }, 0);
+
+              const lotTotalMachineryJobsUsd = lotMachineryJobs.reduce((sum, j) => {
+                const tc = j.tipoCambio || j.tc || tcDefault;
+                return sum + (j.moneda === 'USD' ? j.total : j.total / tc);
+              }, 0);
+
+              const lotTotalExpensesUsd = lotTotalDirectExpensesUsd + lotTotalMachineryJobsUsd;
+              const lotNetMarginUsd = lotTotalIncomesUsd - lotTotalExpensesUsd;
 
               const hrs = lotMachineryJobs
                 .filter((j) => j.unidad === 'hora' || (j.unidad as string) === 'h')
@@ -1164,6 +1169,28 @@ export const PropertyView: React.FC<Props> = ({
                         )}
                       </div>
 
+                      {/* Resumen Balance Económico del Lote */}
+                      <div className="grid grid-cols-3 gap-1.5 bg-emerald-50/80 p-2.5 rounded-xl border border-emerald-200/80 text-center">
+                        <div>
+                          <span className="text-[9px] sm:text-[10px] text-emerald-800 font-bold block">1. INGRESO COSECHA</span>
+                          <span className="font-bold font-mono text-emerald-700 text-xs">
+                            USD {lotTotalIncomesUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] sm:text-[10px] text-rose-800 font-bold block">2. TOTAL GASTOS</span>
+                          <span className="font-bold font-mono text-rose-700 text-xs">
+                            USD {lotTotalExpensesUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] sm:text-[10px] text-slate-800 font-bold block">3. MARGEN NETO</span>
+                          <span className={`font-bold font-mono text-xs ${lotNetMarginUsd >= 0 ? 'text-emerald-800' : 'text-rose-800'}`}>
+                            USD {lotNetMarginUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                      </div>
+
                       {/* 2. Trabajos de Maquinaria */}
                       <div className="bg-white p-3 rounded-xl border border-slate-200/70 space-y-2">
                         <div className="flex items-center justify-between pb-1 border-b border-slate-100">
@@ -1181,7 +1208,7 @@ export const PropertyView: React.FC<Props> = ({
                                 className="p-2 rounded-lg bg-slate-50 border border-slate-200/60 space-y-0.5"
                               >
                                 <div className="flex items-center justify-between gap-2">
-                                  <span className="font-bold text-slate-900 truncate text-xs">
+                                  <span className="font-bold text-slate-900 break-words text-xs">
                                     {j.trabajoNombre || (j.maquinariaNombre ? `Labor con ${j.maquinariaNombre}` : 'Trabajo de Maquinaria')}
                                   </span>
                                   <span className="font-bold font-mono text-rose-700 shrink-0 text-xs">
@@ -1220,7 +1247,7 @@ export const PropertyView: React.FC<Props> = ({
                                 className="p-2 rounded-lg bg-emerald-50/50 border border-emerald-100/70 space-y-0.5"
                               >
                                 <div className="flex items-center justify-between gap-2">
-                                  <span className="font-bold text-slate-900 truncate text-xs">{i.concepto}</span>
+                                  <span className="font-bold text-slate-900 break-words text-xs">{i.concepto}</span>
                                   <span className="font-bold font-mono text-emerald-700 shrink-0 text-xs">
                                     + {i.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
                                     {i.total.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -1257,7 +1284,7 @@ export const PropertyView: React.FC<Props> = ({
                                 className="p-2 rounded-lg bg-rose-50/40 border border-rose-100/70 space-y-0.5"
                               >
                                 <div className="flex items-center justify-between gap-2">
-                                  <span className="font-bold text-slate-900 truncate text-xs">{e.itemGasto}</span>
+                                  <span className="font-bold text-slate-900 break-words text-xs">{e.itemGasto}</span>
                                   <span className="font-bold font-mono text-rose-700 shrink-0 text-xs">
                                     - {e.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
                                     {e.total.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -1305,14 +1332,14 @@ export const PropertyView: React.FC<Props> = ({
                 Labores asignadas a lotes de la propiedad
               </p>
             </div>
-            <span className="text-xs font-bold text-amber-800 bg-amber-50 border border-amber-200/60 px-3 py-1.5 rounded-xl">
+            <span className="text-xs font-bold text-rose-900 bg-rose-50 border border-rose-200/60 px-3 py-1.5 rounded-xl">
               {linkedPropertyJobs.length} labores
             </span>
           </div>
 
-          <div className="bg-amber-50 border border-amber-200/80 px-3.5 py-2.5 rounded-xl text-xs text-amber-900 flex items-center gap-2">
-            <AlertCircle className="h-4 w-4 text-amber-600 shrink-0" />
-            <span className="font-medium">Trabajos automáticos. Editar en Maquinarias.</span>
+          <div className="bg-rose-50/80 border border-rose-200/80 px-3.5 py-2.5 rounded-xl text-xs text-rose-900 flex items-center gap-2">
+            <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
+            <span className="font-medium">Trabajos automáticos vinculados (Gastos de Lote). Editar en Maquinarias.</span>
           </div>
 
           <div className="space-y-2.5">
@@ -1325,20 +1352,20 @@ export const PropertyView: React.FC<Props> = ({
                 >
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                      <div className="w-9 h-9 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-center shrink-0 shadow-2xs">
+                      <div className="w-9 h-9 rounded-xl bg-rose-50 text-rose-700 border border-rose-100/80 flex items-center justify-center shrink-0 shadow-2xs">
                         <VisualIcon name={j.icono || 'tractor'} size="sm" />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <h4 className="text-sm font-bold text-slate-900 leading-snug truncate">
+                        <h4 className="text-sm font-bold text-slate-900 leading-snug break-words">
                           {fullLabor}
                         </h4>
-                        <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                        <p className="text-[11px] text-slate-500 mt-0.5 break-words">
                           Equipo: <span className="font-semibold text-slate-700">{j.maquinariaNombre}</span>
                         </p>
                       </div>
                     </div>
-                    <span className="text-[10px] bg-amber-100 text-amber-900 font-bold px-2 py-0.5 rounded-md shrink-0">
-                      Maq. Propia
+                    <span className="text-[10px] bg-rose-100 text-rose-900 font-bold px-2 py-0.5 rounded-md shrink-0">
+                      Gasto en Lote
                     </span>
                   </div>
 
@@ -1435,7 +1462,7 @@ export const PropertyView: React.FC<Props> = ({
                   }`}
                 >
                   <CirclePlus className={`h-4 w-4 shrink-0 ${historialFilter === 'ingresos' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
-                  <span className="truncate">Ingresos ({propertyIncomes.length})</span>
+                  <span className="truncate">Ingresos ({propertyIncomeDirects.length})</span>
                 </button>
 
                 <button
@@ -1448,7 +1475,7 @@ export const PropertyView: React.FC<Props> = ({
                   }`}
                 >
                   <CircleMinus className={`h-4 w-4 shrink-0 ${historialFilter === 'gastos' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
-                  <span className="truncate">Gastos ({propertyExpenses.filter((e) => !e.esTrabajoPropio && !e.trabajoId).length})</span>
+                  <span className="truncate">Gastos ({propertyExpenseDirects.length})</span>
                 </button>
               </div>
 
@@ -1503,7 +1530,7 @@ export const PropertyView: React.FC<Props> = ({
 
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <h4 className="text-sm font-bold text-slate-900 leading-snug break-words line-clamp-2">
+                            <h4 className="text-sm font-bold text-slate-900 leading-snug break-words whitespace-normal">
                               {m.titulo}
                             </h4>
                             <span

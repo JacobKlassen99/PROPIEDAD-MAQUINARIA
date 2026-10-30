@@ -1116,6 +1116,7 @@ function handleCreateMachine(m, userSession) {
     row[map['creadoen']] = new Date().toISOString();
 
     sheet.appendRow(row);
+    SpreadsheetApp.flush();
     logAudit_(userSession?.usuarioId, 'CREATE', 'Maquinas', id, 'Maquinaria creada: ' + m.nombre);
 
     return { ok: true, result: { id, ...m } };
@@ -1132,27 +1133,116 @@ function handleUpdateMachine(id, m, userSession) {
     if (!sheet) throw new Error('Hoja Maquinas no encontrada.');
 
     const rows = sheet.getDataRange().getValues();
-    if (rows.length < 2) return { ok: false, error: 'No existen maquinarias' };
+    if (rows.length < 2) return { ok: false, error: 'No existen maquinarias registradas.' };
 
     const headers = rows[0];
     const map = getHeaderIndexMap_(headers);
-    const idCol = map['id'];
+    const idCol = map['id'] !== undefined ? map['id'] : map['id_maquinaria'];
 
-    for (let i = 1; i < rows.length; i++) {
-      if (String(rows[i][idCol]) === String(id)) {
-        if (m.nombre !== undefined) sheet.getRange(i + 1, map['nombre'] + 1).setValue(String(m.nombre).trim());
-        if (m.tipo !== undefined) sheet.getRange(i + 1, map['tipo'] + 1).setValue(String(m.tipo).trim());
-        if (m.icono !== undefined) sheet.getRange(i + 1, map['icono'] + 1).setValue(String(m.icono).trim());
-        if (m.unidad !== undefined) sheet.getRange(i + 1, map['unidad'] + 1).setValue(String(m.unidad).trim());
-        if (m.tarifa !== undefined) sheet.getRange(i + 1, map['tarifa'] + 1).setValue(Number(m.tarifa) || 0);
-        if (m.moneda !== undefined) sheet.getRange(i + 1, map['moneda'] + 1).setValue(String(m.moneda).trim().toUpperCase());
-        if (m.activo !== undefined) sheet.getRange(i + 1, map['activo'] + 1).setValue(m.activo !== false && String(m.activo).toLowerCase() !== 'false');
+    const idTrim = String(id || '').trim();
+    const identTrim = String(m.identificacion || '').trim();
 
-        logAudit_(userSession?.usuarioId, 'UPDATE', 'Maquinas', id, 'Maquinaria actualizada');
-        return { ok: true, result: { id, ...m } };
+    let targetRow = -1;
+
+    if (idTrim) {
+      // 1. Si se proporciona un ID, buscar EXCLUSIVAMENTE por ID sin fallback a código
+      const idMatches = [];
+      if (idCol !== undefined) {
+        for (let i = 1; i < rows.length; i++) {
+          const rowId = String(rows[i][idCol] || '').trim();
+          if (rowId === idTrim) {
+            idMatches.push(i + 1);
+          }
+        }
       }
+
+      if (idMatches.length === 1) {
+        targetRow = idMatches[0];
+      } else if (idMatches.length > 1) {
+        return {
+          ok: false,
+          error: 'Coincidencia ambigua: existen múltiples maquinarias registradas con el ID "' + idTrim + '".'
+        };
+      } else {
+        // ID proporcionado pero no existente -> Rechazar inmediatamente sin buscar por código ni por nombre
+        return {
+          ok: false,
+          error: 'Maquinaria no encontrada. No existe ningún registro con el ID "' + idTrim + '".'
+        };
+      }
+    } else if (identTrim && map['identificacion'] !== undefined) {
+      // 2. ÚNICAMENTE si NO se proporcionó ID, buscar por código/identificación alternativa (si es único)
+      const identMatches = [];
+      for (let i = 1; i < rows.length; i++) {
+        const rowIdent = String(rows[i][map['identificacion']] || '').trim();
+        if (rowIdent === identTrim) {
+          identMatches.push(i + 1);
+        }
+      }
+
+      if (identMatches.length === 1) {
+        targetRow = identMatches[0];
+      } else if (identMatches.length > 1) {
+        return {
+          ok: false,
+          error: 'Coincidencia ambigua: existen múltiples maquinarias con la identificación o código "' + identTrim + '".'
+        };
+      } else {
+        return {
+          ok: false,
+          error: 'Maquinaria no encontrada. No existe ningún registro con la identificación "' + identTrim + '".'
+        };
+      }
+    } else {
+      return {
+        ok: false,
+        error: 'Se requiere especificar un ID o código válido para actualizar la maquinaria.'
+      };
     }
-    return { ok: false, error: 'Maquinaria no encontrada: ' + id };
+
+    if (m.nombre !== undefined && map['nombre'] !== undefined) {
+      sheet.getRange(targetRow, map['nombre'] + 1).setValue(String(m.nombre).trim());
+    }
+    if (m.tipo !== undefined && map['tipo'] !== undefined) {
+      sheet.getRange(targetRow, map['tipo'] + 1).setValue(String(m.tipo).trim());
+    }
+    if (m.icono !== undefined && map['icono'] !== undefined) {
+      sheet.getRange(targetRow, map['icono'] + 1).setValue(String(m.icono).trim());
+    }
+    if (m.unidad !== undefined && map['unidad'] !== undefined) {
+      sheet.getRange(targetRow, map['unidad'] + 1).setValue(String(m.unidad).trim());
+    }
+    if (m.tarifa !== undefined && map['tarifa'] !== undefined) {
+      sheet.getRange(targetRow, map['tarifa'] + 1).setValue(Number(m.tarifa) || 0);
+    }
+    if (m.moneda !== undefined && map['moneda'] !== undefined) {
+      sheet.getRange(targetRow, map['moneda'] + 1).setValue(String(m.moneda).trim().toUpperCase());
+    }
+    if (map['activo'] !== undefined) {
+      let actVal = true;
+      if (m.activo !== undefined) {
+        actVal = m.activo !== false && String(m.activo).toLowerCase() !== 'false';
+      } else if (m.estado !== undefined) {
+        actVal = String(m.estado).toLowerCase() === 'operativo';
+      }
+      sheet.getRange(targetRow, map['activo'] + 1).setValue(actVal);
+    }
+    if (map['identificacion'] !== undefined && m.identificacion !== undefined) {
+      sheet.getRange(targetRow, map['identificacion'] + 1).setValue(String(m.identificacion).trim());
+    }
+    if (map['observaciones'] !== undefined && m.observaciones !== undefined) {
+      sheet.getRange(targetRow, map['observaciones'] + 1).setValue(String(m.observaciones).trim());
+    }
+    if (map['valorpatrimonial'] !== undefined && m.valorPatrimonial !== undefined) {
+      sheet.getRange(targetRow, map['valorpatrimonial'] + 1).setValue(Number(m.valorPatrimonial) || 0);
+    }
+
+    // Forzar persistencia inmediata en Google Sheets
+    SpreadsheetApp.flush();
+
+    const matchedId = idCol !== undefined ? String(rows[targetRow - 1][idCol] || id).trim() : id;
+    logAudit_(userSession?.usuarioId, 'UPDATE', 'Maquinas', matchedId, 'Maquinaria actualizada: ' + (m.nombre || matchedId));
+    return { ok: true, result: { id: matchedId, ...m } };
   } finally {
     lock.releaseLock();
   }
@@ -1170,23 +1260,30 @@ function handleDeleteMachine(id, userSession) {
 
     const headers = rows[0];
     const map = getHeaderIndexMap_(headers);
-    const idCol = map['id'];
-    if (idCol === undefined) throw new Error('Columna id no encontrada en Maquinas.');
+    const idCol = map['id'] !== undefined ? map['id'] : map['id_maquinaria'];
 
-    let foundIdx = -1;
+    const idTrim = String(id || '').trim();
+    if (!idTrim) return { ok: false, error: 'Se requiere ID para eliminar la maquinaria.' };
+
+    const matches = [];
     for (let i = 1; i < rows.length; i++) {
-      if (String(rows[i][idCol]) === String(id)) {
-        foundIdx = i + 1; // 1-based row index
-        break;
+      const rowId = idCol !== undefined ? String(rows[i][idCol] || '').trim() : '';
+      if (rowId === idTrim) {
+        matches.push(i + 1);
       }
     }
 
-    if (foundIdx === -1) {
-      return { ok: false, error: 'Maquinaria no encontrada: ' + id };
+    if (matches.length === 0) {
+      return { ok: false, error: 'Maquinaria no encontrada con ID: ' + idTrim };
     }
 
-    sheet.deleteRow(foundIdx);
-    logAudit_(userSession?.usuarioId, 'DELETE', 'Maquinas', id, 'Maquinaria eliminada');
+    if (matches.length > 1) {
+      return { ok: false, error: 'Coincidencia ambigua: existen múltiples maquinarias con el ID "' + idTrim + '".' };
+    }
+
+    sheet.deleteRow(matches[0]);
+    SpreadsheetApp.flush();
+    logAudit_(userSession?.usuarioId, 'DELETE', 'Maquinas', idTrim, 'Maquinaria eliminada');
     return { ok: true };
   } finally {
     lock.releaseLock();
@@ -1396,9 +1493,10 @@ function handleCreateLot(l, userSession) {
     row[map['creadoen']] = new Date().toISOString();
 
     sheet.appendRow(row);
+    SpreadsheetApp.flush();
     logAudit_(userSession?.usuarioId, 'CREATE', 'Lotes', id, 'Lote creado: ' + l.nombre);
 
-    return { ok: true, result: { id, ...l, hectareas: sup, superficieHectareas: sup } };
+    return { ok: true, result: { id: id, ...l, hectareas: sup, superficieHectareas: sup } };
   } finally {
     lock.releaseLock();
   }
@@ -1412,27 +1510,64 @@ function handleUpdateLot(id, l, userSession) {
     if (!sheet) throw new Error('Hoja Lotes no encontrada.');
 
     const rows = sheet.getDataRange().getValues();
-    if (rows.length < 2) return { ok: false, error: 'No existen lotes' };
+    if (rows.length < 2) return { ok: false, error: 'No existen lotes registrados.' };
 
     const headers = rows[0];
     const map = getHeaderIndexMap_(headers);
     const idCol = map['id'];
 
-    for (let i = 1; i < rows.length; i++) {
-      if (String(rows[i][idCol]) === String(id)) {
-        if (l.nombre !== undefined) sheet.getRange(i + 1, map['nombre'] + 1).setValue(String(l.nombre).trim());
-        if (l.hectareas !== undefined || l.superficieHectareas !== undefined || l.superficie !== undefined) {
-          const sup = Number(l.hectareas ?? l.superficieHectareas ?? l.superficie) || 0;
-          sheet.getRange(i + 1, map['hectareas'] + 1).setValue(sup);
-        }
-        if (l.ubicacion !== undefined) sheet.getRange(i + 1, map['ubicacion'] + 1).setValue(String(l.ubicacion).trim());
-        if (l.activo !== undefined) sheet.getRange(i + 1, map['activo'] + 1).setValue(l.activo !== false && String(l.activo).toLowerCase() !== 'false');
+    const idTrim = String(id || '').trim();
+    if (!idTrim) {
+      return { ok: false, error: 'Se requiere un ID válido para actualizar el lote.' };
+    }
 
-        logAudit_(userSession?.usuarioId, 'UPDATE', 'Lotes', id, 'Lote actualizado');
-        return { ok: true, result: { id, ...l } };
+    const matches = [];
+    for (let i = 1; i < rows.length; i++) {
+      const rowId = idCol !== undefined ? String(rows[i][idCol] || '').trim() : '';
+      if (rowId === idTrim) {
+        matches.push(i + 1);
       }
     }
-    return { ok: false, error: 'Lote no encontrado: ' + id };
+
+    if (matches.length === 0) {
+      return { ok: false, error: 'Lote no encontrado. No existe ningún lote con el ID "' + idTrim + '".' };
+    }
+
+    if (matches.length > 1) {
+      return { ok: false, error: 'Coincidencia ambigua: existen múltiples lotes con el ID "' + idTrim + '".' };
+    }
+
+    const targetRow = matches[0];
+
+    if (l.nombre !== undefined && map['nombre'] !== undefined) {
+      sheet.getRange(targetRow, map['nombre'] + 1).setValue(String(l.nombre).trim());
+    }
+    if (map['hectareas'] !== undefined && (l.hectareas !== undefined || l.superficieHectareas !== undefined || l.superficie !== undefined)) {
+      const sup = Number(l.hectareas ?? l.superficieHectareas ?? l.superficie) || 0;
+      sheet.getRange(targetRow, map['hectareas'] + 1).setValue(sup);
+    }
+    if (l.ubicacion !== undefined && map['ubicacion'] !== undefined) {
+      sheet.getRange(targetRow, map['ubicacion'] + 1).setValue(String(l.ubicacion).trim());
+    }
+    if (map['activo'] !== undefined && l.activo !== undefined) {
+      sheet.getRange(targetRow, map['activo'] + 1).setValue(l.activo !== false && String(l.activo).toLowerCase() !== 'false');
+    }
+    if (map['cultivo'] !== undefined && l.cultivoActual !== undefined) {
+      sheet.getRange(targetRow, map['cultivo'] + 1).setValue(String(l.cultivoActual).trim());
+    } else if (map['cultivoactual'] !== undefined && l.cultivoActual !== undefined) {
+      sheet.getRange(targetRow, map['cultivoactual'] + 1).setValue(String(l.cultivoActual).trim());
+    }
+    if (map['observaciones'] !== undefined && l.observaciones !== undefined) {
+      sheet.getRange(targetRow, map['observaciones'] + 1).setValue(String(l.observaciones).trim());
+    }
+    if (map['valorpatrimonial'] !== undefined && l.valorPatrimonial !== undefined) {
+      sheet.getRange(targetRow, map['valorpatrimonial'] + 1).setValue(Number(l.valorPatrimonial) || 0);
+    }
+
+    SpreadsheetApp.flush();
+
+    logAudit_(userSession?.usuarioId, 'UPDATE', 'Lotes', idTrim, 'Lote actualizado: ' + (l.nombre || idTrim));
+    return { ok: true, result: { id: idTrim, ...l } };
   } finally {
     lock.releaseLock();
   }
@@ -1442,8 +1577,11 @@ function handleDeleteLot(id, userSession) {
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
-    deleteRowByColumn('Lotes', 'id', id);
-    logAudit_(userSession?.usuarioId, 'DELETE', 'Lotes', id, 'Lote eliminado');
+    const idTrim = String(id || '').trim();
+    if (!idTrim) return { ok: false, error: 'Se requiere un ID válido para eliminar el lote.' };
+    deleteRowByColumn('Lotes', 'id', idTrim);
+    SpreadsheetApp.flush();
+    logAudit_(userSession?.usuarioId, 'DELETE', 'Lotes', idTrim, 'Lote eliminado');
     return { ok: true };
   } finally {
     lock.releaseLock();
@@ -2736,6 +2874,7 @@ function handleCreateAsset(a, userSession) {
     row[map['activo']] = a.activo !== false;
 
     sheet.appendRow(row);
+    SpreadsheetApp.flush();
     logAudit_(userSession?.usuarioId, 'CREATE', 'Activos', id, 'Activo creado: ' + a.nombre);
 
     return {
@@ -2781,6 +2920,7 @@ function handleAddAssetImprovement(assetId, imp, userSession) {
     row[map['creadoen']] = new Date().toISOString();
 
     sheet.appendRow(row);
+    SpreadsheetApp.flush();
     logAudit_(userSession?.usuarioId, 'ADD_IMPROVEMENT', 'Mejoras', id, 'Mejora añadida a activo ' + assetId);
 
     return handleGetAssets();
@@ -2804,26 +2944,53 @@ function handleUpdateAsset(id, a, userSession) {
     const idCol = map['id'];
     const refCol = map['referenciaid'];
 
+    const targetId = String(id || '').trim();
+    const targetRef = String(a.referenciaId || '').trim();
+
+    if (!targetId && !targetRef) {
+      return { ok: false, error: 'Se requiere ID o referenciaId para actualizar el activo.' };
+    }
+
+    const matches = [];
     for (let i = 1; i < rows.length; i++) {
-      const match = String(rows[i][idCol]) === String(id) || (refCol !== undefined && String(rows[i][refCol]) === String(id));
+      const rowId = idCol !== undefined ? String(rows[i][idCol] || '').trim() : '';
+      const rowRef = refCol !== undefined ? String(rows[i][refCol] || '').trim() : '';
+
+      const match =
+        (targetId && (rowId === targetId || rowRef === targetId)) ||
+        (targetRef && (rowId === targetRef || rowRef === targetRef));
+
       if (match) {
-        if (a.valorInicial !== undefined && map['valorinicial'] !== undefined) {
-          sheet.getRange(i + 1, map['valorinicial'] + 1).setValue(Number(a.valorInicial) || 0);
-        }
-        if (a.nombre !== undefined && map['nombre'] !== undefined) {
-          sheet.getRange(i + 1, map['nombre'] + 1).setValue(String(a.nombre).trim());
-        }
-        if (a.tipo !== undefined && map['tipo'] !== undefined) {
-          sheet.getRange(i + 1, map['tipo'] + 1).setValue(String(a.tipo).toUpperCase());
-        }
-        if (a.referenciaId !== undefined && refCol !== undefined) {
-          sheet.getRange(i + 1, refCol + 1).setValue(String(a.referenciaId));
-        }
-        logAudit_(userSession?.usuarioId, 'UPDATE', 'Activos', String(rows[i][idCol]), 'Activo actualizado: ' + (a.nombre || id));
-        return handleGetAssets();
+        matches.push(i + 1);
       }
     }
-    return { ok: false, error: 'Activo no encontrado: ' + id };
+
+    if (matches.length === 0) {
+      return { ok: false, error: 'Activo no encontrado: ' + (targetId || targetRef) };
+    }
+
+    if (matches.length > 1) {
+      return { ok: false, error: 'Coincidencia ambigua: existen múltiples activos con el mismo ID o referencia.' };
+    }
+
+    const targetRow = matches[0];
+    const rowIdx = targetRow - 1;
+
+    if (a.valorInicial !== undefined && map['valorinicial'] !== undefined) {
+      sheet.getRange(targetRow, map['valorinicial'] + 1).setValue(Number(a.valorInicial) || 0);
+    }
+    if (a.nombre !== undefined && map['nombre'] !== undefined) {
+      sheet.getRange(targetRow, map['nombre'] + 1).setValue(String(a.nombre).trim());
+    }
+    if (a.tipo !== undefined && map['tipo'] !== undefined) {
+      sheet.getRange(targetRow, map['tipo'] + 1).setValue(String(a.tipo).toUpperCase());
+    }
+    if (a.referenciaId !== undefined && refCol !== undefined) {
+      sheet.getRange(targetRow, refCol + 1).setValue(String(a.referenciaId));
+    }
+    SpreadsheetApp.flush();
+    logAudit_(userSession?.usuarioId, 'UPDATE', 'Activos', String(rows[rowIdx][idCol] || id), 'Activo actualizado: ' + (a.nombre || id));
+    return handleGetAssets();
   } finally {
     lock.releaseLock();
   }
@@ -2845,7 +3012,7 @@ function handleUpdateAssetImprovement(id, imp, userSession) {
     if (idCol === undefined) throw new Error('Columna id no encontrada en Mejoras.');
 
     for (let i = 1; i < rows.length; i++) {
-      if (String(rows[i][idCol]) === String(id)) {
+      if (String(rows[i][idCol]).trim() === String(id).trim()) {
         if (imp.fecha !== undefined && map['fecha'] !== undefined) {
           sheet.getRange(i + 1, map['fecha'] + 1).setValue(String(imp.fecha));
         }
@@ -2859,6 +3026,7 @@ function handleUpdateAssetImprovement(id, imp, userSession) {
         if (imp.moneda !== undefined && map['moneda'] !== undefined) {
           sheet.getRange(i + 1, map['moneda'] + 1).setValue(String(imp.moneda).toUpperCase());
         }
+        SpreadsheetApp.flush();
         logAudit_(userSession?.usuarioId, 'UPDATE_IMPROVEMENT', 'Mejoras', id, 'Mejora actualizada: ' + (imp.descripcion || id));
         return handleGetAssets();
       }
@@ -2885,8 +3053,9 @@ function handleDeleteAssetImprovement(id, userSession) {
     if (idCol === undefined) throw new Error('Columna id no encontrada en Mejoras.');
 
     for (let i = 1; i < rows.length; i++) {
-      if (String(rows[i][idCol]) === String(id)) {
+      if (String(rows[i][idCol]).trim() === String(id).trim()) {
         sheet.deleteRow(i + 1);
+        SpreadsheetApp.flush();
         logAudit_(userSession?.usuarioId, 'DELETE_IMPROVEMENT', 'Mejoras', id, 'Mejora eliminada');
         return handleGetAssets();
       }

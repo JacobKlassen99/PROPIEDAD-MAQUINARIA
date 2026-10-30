@@ -23,6 +23,7 @@ import {
   User,
   Filter,
   Edit3,
+  Wrench,
 } from 'lucide-react';
 import {
   Campaign,
@@ -92,9 +93,9 @@ export const MachineryView: React.FC<Props> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // Search & type filter for Movimientos (Servicios y Gastos)
+  // Search & type filter for Movimientos (Ingresos y Gastos)
   const [searchTerm, setSearchTerm] = useState('');
-  const [historialFilter, setHistorialFilter] = useState<'todos' | 'servicios' | 'gastos'>('todos');
+  const [historialFilter, setHistorialFilter] = useState<'todos' | 'ingresos' | 'gastos'>('todos');
   const [serviciosSubFilter, setServiciosSubFilter] = useState<'todos' | 'terceros' | 'propiedad'>('todos');
   const [expandedMovementId, setExpandedMovementId] = useState<string | null>(null);
   const [expenseToDelete, setExpenseToDelete] = useState<Expense | null>(null);
@@ -301,6 +302,7 @@ export const MachineryView: React.FC<Props> = ({
       setCantidad('');
       setCliente('');
       setObservacion('');
+      setCurrentScreen('main');
       onRefreshData();
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Error al guardar el trabajo');
@@ -347,6 +349,7 @@ export const MachineryView: React.FC<Props> = ({
       setSuccessMsg('Gasto de maquinaria registrado exitosamente.');
       setExpPrecio('');
       setExpObservacion('');
+      setCurrentScreen('main');
       onRefreshData();
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Error al registrar el gasto');
@@ -479,10 +482,12 @@ export const MachineryView: React.FC<Props> = ({
     unidad?: string;
     observacion?: string;
     icono?: string;
+    creadoEn?: string;
     rawJob?: MachineryJob;
     rawExpense?: Expense;
   }
 
+  // All machinery movements: Includes ALL jobs (propiedad + tercero) and machinery expenses
   const allMachineryMovements: MachineryMovementItem[] = [
     ...jobs.map((j) => ({
       id: j.id,
@@ -503,6 +508,7 @@ export const MachineryView: React.FC<Props> = ({
       unidad: j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'hora',
       observacion: j.observacion,
       icono: j.icono || 'tractor',
+      creadoEn: j.creadoEn,
       rawJob: j,
     })),
     ...machineryExpenses.map((e) => ({
@@ -520,19 +526,25 @@ export const MachineryView: React.FC<Props> = ({
       unidad: e.unidad,
       observacion: e.observacion,
       icono: e.icono || e.itemGasto || 'repuestos',
+      creadoEn: e.creadoEn,
       rawExpense: e,
     })),
-  ].sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+  ].sort((a, b) => {
+    const timeA = a.creadoEn ? new Date(a.creadoEn).getTime() : new Date(a.fecha).getTime();
+    const timeB = b.creadoEn ? new Date(b.creadoEn).getTime() : new Date(b.fecha).getTime();
+    if (timeB !== timeA) return timeB - timeA;
+    return (b.id || '').localeCompare(a.id || '');
+  });
 
   const filteredMachineryMovements = allMachineryMovements.filter((m) => {
-    // 1. Primary Filter: Todos, Servicios, Gastos
-    if (historialFilter === 'servicios' && m.kind !== 'servicio') return false;
-    if (historialFilter === 'gastos' && m.kind !== 'gasto') return false;
-
-    // 2. Sub-filter for Servicios
-    if (m.kind === 'servicio') {
+    // 1. Primary Filter: Todos | Ingresos | Gastos
+    if (historialFilter === 'ingresos' || (historialFilter as string) === 'servicios') {
+      if (m.kind !== 'servicio') return false;
+      // 2. Sub-filter for Ingresos (Servicios)
       if (serviciosSubFilter === 'terceros' && m.tipoTrabajo !== 'tercero') return false;
       if (serviciosSubFilter === 'propiedad' && m.tipoTrabajo !== 'propiedad') return false;
+    } else if (historialFilter === 'gastos') {
+      if (m.kind !== 'gasto') return false;
     }
 
     // 3. Search Term
@@ -677,12 +689,12 @@ export const MachineryView: React.FC<Props> = ({
                       <h3 className="text-sm sm:text-base font-bold text-slate-900 leading-snug">
                         Movimientos
                       </h3>
-                      <span className="text-xs font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full shrink-0">
+                      <span className="text-xs font-bold bg-emerald-100 text-emerald-900 px-2 py-0.5 rounded-full shrink-0">
                         {allMachineryMovements.length}
                       </span>
                     </div>
                     <p className="text-xs text-slate-500 mt-0.5 truncate">
-                      Labores en propiedad, servicios y gastos
+                      Trabajos en propiedad, servicios a terceros y gastos
                     </p>
                   </div>
                 </div>
@@ -1473,17 +1485,17 @@ export const MachineryView: React.FC<Props> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      setHistorialFilter('servicios');
+                      setHistorialFilter('ingresos');
                       setServiciosSubFilter('todos');
                     }}
                     className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl text-xs transition cursor-pointer min-h-[42px] select-none ${
-                      historialFilter === 'servicios'
+                      historialFilter === 'ingresos' || (historialFilter as string) === 'servicios'
                         ? 'bg-emerald-50 border-2 border-[#367C2B] text-[#367C2B] font-bold shadow-2xs'
                         : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
                     }`}
                   >
-                    <Tractor className={`h-4 w-4 shrink-0 ${historialFilter === 'servicios' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
-                    <span className="truncate">Servicios ({jobs.length})</span>
+                    <Tractor className={`h-4 w-4 shrink-0 ${historialFilter === 'ingresos' || (historialFilter as string) === 'servicios' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
+                    <span className="truncate">Ingresos ({jobs.length})</span>
                   </button>
 
                   <button
@@ -1504,11 +1516,11 @@ export const MachineryView: React.FC<Props> = ({
                 </div>
               </div>
 
-              {/* SEGUNDO GRUPO: DESTINO DEL SERVICIO (Sólo cuando Tipo es Servicios) */}
-              {historialFilter === 'servicios' && (
+              {/* SEGUNDO GRUPO: ORIGEN DEL INGRESO (Sólo cuando Tipo es Ingresos) */}
+              {(historialFilter === 'ingresos' || (historialFilter as string) === 'servicios') && (
                 <div className="pt-2.5 border-t border-slate-100 space-y-1.5 animate-in fade-in duration-150">
                   <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block px-0.5">
-                    Destino del servicio
+                    Origen del ingreso
                   </span>
                   <div className="grid grid-cols-3 gap-2 w-full">
                     <button
@@ -1547,7 +1559,7 @@ export const MachineryView: React.FC<Props> = ({
                       }`}
                     >
                       <User className={`h-4 w-4 shrink-0 ${serviciosSubFilter === 'terceros' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
-                      <span className="truncate">Otros ({externalJobs.length})</span>
+                      <span className="truncate">Terceros ({externalJobs.length})</span>
                     </button>
                   </div>
                 </div>
@@ -1559,13 +1571,13 @@ export const MachineryView: React.FC<Props> = ({
                   Mostrando:{' '}
                   <strong className="text-slate-800 font-bold">
                     {historialFilter === 'todos' && 'Todos los movimientos'}
-                    {historialFilter === 'gastos' && 'Gastos de maquinaria'}
-                    {historialFilter === 'servicios' && (
+                    {historialFilter === 'gastos' && 'Gastos directos de maquinaria'}
+                    {(historialFilter === 'ingresos' || (historialFilter as string) === 'servicios') && (
                       <>
-                        Servicios &middot;{' '}
-                        {serviciosSubFilter === 'todos' && 'Todos'}
-                        {serviciosSubFilter === 'propiedad' && 'Propiedad'}
-                        {serviciosSubFilter === 'terceros' && 'Otros'}
+                        Ingresos por trabajos &middot;{' '}
+                        {serviciosSubFilter === 'todos' && 'Todos (Propiedad y Terceros)'}
+                        {serviciosSubFilter === 'propiedad' && 'Trabajos en Propiedad'}
+                        {serviciosSubFilter === 'terceros' && 'Servicios a Terceros'}
                       </>
                     )}
                   </strong>
@@ -1611,7 +1623,7 @@ export const MachineryView: React.FC<Props> = ({
 
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <h4 className="text-sm font-bold text-slate-900 truncate">
+                            <h4 className="text-sm font-bold text-slate-900 leading-snug break-words whitespace-normal">
                               {m.titulo}
                             </h4>
                             <span
@@ -1625,8 +1637,8 @@ export const MachineryView: React.FC<Props> = ({
                             >
                               {m.kind === 'servicio'
                                 ? m.tipoTrabajo === 'propiedad'
-                                  ? 'En propiedad'
-                                  : 'Para otros'
+                                  ? 'Ingreso Propiedad'
+                                  : 'Ingreso Terceros'
                                 : 'Gasto Maq.'}
                             </span>
                           </div>
@@ -1636,7 +1648,7 @@ export const MachineryView: React.FC<Props> = ({
                               {formatDateDDMMAAAA(m.fecha)}
                             </span>
                             <span className="mx-1.5 text-slate-300">·</span>
-                            <span>{m.maquinariaNombre}</span>
+                            <span className="font-medium text-slate-700">{m.maquinariaNombre}</span>
                             <span className="mx-1.5 text-slate-300">·</span>
                             <span
                               className={

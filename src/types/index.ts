@@ -39,6 +39,7 @@ export interface Machine {
   unidadCobro?: 'h' | 'ha' | string;
   moneda: Currency;
   estado: 'operativo' | 'mantenimiento' | 'inactivo';
+  activo?: boolean;
   observaciones?: string;
   trabajos?: MachineJobType[];
   valorPatrimonial?: number;
@@ -80,6 +81,7 @@ export interface MachineryJob {
   observacion?: string;
   linkedMovimientoId?: string;
   icono?: string;
+  creadoEn?: string;
 }
 
 export interface Expense {
@@ -105,6 +107,7 @@ export interface Expense {
   observacion?: string;
   esTrabajoPropio?: boolean;
   trabajoId?: string;
+  creadoEn?: string;
 }
 
 export interface Income {
@@ -128,6 +131,7 @@ export interface Income {
   observacion?: string;
   esTrabajoPropio?: boolean;
   trabajoId?: string;
+  creadoEn?: string;
 }
 
 export interface ItemConfig {
@@ -155,10 +159,11 @@ export interface AssetImprovement {
 
 export interface Asset {
   id: string;
-  tipo: 'MAQUINARIA' | 'LOTE' | 'OTRO' | 'maquinaria' | 'terreno' | 'infraestructura';
+  tipo: 'MAQUINARIA' | 'LOTE' | 'IMPLEMENTO' | 'OTRO' | 'maquinaria' | 'terreno' | 'infraestructura' | 'implemento';
   nombre: string;
   identificador?: string;
   referenciaId?: string;
+  icono?: string;
   valorInicial: number;
   moneda: Currency;
   fechaAdquisicion: string;
@@ -166,6 +171,20 @@ export interface Asset {
   mejoras: AssetImprovement[];
   activo?: boolean;
 }
+
+export interface ImplementItem {
+  id: string;
+  nombre: string;
+  icono?: string;
+  referenciaId: string;
+  asset?: Asset;
+  baseVal: number;
+  mejoras: AssetImprovement[];
+  sumMejoras: number;
+  totVal: number;
+  origen: 'activo' | 'labor';
+}
+
 
 export interface ExchangeRateConfig {
   tasaBobPerUsd: number;
