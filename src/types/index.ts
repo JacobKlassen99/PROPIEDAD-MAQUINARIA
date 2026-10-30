@@ -41,6 +41,7 @@ export interface Machine {
   estado: 'operativo' | 'mantenimiento' | 'inactivo';
   observaciones?: string;
   trabajos?: MachineJobType[];
+  valorPatrimonial?: number;
 }
 
 export interface Lot {
@@ -51,6 +52,7 @@ export interface Lot {
   cultivoActual?: string;
   ubicacion?: string;
   observaciones?: string;
+  valorPatrimonial?: number;
 }
 
 export interface MachineryJob {
@@ -144,6 +146,7 @@ export interface ItemConfig {
 
 export interface AssetImprovement {
   id: string;
+  activoId?: string;
   fecha: string;
   descripcion: string;
   costo: number;
@@ -155,6 +158,7 @@ export interface Asset {
   tipo: 'MAQUINARIA' | 'LOTE' | 'OTRO' | 'maquinaria' | 'terreno' | 'infraestructura';
   nombre: string;
   identificador?: string;
+  referenciaId?: string;
   valorInicial: number;
   moneda: Currency;
   fechaAdquisicion: string;

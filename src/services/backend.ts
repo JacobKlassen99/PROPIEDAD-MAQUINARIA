@@ -9,6 +9,7 @@ import {
   Income,
   ItemConfig,
   Asset,
+  AssetImprovement,
   ExchangeRateConfig,
   BackendHealthResponse,
   Currency,
@@ -738,15 +739,25 @@ export function normalizeLot(raw: any): Lot {
     0;
 
   const parsedSup = parseDecimalNumber(supVal);
+  const idVal = String(raw.id || raw.ID || raw.id_lote || '');
+  const valPat = parseDecimalNumber(
+    raw.valorPatrimonial ??
+    raw.valor_patrimonial ??
+    raw.valorTotalUsd ??
+    raw.valor_total_usd ??
+    raw.valorInicial ??
+    0
+  );
 
   return {
-    id: String(raw.id || raw.ID || raw.id_lote || ''),
+    id: idVal,
     nombre: String(raw.nombre || raw.Nombre || raw.lote || raw.Lote || ''),
     superficieHectareas: parsedSup,
     superficie: parsedSup,
     cultivoActual: raw.cultivoActual || raw.cultivo || raw.Cultivo || raw.cultivo_actual || '',
     ubicacion: raw.ubicacion || raw.Ubicacion || raw.ubicación || '',
     observaciones: raw.observaciones || raw.observacion || raw.Notas || raw.Observaciones || '',
+    valorPatrimonial: valPat > 0 ? valPat : undefined,
   };
 }
 
@@ -834,8 +845,18 @@ export function normalizeMachine(raw: any): Machine {
     ? 'inactivo'
     : 'operativo';
 
+  const finalId = String(idVal || identVal || nameVal || `m_${Math.random().toString(36).substr(2, 6)}`);
+  const valPat = parseDecimalNumber(
+    raw.valorPatrimonial ??
+    raw.valor_patrimonial ??
+    raw.valorTotalUsd ??
+    raw.valor_total_usd ??
+    raw.valorInicial ??
+    0
+  );
+
   return {
-    id: String(idVal || identVal || nameVal || `m_${Math.random().toString(36).substr(2, 6)}`),
+    id: finalId,
     nombre: String(nameVal || identVal || 'Maquinaria Sin Nombre'),
     identificacion: String(identVal || idVal || 'TR-01'),
     tipo: String(raw.tipo || raw.Tipo || 'Tractor'),
@@ -846,6 +867,7 @@ export function normalizeMachine(raw: any): Machine {
     estado: estadoVal,
     icono: raw.icono ? String(raw.icono).trim() : undefined,
     observaciones: String(raw.observaciones || raw.Observaciones || raw.observacion || raw.Notas || ''),
+    valorPatrimonial: valPat > 0 ? valPat : undefined,
   };
 }
 
@@ -911,6 +933,7 @@ export async function createMachine(machine: Omit<Machine, 'id'>): Promise<Machi
       ? 'ha'
       : 'h';
   const tarifaNum = parseDecimalNumber(machine.tarifa);
+  const valPat = parseDecimalNumber(machine.valorPatrimonial);
 
   const machineData = {
     ...machine,
@@ -921,6 +944,7 @@ export async function createMachine(machine: Omit<Machine, 'id'>): Promise<Machi
     tarifa: tarifaNum,
     costo: tarifaNum,
     precio: tarifaNum,
+    ...(valPat > 0 ? { valorPatrimonial: valPat, valorTotalUsd: valPat } : {}),
   };
 
   const payload = {
@@ -931,13 +955,21 @@ export async function createMachine(machine: Omit<Machine, 'id'>): Promise<Machi
 
   const res = await callGAS<any>('machine.save', payload);
   clearMemoryCache();
-  return normalizeMachine(res);
+  const created = normalizeMachine(res);
+  if (valPat > 0 && created.id) {
+    upsertAssetForEntity(created.id, 'MAQUINARIA', created.nombre, valPat).catch(() => {});
+  }
+  return {
+    ...created,
+    valorPatrimonial: valPat > 0 ? valPat : created.valorPatrimonial,
+  };
 }
 
 export async function updateMachine(id: string, machine: Partial<Machine>): Promise<Machine> {
   const rawU = String(machine.unidad || '').toLowerCase();
   const codeUnidad: 'h' | 'ha' = (rawU.includes('ha') || rawU.includes('hect')) ? 'ha' : 'h';
   const tarifaNum = parseDecimalNumber(machine.tarifa);
+  const valPat = machine.valorPatrimonial !== undefined ? parseDecimalNumber(machine.valorPatrimonial) : undefined;
 
   const { id: _, ...restMachine } = machine as any;
   const machineData = {
@@ -950,6 +982,7 @@ export async function updateMachine(id: string, machine: Partial<Machine>): Prom
     tarifa: tarifaNum,
     costo: tarifaNum,
     precio: tarifaNum,
+    ...(valPat !== undefined ? { valorPatrimonial: valPat, valorTotalUsd: valPat } : {}),
   };
 
   const payload = {
@@ -961,7 +994,14 @@ export async function updateMachine(id: string, machine: Partial<Machine>): Prom
 
   const res = await callGAS<any>('machine.save', payload);
   clearMemoryCache();
-  return normalizeMachine(res);
+  const updated = normalizeMachine(res);
+  if (valPat !== undefined && id) {
+    upsertAssetForEntity(id, 'MAQUINARIA', machine.nombre || updated.nombre, valPat).catch(() => {});
+  }
+  return {
+    ...updated,
+    valorPatrimonial: valPat !== undefined ? valPat : updated.valorPatrimonial,
+  };
 }
 
 export async function deleteMachine(id: string): Promise<void> {
@@ -1127,6 +1167,7 @@ export async function getLots(useCache = true): Promise<Lot[]> {
 
 export async function createLot(lot: Omit<Lot, 'id'>): Promise<Lot> {
   const supNum = parseDecimalNumber(lot.superficieHectareas);
+  const valPat = parseDecimalNumber(lot.valorPatrimonial);
   const lotData = {
     ...lot,
     nombre: lot.nombre,
@@ -1140,6 +1181,7 @@ export async function createLot(lot: Omit<Lot, 'id'>): Promise<Lot> {
     cultivo: lot.cultivoActual || '',
     ubicacion: lot.ubicacion || '',
     observaciones: lot.observaciones || '',
+    ...(valPat > 0 ? { valorPatrimonial: valPat, valorTotalUsd: valPat } : {}),
   };
 
   const payload = {
@@ -1150,11 +1192,19 @@ export async function createLot(lot: Omit<Lot, 'id'>): Promise<Lot> {
 
   const res = await callGAS<any>('lot.save', payload);
   clearMemoryCache();
-  return normalizeLot(res);
+  const created = normalizeLot(res);
+  if (valPat > 0 && created.id) {
+    upsertAssetForEntity(created.id, 'LOTE', created.nombre, valPat).catch(() => {});
+  }
+  return {
+    ...created,
+    valorPatrimonial: valPat > 0 ? valPat : created.valorPatrimonial,
+  };
 }
 
 export async function updateLot(id: string, lot: Partial<Lot>): Promise<Lot> {
   const supNum = parseDecimalNumber(lot.superficieHectareas);
+  const valPat = lot.valorPatrimonial !== undefined ? parseDecimalNumber(lot.valorPatrimonial) : undefined;
   const { id: _, ...restLot } = lot as any;
   const lotData = {
     id,
@@ -1168,6 +1218,7 @@ export async function updateLot(id: string, lot: Partial<Lot>): Promise<Lot> {
     cultivoActual: lot.cultivoActual || '',
     ubicacion: lot.ubicacion || '',
     observaciones: lot.observaciones || '',
+    ...(valPat !== undefined ? { valorPatrimonial: valPat, valorTotalUsd: valPat } : {}),
   };
 
   const payload = {
@@ -1179,7 +1230,14 @@ export async function updateLot(id: string, lot: Partial<Lot>): Promise<Lot> {
 
   const res = await callGAS<any>('lot.save', payload);
   clearMemoryCache();
-  return normalizeLot(res);
+  const updated = normalizeLot(res);
+  if (valPat !== undefined && id) {
+    upsertAssetForEntity(id, 'LOTE', lot.nombre || updated.nombre, valPat).catch(() => {});
+  }
+  return {
+    ...updated,
+    valorPatrimonial: valPat !== undefined ? valPat : updated.valorPatrimonial,
+  };
 }
 
 export async function deleteLot(id: string): Promise<void> {
@@ -1815,8 +1873,16 @@ export async function getAssets(useCache = true): Promise<Asset[]> {
     const valIni = parseDecimalNumber(a.valorInicial ?? a.importe ?? a.costo ?? 0);
     const rawMon = String(a.moneda || 'USD').toUpperCase();
     const mon: Currency = rawMon.includes('BOB') || rawMon === 'BS' ? 'BOB' : 'USD';
-    const mejorasList = Array.isArray(a.mejoras) ? a.mejoras : [];
-    const sumMejoras = mejorasList.reduce((acc: number, m: any) => acc + (parseDecimalNumber(m.costo) || 0), 0);
+    const rawMejoras = Array.isArray(a.mejoras) ? a.mejoras : [];
+    const normalizedMejoras: AssetImprovement[] = rawMejoras.map((m: any, idx: number) => ({
+      id: String(m.id || m.mejoraId || `imp_${a.id}_${idx + 1}`),
+      activoId: String(m.activoId || a.id || ''),
+      fecha: String(m.fecha || new Date().toISOString().slice(0, 10)),
+      descripcion: String(m.descripcion || m.detalle || 'Mejora'),
+      costo: parseDecimalNumber(m.importe ?? m.costo ?? 0),
+      moneda: (String(m.moneda || 'USD').toUpperCase().includes('BOB') ? 'BOB' : 'USD') as Currency,
+    }));
+    const sumMejoras = normalizedMejoras.reduce((acc: number, m: AssetImprovement) => acc + m.costo, 0);
 
     let rawTipo = String(a.tipo || '').toUpperCase();
     let normTipo: 'MAQUINARIA' | 'LOTE' | 'OTRO' = 'MAQUINARIA';
@@ -1826,16 +1892,19 @@ export async function getAssets(useCache = true): Promise<Asset[]> {
       normTipo = 'OTRO';
     }
 
+    const refId = String(a.referenciaId || a.referencia_id || a.identificador || '');
+
     return {
       id: String(a.id || `ast_${Math.random().toString(36).substr(2, 6)}`),
       tipo: normTipo,
       nombre: String(a.nombre || 'Activo'),
-      identificador: a.identificador || '',
+      identificador: refId,
+      referenciaId: refId,
       valorInicial: valIni,
       moneda: mon,
       fechaAdquisicion: String(a.fecha || a.fechaAdquisicion || '').slice(0, 10),
       valorAcumulado: valIni + sumMejoras,
-      mejoras: mejorasList,
+      mejoras: normalizedMejoras,
       activo: a.activo !== false,
     };
   });
@@ -1855,11 +1924,13 @@ export async function createAsset(asset: Omit<Asset, 'id' | 'valorAcumulado' | '
   const valNum = parseDecimalNumber(asset.valorInicial);
   const gasMoneda = (asset.moneda === 'USD' ? 'USD' : 'BS');
   const tcNum = resolveEffectiveExchangeRate();
+  const refId = asset.referenciaId || asset.identificador || '';
 
   const payload = {
     tipo: gasTipo,
     nombre: asset.nombre.trim(),
-    identificador: asset.identificador ? asset.identificador.trim() : '',
+    referenciaId: refId,
+    identificador: refId,
     valorInicial: valNum,
     importe: valNum,
     total: valNum,
@@ -1880,14 +1951,154 @@ export async function createAsset(asset: Omit<Asset, 'id' | 'valorAcumulado' | '
   };
 }
 
+export async function updateAsset(id: string, asset: Partial<Asset>): Promise<any> {
+  const payload: Record<string, any> = {
+    id,
+    assetId: id,
+    ...(asset.nombre ? { nombre: asset.nombre.trim() } : {}),
+    ...(asset.tipo ? { tipo: String(asset.tipo).toUpperCase() } : {}),
+    ...(asset.referenciaId ? { referenciaId: asset.referenciaId } : {}),
+    ...(asset.valorInicial !== undefined ? { valorInicial: parseDecimalNumber(asset.valorInicial) } : {}),
+    ...(asset.moneda ? { moneda: asset.moneda } : {}),
+    asset,
+  };
+
+  let res: any;
+  try {
+    res = await callGAS<any>('updateAsset', payload);
+  } catch {
+    try {
+      res = await callGAS<any>('asset.update', payload);
+    } catch {
+      res = await callGAS<any>('asset.save', payload);
+    }
+  }
+  clearMemoryCache();
+  return res;
+}
+
 export async function addAssetImprovement(
   assetId: string,
   improvement: { fecha: string; descripcion: string; costo: number; moneda: 'BOB' | 'USD' }
 ): Promise<Asset> {
-  const payload = { assetId, id: assetId, improvement };
-  const res = await callGAS<Asset>('asset.save', payload);
+  const impData = {
+    fecha: improvement.fecha,
+    descripcion: improvement.descripcion.trim(),
+    costo: parseDecimalNumber(improvement.costo),
+    importe: parseDecimalNumber(improvement.costo),
+    moneda: improvement.moneda || 'USD',
+  };
+  const payload = { assetId, id: assetId, improvement: impData, ...impData };
+  let res: any;
+  try {
+    res = await callGAS<any>('addAssetImprovement', payload);
+  } catch {
+    try {
+      res = await callGAS<any>('asset.improvement.add', payload);
+    } catch {
+      res = await callGAS<any>('asset.save', payload);
+    }
+  }
   clearMemoryCache();
   return res;
+}
+
+export async function updateAssetImprovement(
+  mejoraId: string,
+  improvement: { fecha: string; descripcion: string; costo: number; moneda?: Currency; assetId?: string }
+): Promise<any> {
+  const impData = {
+    id: mejoraId,
+    fecha: improvement.fecha,
+    descripcion: improvement.descripcion.trim(),
+    costo: parseDecimalNumber(improvement.costo),
+    importe: parseDecimalNumber(improvement.costo),
+    moneda: improvement.moneda || 'USD',
+  };
+  const payload = {
+    ...impData,
+    mejoraId,
+    assetId: improvement.assetId,
+    action: 'update_improvement',
+    updateImprovement: true,
+    improvement: impData,
+  };
+
+  let res: any;
+  try {
+    res = await callGAS<any>('updateAssetImprovement', payload);
+  } catch {
+    try {
+      res = await callGAS<any>('asset.improvement.update', payload);
+    } catch {
+      res = await callGAS<any>('asset.save', payload);
+    }
+  }
+  clearMemoryCache();
+  return res;
+}
+
+export async function deleteAssetImprovement(mejoraId: string, assetId?: string): Promise<any> {
+  const payload = {
+    id: mejoraId,
+    mejoraId,
+    assetId,
+    action: 'delete_improvement',
+    deleteImprovement: true,
+  };
+
+  let res: any;
+  try {
+    res = await callGAS<any>('deleteAssetImprovement', payload);
+  } catch {
+    try {
+      res = await callGAS<any>('asset.improvement.delete', payload);
+    } catch {
+      res = await callGAS<any>('asset.save', payload);
+    }
+  }
+  clearMemoryCache();
+  return res;
+}
+
+export async function upsertAssetForEntity(
+  referenciaId: string,
+  tipo: 'MAQUINARIA' | 'LOTE',
+  nombre: string,
+  valorPatrimonial?: number
+): Promise<void> {
+  const val = parseDecimalNumber(valorPatrimonial);
+  try {
+    const assets = await getAssets(false);
+    const existing = assets.find(
+      (a) =>
+        (a.referenciaId && a.referenciaId === referenciaId) ||
+        (a.identificador && a.identificador === referenciaId) ||
+        a.nombre.trim().toLowerCase() === nombre.trim().toLowerCase()
+    );
+
+    if (existing) {
+      await updateAsset(existing.id, {
+        referenciaId,
+        nombre: nombre.trim(),
+        tipo,
+        valorInicial: val > 0 ? val : existing.valorInicial,
+        moneda: 'USD',
+      });
+    } else if (val > 0) {
+      await createAsset({
+        tipo,
+        nombre: nombre.trim(),
+        identificador: referenciaId,
+        referenciaId,
+        valorInicial: val,
+        moneda: 'USD',
+        fechaAdquisicion: new Date().toISOString().slice(0, 10),
+      });
+    }
+  } catch (err) {
+    console.warn('[upsertAssetForEntity] Warning:', err);
+  }
 }
 
 // -------------------------------------------------------------

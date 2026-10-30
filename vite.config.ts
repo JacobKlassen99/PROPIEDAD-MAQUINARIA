@@ -11,10 +11,10 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'prompt',
-        includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg'],
+        includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon.svg'],
         manifest: {
           id: '/',
-          name: 'MAQUINARIAS Y PROPIEDAD',
+          name: 'Maquinarias y Propiedad',
           short_name: 'Maquinarias',
           description: 'Sistema integral de gestión agrícola para maquinarias, trabajos en propiedad y terceros, lotes, campañas y reportes financieros.',
           theme_color: '#15803d',
@@ -23,6 +23,18 @@ export default defineConfig(() => {
           start_url: '/',
           scope: '/',
           icons: [
+            {
+              src: '/icon-192.png',
+              sizes: '192x192',
+              type: 'image/png',
+              purpose: 'any',
+            },
+            {
+              src: '/icon-512.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'any',
+            },
             {
               src: '/pwa-192x192.png',
               sizes: '192x192',

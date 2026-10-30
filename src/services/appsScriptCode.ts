@@ -165,7 +165,14 @@ function dispatch_(p) {
     'asset.list',
     'createAsset',
     'asset.create',
+    'updateAsset',
+    'asset.update',
     'addAssetImprovement',
+    'updateAssetImprovement',
+    'deleteAssetImprovement',
+    'asset.improvement.add',
+    'asset.improvement.update',
+    'asset.improvement.delete',
     'asset.save',
     'report.get',
     'reports.get',
@@ -346,11 +353,30 @@ function handleAction_(action, payload, userSession, adminSession) {
     case 'createAsset':
     case 'asset.create':
       return handleCreateAsset(payload.asset || payload, userSession);
+    case 'updateAsset':
+    case 'asset.update':
+      return handleUpdateAsset(payload.id || payload.assetId || (payload.asset && payload.asset.id), payload.asset || payload, userSession);
     case 'addAssetImprovement':
+    case 'asset.improvement.add':
       return handleAddAssetImprovement(payload.assetId || payload.id, payload.improvement || payload, userSession);
+    case 'updateAssetImprovement':
+    case 'asset.improvement.update':
+      return handleUpdateAssetImprovement(payload.id || payload.mejoraId || (payload.improvement && payload.improvement.id), payload.improvement || payload, userSession);
+    case 'deleteAssetImprovement':
+    case 'asset.improvement.delete':
+      return handleDeleteAssetImprovement(payload.id || payload.mejoraId, userSession);
     case 'asset.save':
+      if (payload.action === 'delete_improvement' || payload.deleteImprovement) {
+        return handleDeleteAssetImprovement(payload.id || payload.mejoraId, userSession);
+      }
+      if (payload.action === 'update_improvement' || payload.updateImprovement) {
+        return handleUpdateAssetImprovement(payload.id || payload.mejoraId || (payload.improvement && payload.improvement.id), payload.improvement || payload, userSession);
+      }
       if (payload.improvement || payload.assetId) {
         return handleAddAssetImprovement(payload.assetId || payload.id, payload.improvement || payload, userSession);
+      }
+      if (payload.id) {
+        return handleUpdateAsset(payload.id, payload.asset || payload, userSession);
       }
       return handleCreateAsset(payload.asset || payload, userSession);
 
@@ -2758,6 +2784,114 @@ function handleAddAssetImprovement(assetId, imp, userSession) {
     logAudit_(userSession?.usuarioId, 'ADD_IMPROVEMENT', 'Mejoras', id, 'Mejora añadida a activo ' + assetId);
 
     return handleGetAssets();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function handleUpdateAsset(id, a, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheet = findSheetIgnoreCase_('Activos');
+    if (!sheet) throw new Error('Hoja Activos no encontrada.');
+
+    const rows = sheet.getDataRange().getValues();
+    if (rows.length < 2) return { ok: false, error: 'No existen activos registrados.' };
+
+    const headers = rows[0];
+    const map = getHeaderIndexMap_(headers);
+    const idCol = map['id'];
+    const refCol = map['referenciaid'];
+
+    for (let i = 1; i < rows.length; i++) {
+      const match = String(rows[i][idCol]) === String(id) || (refCol !== undefined && String(rows[i][refCol]) === String(id));
+      if (match) {
+        if (a.valorInicial !== undefined && map['valorinicial'] !== undefined) {
+          sheet.getRange(i + 1, map['valorinicial'] + 1).setValue(Number(a.valorInicial) || 0);
+        }
+        if (a.nombre !== undefined && map['nombre'] !== undefined) {
+          sheet.getRange(i + 1, map['nombre'] + 1).setValue(String(a.nombre).trim());
+        }
+        if (a.tipo !== undefined && map['tipo'] !== undefined) {
+          sheet.getRange(i + 1, map['tipo'] + 1).setValue(String(a.tipo).toUpperCase());
+        }
+        if (a.referenciaId !== undefined && refCol !== undefined) {
+          sheet.getRange(i + 1, refCol + 1).setValue(String(a.referenciaId));
+        }
+        logAudit_(userSession?.usuarioId, 'UPDATE', 'Activos', String(rows[i][idCol]), 'Activo actualizado: ' + (a.nombre || id));
+        return handleGetAssets();
+      }
+    }
+    return { ok: false, error: 'Activo no encontrado: ' + id };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function handleUpdateAssetImprovement(id, imp, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheet = findSheetIgnoreCase_('Mejoras');
+    if (!sheet) throw new Error('Hoja Mejoras no encontrada.');
+
+    const rows = sheet.getDataRange().getValues();
+    if (rows.length < 2) return { ok: false, error: 'No existen mejoras registradas.' };
+
+    const headers = rows[0];
+    const map = getHeaderIndexMap_(headers);
+    const idCol = map['id'];
+    if (idCol === undefined) throw new Error('Columna id no encontrada en Mejoras.');
+
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i][idCol]) === String(id)) {
+        if (imp.fecha !== undefined && map['fecha'] !== undefined) {
+          sheet.getRange(i + 1, map['fecha'] + 1).setValue(String(imp.fecha));
+        }
+        if (imp.descripcion !== undefined && map['descripcion'] !== undefined) {
+          sheet.getRange(i + 1, map['descripcion'] + 1).setValue(String(imp.descripcion).trim());
+        }
+        if (imp.importe !== undefined || imp.costo !== undefined) {
+          const val = Number(imp.importe ?? imp.costo) || 0;
+          if (map['importe'] !== undefined) sheet.getRange(i + 1, map['importe'] + 1).setValue(val);
+        }
+        if (imp.moneda !== undefined && map['moneda'] !== undefined) {
+          sheet.getRange(i + 1, map['moneda'] + 1).setValue(String(imp.moneda).toUpperCase());
+        }
+        logAudit_(userSession?.usuarioId, 'UPDATE_IMPROVEMENT', 'Mejoras', id, 'Mejora actualizada: ' + (imp.descripcion || id));
+        return handleGetAssets();
+      }
+    }
+    return { ok: false, error: 'Mejora no encontrada: ' + id };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function handleDeleteAssetImprovement(id, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheet = findSheetIgnoreCase_('Mejoras');
+    if (!sheet) throw new Error('Hoja Mejoras no encontrada.');
+
+    const rows = sheet.getDataRange().getValues();
+    if (rows.length < 2) return { ok: false, error: 'No existen mejoras registradas.' };
+
+    const headers = rows[0];
+    const map = getHeaderIndexMap_(headers);
+    const idCol = map['id'];
+    if (idCol === undefined) throw new Error('Columna id no encontrada en Mejoras.');
+
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i][idCol]) === String(id)) {
+        sheet.deleteRow(i + 1);
+        logAudit_(userSession?.usuarioId, 'DELETE_IMPROVEMENT', 'Mejoras', id, 'Mejora eliminada');
+        return handleGetAssets();
+      }
+    }
+    return { ok: false, error: 'Mejora no encontrada: ' + id };
   } finally {
     lock.releaseLock();
   }

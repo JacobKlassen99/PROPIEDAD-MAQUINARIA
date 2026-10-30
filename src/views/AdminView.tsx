@@ -28,6 +28,9 @@ import {
   LogOut,
   KeyRound,
   ShieldOff,
+  ExternalLink,
+  Coins,
+  Landmark,
 } from 'lucide-react';
 import {
   Campaign,
@@ -36,6 +39,7 @@ import {
   Lot,
   ItemConfig,
   Asset,
+  AssetImprovement,
   ExchangeRateConfig,
   Currency,
   UserSession,
@@ -60,7 +64,10 @@ import {
   saveExchangeRateConfig,
   getLocalDateString,
   createAsset,
+  updateAsset,
   addAssetImprovement,
+  updateAssetImprovement,
+  deleteAssetImprovement,
   saveItemConfig,
   revokeAdminAuthorization,
   getAdminToken,
@@ -292,7 +299,7 @@ export const AdminView: React.FC<Props> = ({
   };
 
   const handleGoBack = () => {
-    if (screen === 'settings') {
+    if (screen === 'settings' || screen === 'reports' || screen === 'passwords' || screen === 'activos') {
       setScreenState('main');
     } else {
       setScreenState(prevScreen === screen ? 'settings' : prevScreen);
@@ -321,6 +328,7 @@ export const AdminView: React.FC<Props> = ({
   const [lotCultivo, setLotCultivo] = useState('');
   const [lotUbicacion, setLotUbicacion] = useState('');
   const [lotObs, setLotObs] = useState('');
+  const [lotValorPatrimonial, setLotValorPatrimonial] = useState('');
 
   // Machine Form State
   const [editingMachineId, setEditingMachineId] = useState<string | null>(null);
@@ -334,6 +342,7 @@ export const AdminView: React.FC<Props> = ({
   const [mMoneda, setMMoneda] = useState<Currency>('BOB');
   const [mEstado, setMEstado] = useState<'operativo' | 'mantenimiento' | 'inactivo'>('operativo');
   const [mObs, setMObs] = useState('');
+  const [mValorPatrimonial, setMValorPatrimonial] = useState('');
 
   // Exchange Rate Form State
   const [tasaInput, setTasaInput] = useState<string>(
@@ -374,12 +383,90 @@ export const AdminView: React.FC<Props> = ({
   const [itemSearch, setItemSearch] = useState('');
   const [showInactiveItems, setShowInactiveItems] = useState(false);
 
-  // Asset Improvement Form State
-  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  // Activos Patrimoniales Navigation and Details State
+  const [activosTab, setActivosTab] = useState<'maquinarias' | 'propiedad'>('maquinarias');
+  const [selectedEntityForDetail, setSelectedEntityForDetail] = useState<{
+    type: 'maquinaria' | 'lote';
+    entity: Machine | Lot;
+  } | null>(null);
+
+  // Asset Improvement Creation Form State
+  const [showAddImprovementModal, setShowAddImprovementModal] = useState(false);
   const [impFecha, setImpFecha] = useState(new Date().toISOString().slice(0, 10));
   const [impDesc, setImpDesc] = useState('');
-  const [impCosto, setImpCosto] = useState<number | ''>(6000);
-  const [impMoneda, setImpMoneda] = useState<Currency>('USD');
+  const [impCosto, setImpCosto] = useState<string>('');
+
+  // Asset Improvement Edit State
+  const [editingImprovement, setEditingImprovement] = useState<AssetImprovement | null>(null);
+  const [editImpFecha, setEditImpFecha] = useState('');
+  const [editImpDesc, setEditImpDesc] = useState('');
+  const [editImpCosto, setEditImpCosto] = useState('');
+
+  // Asset Improvement Delete State
+  const [deletingImprovement, setDeletingImprovement] = useState<AssetImprovement | null>(null);
+  const [isDeletingImprovement, setIsDeletingImprovement] = useState(false);
+
+  const findAssetForMachine = (m: Machine, allAssets: Asset[]): Asset | undefined => {
+    if (!m) return undefined;
+    const byRef = allAssets.find(
+      (a) =>
+        (a.referenciaId && (a.referenciaId === m.id || (m.identificacion && a.referenciaId.toLowerCase() === m.identificacion.toLowerCase()))) ||
+        (a.identificador && (a.identificador === m.id || (m.identificacion && a.identificador.toLowerCase() === m.identificacion.toLowerCase())))
+    );
+    if (byRef) return byRef;
+
+    const mName = m.nombre.trim().toLowerCase();
+    const byName = allAssets.find((a) => a.nombre.trim().toLowerCase() === mName);
+    if (byName) return byName;
+
+    const bySub = allAssets.find((a) => {
+      const aName = a.nombre.trim().toLowerCase();
+      return aName.includes(mName) || mName.includes(aName);
+    });
+    return bySub;
+  };
+
+  const findAssetForLot = (l: Lot, allAssets: Asset[]): Asset | undefined => {
+    if (!l) return undefined;
+    const byRef = allAssets.find(
+      (a) =>
+        (a.referenciaId && a.referenciaId === l.id) ||
+        (a.identificador && a.identificador === l.id)
+    );
+    if (byRef) return byRef;
+
+    const lName = l.nombre.trim().toLowerCase();
+    const byName = allAssets.find((a) => a.nombre.trim().toLowerCase() === lName);
+    if (byName) return byName;
+
+    const bySub = allAssets.find((a) => {
+      const aName = a.nombre.trim().toLowerCase();
+      return aName.includes(lName) || lName.includes(aName);
+    });
+    return bySub;
+  };
+
+  const getBaseValueForMachine = (m: Machine, allAssets: Asset[]): number => {
+    if (m.valorPatrimonial && m.valorPatrimonial > 0) {
+      return m.valorPatrimonial;
+    }
+    const linked = findAssetForMachine(m, allAssets);
+    if (linked?.valorInicial && linked.valorInicial > 0) {
+      return linked.valorInicial;
+    }
+    return 0;
+  };
+
+  const getBaseValueForLot = (l: Lot, allAssets: Asset[]): number => {
+    if (l.valorPatrimonial && l.valorPatrimonial > 0) {
+      return l.valorPatrimonial;
+    }
+    const linked = findAssetForLot(l, allAssets);
+    if (linked?.valorInicial && linked.valorInicial > 0) {
+      return linked.valorInicial;
+    }
+    return 0;
+  };
 
   // Machine Deletion Modal State
   const [deletingMachine, setDeletingMachine] = useState<Machine | null>(null);
@@ -588,6 +675,7 @@ export const AdminView: React.FC<Props> = ({
 
     setSaving(true);
     try {
+      const valPatNum = parseDecimalNumber(lotValorPatrimonial);
       if (editingLotId) {
         await updateLot(editingLotId, {
           nombre: lotNombre.trim(),
@@ -596,6 +684,7 @@ export const AdminView: React.FC<Props> = ({
           cultivoActual: lotCultivo.trim(),
           ubicacion: lotUbicacion.trim(),
           observaciones: lotObs.trim(),
+          valorPatrimonial: valPatNum > 0 ? valPatNum : undefined,
         });
         setSuccessMsg('Lote actualizado exitosamente.');
       } else {
@@ -606,6 +695,7 @@ export const AdminView: React.FC<Props> = ({
           cultivoActual: lotCultivo.trim(),
           ubicacion: lotUbicacion.trim(),
           observaciones: lotObs.trim(),
+          valorPatrimonial: valPatNum > 0 ? valPatNum : undefined,
         });
         setSuccessMsg('Lote creado exitosamente.');
       }
@@ -615,6 +705,7 @@ export const AdminView: React.FC<Props> = ({
       setLotCultivo('');
       setLotUbicacion('');
       setLotObs('');
+      setLotValorPatrimonial('');
       setEditingLotId(null);
       setShowLotForm(false);
       onRefreshData();
@@ -632,6 +723,8 @@ export const AdminView: React.FC<Props> = ({
     setLotCultivo(lot.cultivoActual || '');
     setLotUbicacion(lot.ubicacion || '');
     setLotObs(lot.observaciones || '');
+    const baseVal = getBaseValueForLot(lot, assets);
+    setLotValorPatrimonial(baseVal > 0 ? String(baseVal) : '');
     setShowLotForm(true);
   };
 
@@ -662,6 +755,7 @@ export const AdminView: React.FC<Props> = ({
     }
 
     const codeUnidad: 'h' | 'ha' = mUnidad === 'ha' ? 'ha' : 'h';
+    const valPatNum = parseDecimalNumber(mValorPatrimonial);
 
     setSaving(true);
     try {
@@ -676,6 +770,7 @@ export const AdminView: React.FC<Props> = ({
           moneda: mMoneda,
           estado: mEstado,
           observaciones: mObs.trim(),
+          valorPatrimonial: valPatNum > 0 ? valPatNum : undefined,
         });
         setSuccessMsg('Maquinaria actualizada.');
       } else {
@@ -689,6 +784,7 @@ export const AdminView: React.FC<Props> = ({
           moneda: mMoneda,
           estado: mEstado,
           observaciones: mObs.trim(),
+          valorPatrimonial: valPatNum > 0 ? valPatNum : undefined,
         });
         setSuccessMsg('Maquinaria creada exitosamente.');
       }
@@ -697,6 +793,7 @@ export const AdminView: React.FC<Props> = ({
       setMNombre('');
       setMIdentificacion('');
       setMIcono('tractor');
+      setMValorPatrimonial('');
       setShowMachineForm(false);
       onRefreshData();
     } catch (err: unknown) {
@@ -717,6 +814,8 @@ export const AdminView: React.FC<Props> = ({
     setMMoneda(m.moneda);
     setMEstado(m.estado as any);
     setMObs(m.observaciones || '');
+    const baseVal = getBaseValueForMachine(m, assets);
+    setMValorPatrimonial(baseVal > 0 ? String(baseVal) : '');
     setShowMachineForm(true);
   };
 
@@ -800,25 +899,115 @@ export const AdminView: React.FC<Props> = ({
   };
 
   // Submit Improvement to Asset
-  const handleImprovementSubmit = async (e: React.FormEvent) => {
+  const handleAddImprovementSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedAssetId || !impDesc.trim() || !impCosto) return;
+    if (!selectedEntityForDetail || !impDesc.trim()) return;
+
+    const parsedCosto = parseDecimalNumber(impCosto);
+    if (isNaN(parsedCosto) || parsedCosto <= 0) {
+      setErrorMsg('Ingresa un costo válido en USD para la mejora.');
+      return;
+    }
+
     setSaving(true);
+    setErrorMsg(null);
     try {
-      await addAssetImprovement(selectedAssetId, {
+      const isMachine = selectedEntityForDetail.type === 'maquinaria';
+      const entity = selectedEntityForDetail.entity;
+      let targetAsset = isMachine
+        ? findAssetForMachine(entity as Machine, assets)
+        : findAssetForLot(entity as Lot, assets);
+
+      if (!targetAsset) {
+        const baseVal = isMachine
+          ? (entity as Machine).valorPatrimonial || 0
+          : (entity as Lot).valorPatrimonial || 0;
+
+        targetAsset = await createAsset({
+          tipo: isMachine ? 'MAQUINARIA' : 'LOTE',
+          nombre: entity.nombre.trim(),
+          identificador: entity.id,
+          referenciaId: entity.id,
+          valorInicial: baseVal,
+          moneda: 'USD',
+          fechaAdquisicion: getLocalDateString(),
+        });
+      }
+
+      await addAssetImprovement(targetAsset.id, {
         fecha: impFecha,
         descripcion: impDesc.trim(),
-        costo: Number(impCosto),
-        moneda: impMoneda,
+        costo: parsedCosto,
+        moneda: 'USD',
       });
-      setSuccessMsg('Mejora patrimonial agregada al activo.');
+
+      setSuccessMsg('Mejora registrada exitosamente.');
       setImpDesc('');
-      setSelectedAssetId(null);
+      setImpCosto('');
+      setShowAddImprovementModal(false);
       onRefreshData();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al agregar mejora');
+      setErrorMsg(err instanceof Error ? err.message : 'Error al registrar la mejora');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleEditImprovementClick = (m: AssetImprovement) => {
+    setEditingImprovement(m);
+    setEditImpFecha(m.fecha || getLocalDateString());
+    setEditImpDesc(m.descripcion || '');
+    setEditImpCosto(String(m.costo || ''));
+  };
+
+  const handleUpdateImprovementSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingImprovement || !editImpDesc.trim()) return;
+
+    const parsedCosto = parseDecimalNumber(editImpCosto);
+    if (isNaN(parsedCosto) || parsedCosto <= 0) {
+      setErrorMsg('Ingresa un costo válido en USD.');
+      return;
+    }
+
+    setSaving(true);
+    setErrorMsg(null);
+    try {
+      await updateAssetImprovement(editingImprovement.id, {
+        fecha: editImpFecha,
+        descripcion: editImpDesc.trim(),
+        costo: parsedCosto,
+        moneda: 'USD',
+        assetId: editingImprovement.activoId,
+      });
+
+      setSuccessMsg('Mejora actualizada exitosamente.');
+      setEditingImprovement(null);
+      onRefreshData();
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Error al actualizar la mejora');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteImprovementClick = (m: AssetImprovement) => {
+    setDeletingImprovement(m);
+  };
+
+  const handleExecuteDeleteImprovement = async () => {
+    if (!deletingImprovement) return;
+    setIsDeletingImprovement(true);
+    setErrorMsg(null);
+    try {
+      await deleteAssetImprovement(deletingImprovement.id, deletingImprovement.activoId);
+      setSuccessMsg('Mejora eliminada exitosamente.');
+      setDeletingImprovement(null);
+      onRefreshData();
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar la mejora');
+    } finally {
+      setIsDeletingImprovement(false);
     }
   };
 
@@ -1064,7 +1253,34 @@ export const AdminView: React.FC<Props> = ({
             <ChevronRight className="h-5 w-5 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
           </button>
 
-          {/* Option 3: Cambiar contraseñas */}
+          {/* Option 3: Activos Patrimoniales */}
+          <button
+            type="button"
+            onClick={() => navigateTo('activos')}
+            className="w-full flex items-center justify-between p-4 sm:p-5 hover:bg-stone-50 transition cursor-pointer text-left group min-h-[64px]"
+          >
+            <div className="flex items-center gap-3.5 min-w-0">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-800 group-hover:bg-emerald-700 group-hover:text-white transition">
+                <Landmark className="h-5 w-5" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-stone-900 group-hover:text-emerald-800 transition">
+                    Activos Patrimoniales
+                  </h3>
+                  <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full">
+                    {machines.length + lots.length}
+                  </span>
+                </div>
+                <p className="text-xs text-stone-500 truncate">
+                  Valoración e historial de mejoras de máquinas y lotes
+                </p>
+              </div>
+            </div>
+            <ChevronRight className="h-5 w-5 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
+          </button>
+
+          {/* Option 4: Cambiar contraseñas */}
           <button
             type="button"
             onClick={() => {
@@ -1530,33 +1746,6 @@ export const AdminView: React.FC<Props> = ({
             </div>
             <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
           </button>
-
-          {/* 6. Activos y mejoras */}
-          <button
-            type="button"
-            onClick={() => navigateTo('activos')}
-            className="w-full flex items-center justify-between p-3.5 sm:p-4 hover:bg-stone-50 transition cursor-pointer text-left group min-h-[58px]"
-          >
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-800 group-hover:bg-emerald-700 group-hover:text-white transition">
-                <ShieldCheck className="h-4.5 w-4.5" />
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <h3 className="text-xs sm:text-sm font-bold text-stone-900 group-hover:text-emerald-800 transition">
-                    Activos y mejoras
-                  </h3>
-                  <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full">
-                    {assets.length}
-                  </span>
-                </div>
-                <p className="text-[11px] text-stone-500 truncate">
-                  Valor patrimonial e inversiones
-                </p>
-              </div>
-            </div>
-            <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
-          </button>
         </div>
 
         {/* Discrete Revoke Access Option */}
@@ -1631,118 +1820,105 @@ export const AdminView: React.FC<Props> = ({
   // RENDER LEVEL 3: Detail Option Screens
   return (
     <div className="space-y-5 w-full max-w-4xl mx-auto">
-      {/* Top Header with Back Button */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-stone-200">
-        <button
-          type="button"
-          onClick={handleGoBack}
-          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-stone-300 text-xs font-bold text-stone-700 hover:bg-stone-50 transition cursor-pointer shrink-0 min-h-[38px]"
-        >
-          <ArrowLeft className="h-4 w-4 text-emerald-700" />
-          <span>Volver a Configuración</span>
-        </button>
-
-        {/* Action button to open Modals */}
-        {screen === 'campanas' && (
+      {/* Top Header with Back Button (For Configuración sub-screens) */}
+      {screen !== 'activos' && (
+        <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-stone-200">
           <button
             type="button"
-            onClick={() => {
-              setCNombre('');
-              setCActiva(true);
-              setErrorMsg(null);
-              setShowCampaignForm(true);
-            }}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
+            onClick={handleGoBack}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-stone-300 text-xs font-bold text-stone-700 hover:bg-stone-50 transition cursor-pointer shrink-0 min-h-[38px]"
           >
-            <Plus className="h-4 w-4" />
-            <span>Añadir Campaña</span>
+            <ArrowLeft className="h-4 w-4 text-emerald-700" />
+            <span>Volver a Configuración</span>
           </button>
-        )}
 
-        {screen === 'lotes' && (
-          <button
-            type="button"
-            onClick={() => {
-              setEditingLotId(null);
-              setLotNombre('');
-              setLotSuperficie('50');
-              setLotCultivo('');
-              setLotUbicacion('');
-              setLotObs('');
-              setErrorMsg(null);
-              setShowLotForm(true);
-            }}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
-          >
-            <Plus className="h-4 w-4" />
-            <span>Crear Nuevo Lote</span>
-          </button>
-        )}
+          {/* Action button to open Modals */}
+          {screen === 'campanas' && (
+            <button
+              type="button"
+              onClick={() => {
+                setCNombre('');
+                setCActiva(true);
+                setErrorMsg(null);
+                setShowCampaignForm(true);
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
+            >
+              <Plus className="h-4 w-4" />
+              <span>Añadir Campaña</span>
+            </button>
+          )}
 
-        {screen === 'maquinarias' && (
-          <button
-            type="button"
-            onClick={() => {
-              setEditingMachineId(null);
-              setMNombre('');
-              setMIdentificacion('');
-              setMTipo('Tractor');
-              setMIcono('tractor');
-              setMTarifa('250');
-              setMUnidad('ha');
-              setMMoneda('BOB');
-              setMEstado('operativo');
-              setMObs('');
-              setErrorMsg(null);
-              setShowMachineForm(true);
-            }}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
-          >
-            <Plus className="h-4 w-4" />
-            <span>Registrar Maquinaria</span>
-          </button>
-        )}
+          {screen === 'lotes' && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingLotId(null);
+                setLotNombre('');
+                setLotSuperficie('50');
+                setLotCultivo('');
+                setLotUbicacion('');
+                setLotObs('');
+                setErrorMsg(null);
+                setShowLotForm(true);
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
+            >
+              <Plus className="h-4 w-4" />
+              <span>Crear Nuevo Lote</span>
+            </button>
+          )}
 
-        {screen === 'items' && (
-          <button
-            type="button"
-            onClick={() => {
-              setEditingItemId(null);
-              setItemName('');
-              setItemIcono(itemClassTab === 'INGRESO' ? 'granos' : 'diesel');
-              setItemModulo('MAQUINARIAS');
-              setItemClase(itemClassTab);
-              setItemUnidad('unidades');
-              setItemPrecio('');
-              setItemMoneda('BOB');
-              setItemActivo(true);
-              setErrorMsg(null);
-              setShowItemForm(true);
-            }}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
-          >
-            <Plus className="h-4 w-4" />
-            <span>Crear Nuevo Ítem</span>
-          </button>
-        )}
+          {screen === 'maquinarias' && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingMachineId(null);
+                setMNombre('');
+                setMIdentificacion('');
+                setMTipo('Tractor');
+                setMIcono('tractor');
+                setMTarifa('250');
+                setMUnidad('ha');
+                setMMoneda('BOB');
+                setMEstado('operativo');
+                setMObs('');
+                setErrorMsg(null);
+                setShowMachineForm(true);
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
+            >
+              <Plus className="h-4 w-4" />
+              <span>Registrar Maquinaria</span>
+            </button>
+          )}
 
-        {screen === 'activos' && (
-          <button
-            type="button"
-            onClick={() => {
-              setANombre('');
-              setAIdentificador('');
-              setAValorInicial(85000);
-              setErrorMsg(null);
-              setShowAssetForm(true);
-            }}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
-          >
-            <Plus className="h-4 w-4" />
-            <span>Registrar Activo</span>
-          </button>
-        )}
-      </div>
+          {screen === 'items' && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingItemId(null);
+                setItemName('');
+                setItemIcono(itemClassTab === 'INGRESO' ? 'granos' : 'diesel');
+                setItemModulo('MAQUINARIAS');
+                setItemClase(itemClassTab);
+                setItemUnidad('unidades');
+                setItemPrecio('');
+                setItemMoneda('BOB');
+                setItemActivo(true);
+                setErrorMsg(null);
+                setShowItemForm(true);
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold hover:bg-emerald-800 transition cursor-pointer min-h-[38px]"
+            >
+              <Plus className="h-4 w-4" />
+              <span>Crear Nuevo Ítem</span>
+            </button>
+          )}
+
+          {/* No standalone button needed for activos screen */}
+        </div>
+      )}
 
       {/* Global Success Banner */}
       {successMsg && (
@@ -2113,6 +2289,33 @@ export const AdminView: React.FC<Props> = ({
                 />
               </div>
 
+              {/* Valor Patrimonial del Terreno */}
+              <div className="pt-2 border-t border-stone-200/80">
+                <label className="block text-xs font-bold text-stone-800 mb-1">
+                  Valor total del terreno (USD)
+                  <span className="text-[11px] font-normal text-stone-500 ml-1">
+                    (Opcional · Valor patrimonial global)
+                  </span>
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-bold text-stone-400">
+                    USD
+                  </span>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    value={lotValorPatrimonial}
+                    onChange={(e) => setLotValorPatrimonial(e.target.value)}
+                    placeholder="Ej. 120000"
+                    className="w-full text-xs pl-12 pr-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white focus:border-emerald-600 focus:outline-none font-bold text-emerald-950 font-mono min-h-[42px]"
+                  />
+                </div>
+                <p className="text-[11px] text-stone-500 mt-1">
+                  Define el valor patrimonial total del lote o terreno en USD para Activos Patrimoniales.
+                </p>
+              </div>
+
               <div className="flex gap-2.5 pt-3">
                 <button
                   type="button"
@@ -2124,6 +2327,7 @@ export const AdminView: React.FC<Props> = ({
                     setLotCultivo('');
                     setLotUbicacion('');
                     setLotObs('');
+                    setLotValorPatrimonial('');
                     setErrorMsg(null);
                   }}
                   className="flex-1 py-3 rounded-xl border border-stone-300 bg-stone-100 hover:bg-stone-200 text-xs font-bold text-stone-700 transition cursor-pointer min-h-[44px]"
@@ -2710,6 +2914,33 @@ export const AdminView: React.FC<Props> = ({
                 </div>
               </div>
 
+              {/* Valor Patrimonial de la Maquinaria */}
+              <div className="pt-2 border-t border-stone-200/80">
+                <label className="block text-xs font-bold text-stone-800 mb-1">
+                  Valor total del bien (USD)
+                  <span className="text-[11px] font-normal text-stone-500 ml-1">
+                    (Opcional · Valor patrimonial base)
+                  </span>
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-bold text-stone-400">
+                    USD
+                  </span>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    value={mValorPatrimonial}
+                    onChange={(e) => setMValorPatrimonial(e.target.value)}
+                    placeholder="Ej. 65000"
+                    className="w-full text-xs pl-12 pr-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white focus:border-emerald-600 focus:outline-none font-bold text-emerald-950 font-mono min-h-[42px]"
+                  />
+                </div>
+                <p className="text-[11px] text-stone-500 mt-1">
+                  Define el valor patrimonial inicial de la maquinaria en USD para Activos Patrimoniales.
+                </p>
+              </div>
+
               <div className="flex gap-2.5 pt-3">
                 <button
                   type="button"
@@ -2718,6 +2949,7 @@ export const AdminView: React.FC<Props> = ({
                     setEditingMachineId(null);
                     setMNombre('');
                     setMIdentificacion('');
+                    setMValorPatrimonial('');
                     setErrorMsg(null);
                   }}
                   className="flex-1 py-3 rounded-xl border border-stone-300 bg-stone-100 hover:bg-stone-200 text-xs font-bold text-stone-700 transition cursor-pointer min-h-[44px]"
@@ -3332,159 +3564,454 @@ export const AdminView: React.FC<Props> = ({
 
       {/* DETAIL 6: ACTIVOS PATRIMONIALES Y MEJORAS */}
       {screen === 'activos' && (
-        <div className="space-y-5">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
-                <ShieldCheck className="h-5 w-5 text-emerald-700" />
-                Activos Patrimoniales ({assets.length})
-              </h2>
-              <p className="text-xs text-stone-500 mt-0.5">
-                Inversiones patrimoniales e historial de mejoras incorporadas
-              </p>
-            </div>
+        <div className="space-y-4 max-w-2xl mx-auto w-full">
+          {/* 1. Single row with "Volver a Administración" button */}
+          <div className="pb-3 border-b border-stone-200">
+            <button
+              type="button"
+              onClick={handleGoBack}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-stone-300 text-xs font-bold text-stone-700 hover:bg-stone-50 transition cursor-pointer shrink-0 min-h-[38px]"
+            >
+              <ArrowLeft className="h-4 w-4 text-emerald-700" />
+              <span>Volver a Administración</span>
+            </button>
           </div>
 
-          {/* Records List FIRST */}
-          <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-xs space-y-3">
-            {assets.map((asset) => (
-              <div key={asset.id} className="p-4 rounded-xl border border-stone-200 bg-stone-50/50 space-y-2">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <h4 className="text-sm font-bold text-stone-900 truncate">{asset.nombre}</h4>
-                    <p className="text-xs text-stone-500 truncate">
-                      Adquisición: {asset.moneda} {asset.valorInicial.toLocaleString()} &bull; Fecha: {asset.fechaAdquisicion}
-                    </p>
-                  </div>
-                  <div className="sm:text-right">
-                    <span className="text-[10px] text-stone-500 block">Valor Acumulado</span>
-                    <span className="text-base font-bold text-emerald-800 font-mono">
-                      {asset.moneda} {asset.valorAcumulado.toLocaleString()}
-                    </span>
+          {/* 2. Title and small description */}
+          <div>
+            <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
+              <Landmark className="h-5 w-5 text-emerald-700" />
+              <span>Activos Patrimoniales</span>
+            </h2>
+            <p className="text-xs text-stone-500 mt-0.5">
+              Valoración del patrimonio e historial de mejoras incorporadas
+            </p>
+          </div>
+
+          {/* 3. Segmented control selector taking full available width */}
+          <div>
+            <SegmentedControl
+              options={[
+                { value: 'maquinarias', label: `Maquinarias (${machines.length})` },
+                { value: 'propiedad', label: `Propiedad (${lots.length})` },
+              ]}
+              value={activosTab}
+              onChange={(val) => setActivosTab(val)}
+              variant="green"
+              className="w-full text-xs sm:text-sm"
+            />
+          </div>
+
+          {/* TAB 1: MAQUINARIAS */}
+          {activosTab === 'maquinarias' && (() => {
+            const totalBase = machines.reduce((acc, m) => {
+              const bVal = getBaseValueForMachine(m, assets);
+              return acc + bVal;
+            }, 0);
+
+            const totalMejoras = machines.reduce((acc, m) => {
+              const linked = findAssetForMachine(m, assets);
+              const sumM = (linked?.mejoras || []).reduce((a, b) => a + (b.costo || 0), 0);
+              return acc + sumM;
+            }, 0);
+
+            const totalPat = totalBase + totalMejoras;
+
+            return (
+              <div className="space-y-3">
+                {/* 3-Column Compact Horizontal Summary Block */}
+                <div className="rounded-2xl border border-stone-200 bg-white p-3 shadow-2xs">
+                  <div className="grid grid-cols-3 divide-x divide-stone-100 text-center">
+                    <div className="px-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 block">
+                        Base
+                      </span>
+                      <span className="text-xs sm:text-sm font-bold text-stone-700 font-mono mt-0.5 block truncate">
+                        {totalBase > 0 ? `USD ${totalBase.toLocaleString()}` : 'Sin valor'}
+                      </span>
+                    </div>
+
+                    <div className="px-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 block">
+                        Mejoras
+                      </span>
+                      <span className="text-xs sm:text-sm font-bold text-emerald-700 font-mono mt-0.5 block truncate">
+                        USD {totalMejoras.toLocaleString()}
+                      </span>
+                    </div>
+
+                    <div className="px-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 block">
+                        Total
+                      </span>
+                      <span className="text-xs sm:text-sm font-black text-stone-900 font-mono mt-0.5 block truncate">
+                        {totalPat > 0 ? `USD ${totalPat.toLocaleString()}` : 'Sin valor'}
+                      </span>
+                    </div>
                   </div>
                 </div>
 
-                {asset.mejoras && asset.mejoras.length > 0 && (
-                  <div className="pt-2 border-t border-stone-200/80 space-y-1 text-xs">
-                    <p className="text-[11px] font-semibold text-stone-700">Mejoras Aplicadas:</p>
-                    {asset.mejoras.map((m) => (
-                      <div key={m.id} className="flex justify-between text-stone-600 bg-white p-2 rounded border border-stone-200/60">
-                        <span>{m.fecha} — {m.descripcion}</span>
-                        <span className="font-bold text-stone-900">+{m.moneda} {m.costo.toLocaleString()}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                {/* Machine Asset Cards - iOS Thin Rows */}
+                <div className="space-y-2">
+                  {machines.map((m) => {
+                    const linked = findAssetForMachine(m, assets);
+                    const baseVal = getBaseValueForMachine(m, assets);
+                    const imps = linked?.mejoras || [];
+                    const sumImps = imps.reduce((a, b) => a + (b.costo || 0), 0);
+                    const totVal = baseVal > 0 ? baseVal + sumImps : (sumImps > 0 ? sumImps : 0);
 
-                {selectedAssetId === asset.id ? (
-                  <form onSubmit={handleImprovementSubmit} className="pt-2 border-t border-stone-200 space-y-2 bg-stone-100 p-3 rounded-lg">
-                    <p className="text-xs font-bold text-stone-800">Añadir Mejora Posterior al Activo:</p>
-                    <input
-                      type="text"
-                      value={impDesc}
-                      onChange={(e) => setImpDesc(e.target.value)}
-                      placeholder="Ej: Instalación de piloto automático"
-                      required
-                      className="w-full text-xs p-2 rounded border border-stone-300 bg-white min-h-[38px]"
-                    />
-                    <div className="flex gap-2">
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        value={impCosto}
-                        onChange={(e) => setImpCosto(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                        placeholder="6000"
-                        required
-                        className="flex-1 text-xs p-2 rounded border border-stone-300 bg-white font-bold min-h-[38px]"
-                      />
-                      <button type="submit" className="bg-emerald-700 text-white px-3 py-2 text-xs font-bold rounded cursor-pointer min-h-[38px]">
-                        Añadir
-                      </button>
-                      <button type="button" onClick={() => setSelectedAssetId(null)} className="bg-stone-300 text-stone-800 px-3 py-2 text-xs rounded cursor-pointer min-h-[38px]">
-                        Cancelar
+                    return (
+                      <div
+                        key={m.id}
+                        onClick={() => setSelectedEntityForDetail({ type: 'maquinaria', entity: m })}
+                        className="rounded-2xl border border-stone-200/80 bg-white p-3 hover:border-emerald-500/50 hover:bg-stone-50/80 transition cursor-pointer shadow-2xs flex items-center justify-between gap-2.5 group min-h-[52px]"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                          <div className="shrink-0 flex items-center justify-center p-1.5 rounded-xl bg-stone-50 border border-stone-200/80">
+                            <VisualIcon name={m.icono || 'tractor'} size="sm" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <h4 className="text-xs sm:text-sm font-bold text-stone-900 group-hover:text-emerald-800 transition truncate">
+                              {m.nombre}
+                            </h4>
+                            <p className="text-[11px] text-stone-500 truncate mt-0.5">
+                              {baseVal > 0 ? `Base: USD ${baseVal.toLocaleString()}` : 'Sin valor'}
+                              {sumImps > 0 ? <span className="text-emerald-700 font-semibold"> &bull; Mejoras: USD {sumImps.toLocaleString()}</span> : null}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-xs sm:text-sm font-black font-mono text-emerald-950">
+                            {totVal > 0 ? `USD ${totVal.toLocaleString()}` : <span className="text-stone-400 font-normal text-xs">Sin valor</span>}
+                          </span>
+                          <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0" />
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {machines.length === 0 && (
+                    <div className="py-10 text-center text-xs text-stone-400 bg-stone-50 rounded-2xl border border-stone-200">
+                      No hay máquinas registradas en la flota.
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* TAB 2: PROPIEDAD */}
+          {activosTab === 'propiedad' && (() => {
+            const totalBase = lots.reduce((acc, l) => {
+              const bVal = getBaseValueForLot(l, assets);
+              return acc + bVal;
+            }, 0);
+
+            const totalMejoras = lots.reduce((acc, l) => {
+              const linked = findAssetForLot(l, assets);
+              const sumM = (linked?.mejoras || []).reduce((a, b) => a + (b.costo || 0), 0);
+              return acc + sumM;
+            }, 0);
+
+            const totalPat = totalBase + totalMejoras;
+
+            return (
+              <div className="space-y-3">
+                {/* 3-Column Compact Horizontal Summary Block */}
+                <div className="rounded-2xl border border-stone-200 bg-white p-3 shadow-2xs">
+                  <div className="grid grid-cols-3 divide-x divide-stone-100 text-center">
+                    <div className="px-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 block">
+                        Base
+                      </span>
+                      <span className="text-xs sm:text-sm font-bold text-stone-700 font-mono mt-0.5 block truncate">
+                        {totalBase > 0 ? `USD ${totalBase.toLocaleString()}` : 'Sin valor'}
+                      </span>
+                    </div>
+
+                    <div className="px-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 block">
+                        Mejoras
+                      </span>
+                      <span className="text-xs sm:text-sm font-bold text-emerald-700 font-mono mt-0.5 block truncate">
+                        USD {totalMejoras.toLocaleString()}
+                      </span>
+                    </div>
+
+                    <div className="px-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 block">
+                        Total
+                      </span>
+                      <span className="text-xs sm:text-sm font-black text-stone-900 font-mono mt-0.5 block truncate">
+                        {totalPat > 0 ? `USD ${totalPat.toLocaleString()}` : 'Sin valor'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Lot Asset Cards - iOS Thin Rows */}
+                <div className="space-y-2">
+                  {lots.map((l) => {
+                    const linked = findAssetForLot(l, assets);
+                    const baseVal = getBaseValueForLot(l, assets);
+                    const imps = linked?.mejoras || [];
+                    const sumImps = imps.reduce((a, b) => a + (b.costo || 0), 0);
+                    const totVal = baseVal > 0 ? baseVal + sumImps : (sumImps > 0 ? sumImps : 0);
+
+                    return (
+                      <div
+                        key={l.id}
+                        onClick={() => setSelectedEntityForDetail({ type: 'lote', entity: l })}
+                        className="rounded-2xl border border-stone-200/80 bg-white p-3 hover:border-emerald-500/50 hover:bg-stone-50/80 transition cursor-pointer shadow-2xs flex items-center justify-between gap-2.5 group min-h-[52px]"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                          <div className="shrink-0 flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-100 text-emerald-800">
+                            <LandPlot className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <h4 className="text-xs sm:text-sm font-bold text-stone-900 group-hover:text-emerald-800 transition truncate">
+                              {l.nombre}
+                            </h4>
+                            <p className="text-[11px] text-stone-500 truncate mt-0.5">
+                              {baseVal > 0 ? `Base: USD ${baseVal.toLocaleString()}` : 'Sin valor'}
+                              {sumImps > 0 ? <span className="text-emerald-700 font-semibold"> &bull; Mejoras: USD {sumImps.toLocaleString()}</span> : null}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-xs sm:text-sm font-black font-mono text-emerald-950">
+                            {totVal > 0 ? `USD ${totVal.toLocaleString()}` : <span className="text-stone-400 font-normal text-xs">Sin valor</span>}
+                          </span>
+                          <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0" />
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {lots.length === 0 && (
+                    <div className="py-10 text-center text-xs text-stone-400 bg-stone-50 rounded-2xl border border-stone-200">
+                      No hay lotes registrados en la propiedad.
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* DETAIL MODAL / BOTTOM SHEET FOR ENTITY */}
+          {selectedEntityForDetail && (() => {
+            const isMachine = selectedEntityForDetail.type === 'maquinaria';
+            const entity = selectedEntityForDetail.entity;
+            const linkedAsset = isMachine
+              ? findAssetForMachine(entity as Machine, assets)
+              : findAssetForLot(entity as Lot, assets);
+
+            const baseVal = isMachine
+              ? getBaseValueForMachine(entity as Machine, assets)
+              : getBaseValueForLot(entity as Lot, assets);
+
+            const imps = linkedAsset?.mejoras || [];
+            const sumImps = imps.reduce((a, b) => a + (b.costo || 0), 0);
+            const totVal = baseVal > 0 ? baseVal + sumImps : sumImps;
+
+            return (
+              <IOSModal
+                isOpen={Boolean(selectedEntityForDetail)}
+                onClose={() => setSelectedEntityForDetail(null)}
+                title={entity.nombre}
+                subtitle={isMachine ? 'Ficha Patrimonial — Maquinaria' : 'Ficha Patrimonial — Terreno / Lote'}
+                errorMsg={errorMsg}
+                onErrorDismiss={() => setErrorMsg(null)}
+              >
+                <div className="space-y-4">
+                  {/* Patrimonial Breakdown Box */}
+                  <div className="rounded-2xl bg-stone-900 text-white p-4 space-y-3 shadow-md">
+                    <div className="flex items-center justify-between border-b border-stone-800 pb-2.5">
+                      <div>
+                        <span className="text-[10px] uppercase font-bold tracking-wider text-stone-400 block">
+                          Valor Total Patrimonial
+                        </span>
+                        <span className="text-xl font-black font-mono text-emerald-400 block mt-0.5">
+                          {totVal > 0 ? `USD ${totVal.toLocaleString()}` : 'Sin valor'}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-[10px] font-bold text-stone-400 block">Categoría</span>
+                        <span className="text-xs font-semibold text-stone-200">
+                          {isMachine ? (entity as Machine).tipo || 'Equipo' : `${(entity as Lot).superficieHectareas} ha`}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 text-xs pt-1">
+                      <div className="bg-stone-800/80 p-2.5 rounded-xl border border-stone-700/60">
+                        <span className="text-[10px] text-stone-400 block font-semibold">Valor Base Inicial</span>
+                        <span className="text-sm font-bold font-mono text-stone-100 block mt-0.5">
+                          {baseVal > 0 ? `USD ${baseVal.toLocaleString()}` : <span className="text-stone-500 font-normal">Sin valor</span>}
+                        </span>
+                      </div>
+
+                      <div className="bg-stone-800/80 p-2.5 rounded-xl border border-stone-700/60">
+                        <span className="text-[10px] text-stone-400 block font-semibold">Mejoras Acumuladas</span>
+                        <span className="text-sm font-bold font-mono text-emerald-400 block mt-0.5">
+                          USD {sumImps.toLocaleString()}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Edit Base Shortcut Link */}
+                    <div className="pt-1 text-right">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const targetEnt = selectedEntityForDetail;
+                          setSelectedEntityForDetail(null);
+                          if (targetEnt.type === 'maquinaria') {
+                            handleEditMachine(targetEnt.entity as Machine);
+                          } else {
+                            handleEditLot(targetEnt.entity as Lot);
+                          }
+                        }}
+                        className="text-[11px] font-bold text-emerald-400 hover:text-emerald-300 transition inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <Edit3 className="h-3 w-3" />
+                        <span>Configurar valor base inicial</span>
                       </button>
                     </div>
-                  </form>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setSelectedAssetId(asset.id)}
-                    className="text-xs text-emerald-700 hover:underline font-semibold pt-1 block cursor-pointer"
-                  >
-                    + Añadir mejora posterior
-                  </button>
-                )}
-              </div>
-            ))}
+                  </div>
 
-            {assets.length === 0 && (
-              <div className="py-8 text-center text-xs text-stone-400">
-                No hay activos patrimoniales registrados.
-              </div>
-            )}
-          </div>
+                  {/* Improvements Section */}
+                  <div className="space-y-3 pt-1">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-bold text-stone-900 flex items-center gap-1.5">
+                        <Coins className="h-4 w-4 text-emerald-700" />
+                        <span>Historial de Mejoras ({imps.length})</span>
+                      </h4>
 
-          {/* Modal Asset */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setImpFecha(getLocalDateString());
+                          setImpDesc('');
+                          setImpCosto('');
+                          setShowAddImprovementModal(true);
+                        }}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition shadow-2xs cursor-pointer min-h-[34px]"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        <span>Añadir mejora</span>
+                      </button>
+                    </div>
+
+                    {/* List of Improvements */}
+                    <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                      {imps.map((imp) => (
+                        <div
+                          key={imp.id}
+                          className="flex items-center justify-between p-3 rounded-xl border border-stone-200 bg-stone-50/70 hover:bg-white transition"
+                        >
+                          <div className="min-w-0 flex-1 pr-2">
+                            <span className="text-xs font-bold text-stone-900 block truncate">
+                              {imp.descripcion}
+                            </span>
+                            <span className="text-[10px] text-stone-500 block truncate">
+                              Fecha: {imp.fecha}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-xs font-bold text-emerald-800 font-mono">
+                              +USD {imp.costo.toLocaleString()}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleEditImprovementClick(imp)}
+                              className="p-1 text-stone-400 hover:text-emerald-700 rounded transition cursor-pointer"
+                              title="Editar mejora"
+                            >
+                              <Edit3 className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteImprovementClick(imp)}
+                              className="p-1 text-stone-400 hover:text-red-600 rounded transition cursor-pointer"
+                              title="Eliminar mejora"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+
+                      {imps.length === 0 && (
+                        <div className="py-6 text-center text-xs text-stone-400 bg-stone-50 rounded-xl border border-dashed border-stone-200">
+                          No se han registrado mejoras posteriores para este activo.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </IOSModal>
+            );
+          })()}
+
+          {/* ADD IMPROVEMENT MODAL */}
           <IOSModal
-            isOpen={showAssetForm}
+            isOpen={showAddImprovementModal}
             onClose={() => {
-              setShowAssetForm(false);
-              setErrorMsg(null);
+              setShowAddImprovementModal(false);
+              setImpDesc('');
+              setImpCosto('');
             }}
-            title="Registrar Activo Patrimonial"
-            subtitle="Inversiones patrimoniales e infraestructura"
+            title="Añadir Mejora al Activo"
+            subtitle="Registra inversiones o equipamiento posterior"
             errorMsg={errorMsg}
             onErrorDismiss={() => setErrorMsg(null)}
           >
-            <form onSubmit={handleAssetSubmit} className="space-y-4">
+            <form onSubmit={handleAddImprovementSubmit} className="space-y-4">
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">Tipo de Activo</label>
-                <SegmentedControl
-                  options={[
-                    { value: 'MAQUINARIA', label: 'Maquinaria' },
-                    { value: 'LOTE', label: 'Terreno / Lote' },
-                    { value: 'OTRO', label: 'Otro' },
-                  ]}
-                  value={aTipo}
-                  onChange={(val) => setATipo(val as any)}
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">Nombre del Activo *</label>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  Descripción de la Mejora *
+                </label>
                 <input
                   type="text"
-                  value={aNombre}
-                  onChange={(e) => setANombre(e.target.value)}
-                  placeholder="Tractor John Deere 6110M"
+                  value={impDesc}
+                  onChange={(e) => setImpDesc(e.target.value)}
+                  placeholder="Ej: Instalación de piloto automático, canal de riego, overhaul..."
                   required
-                  className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white font-semibold min-h-[42px]"
+                  className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[42px]"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Valor Inicial *</label>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Costo (USD) *
+                  </label>
                   <input
                     type="number"
                     inputMode="decimal"
-                    step="0.01"
-                    value={aValorInicial}
-                    onChange={(e) => setAValorInicial(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                    placeholder="85000"
+                    step="any"
+                    value={impCosto}
+                    onChange={(e) => setImpCosto(e.target.value)}
+                    placeholder="Ej. 6000"
                     required
-                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white font-bold min-h-[42px]"
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white focus:border-emerald-600 focus:outline-none font-bold min-h-[42px]"
                   />
                 </div>
+
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Moneda</label>
-                  <SegmentedControl
-                    options={[
-                      { value: 'USD', label: 'USD ($)' },
-                      { value: 'BOB', label: 'BOB (Bs)' },
-                    ]}
-                    value={aMoneda}
-                    onChange={(val) => setAMoneda(val as Currency)}
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Fecha *
+                  </label>
+                  <input
+                    type="date"
+                    value={impFecha}
+                    onChange={(e) => setImpFecha(e.target.value)}
+                    required
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white min-h-[42px]"
                   />
                 </div>
               </div>
@@ -3493,8 +4020,9 @@ export const AdminView: React.FC<Props> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setShowAssetForm(false);
-                    setErrorMsg(null);
+                    setShowAddImprovementModal(false);
+                    setImpDesc('');
+                    setImpCosto('');
                   }}
                   className="flex-1 py-3 rounded-xl border border-stone-300 bg-stone-100 hover:bg-stone-200 text-xs font-bold text-stone-700 transition cursor-pointer min-h-[44px]"
                 >
@@ -3511,12 +4039,143 @@ export const AdminView: React.FC<Props> = ({
                       <span>Guardando...</span>
                     </>
                   ) : (
-                    <span>Registrar Activo</span>
+                    <span>Registrar Mejora</span>
                   )}
                 </button>
               </div>
             </form>
           </IOSModal>
+
+          {/* EDIT IMPROVEMENT MODAL */}
+          {editingImprovement && (
+            <IOSModal
+              isOpen={Boolean(editingImprovement)}
+              onClose={() => setEditingImprovement(null)}
+              title="Editar Mejora"
+              subtitle="Modifica la descripción, costo o fecha de la mejora"
+              errorMsg={errorMsg}
+              onErrorDismiss={() => setErrorMsg(null)}
+            >
+              <form onSubmit={handleUpdateImprovementSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">
+                    Descripción *
+                  </label>
+                  <input
+                    type="text"
+                    value={editImpDesc}
+                    onChange={(e) => setEditImpDesc(e.target.value)}
+                    required
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white font-semibold min-h-[42px]"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-stone-700 mb-1">
+                      Costo (USD) *
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      value={editImpCosto}
+                      onChange={(e) => setEditImpCosto(e.target.value)}
+                      required
+                      className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white font-bold min-h-[42px]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-stone-700 mb-1">
+                      Fecha *
+                    </label>
+                    <input
+                      type="date"
+                      value={editImpFecha}
+                      onChange={(e) => setEditImpFecha(e.target.value)}
+                      required
+                      className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-stone-300 bg-stone-50/50 focus:bg-white min-h-[42px]"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex gap-2.5 pt-3">
+                  <button
+                    type="button"
+                    onClick={() => setEditingImprovement(null)}
+                    className="flex-1 py-3 rounded-xl border border-stone-300 bg-stone-100 hover:bg-stone-200 text-xs font-bold text-stone-700 transition cursor-pointer min-h-[44px]"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-xs font-bold text-white shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[44px]"
+                  >
+                    {saving ? (
+                      <>
+                        <RefreshCw className="h-4 w-4 animate-spin" />
+                        <span>Guardando...</span>
+                      </>
+                    ) : (
+                      <span>Guardar Cambios</span>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </IOSModal>
+          )}
+
+          {/* DELETE IMPROVEMENT MODAL */}
+          {deletingImprovement && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs animate-fadeIn">
+              <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-xl border border-stone-200 space-y-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-100 text-red-700">
+                    <Trash2 className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-stone-900">Confirmar eliminación de mejora</h3>
+                    <p className="text-xs text-stone-500">Se recalculará automáticamente el valor total acumulado.</p>
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-stone-50 p-3 border border-stone-200 space-y-1">
+                  <p className="text-xs font-bold text-stone-900">{deletingImprovement.descripcion}</p>
+                  <p className="text-xs font-mono font-bold text-red-800">
+                    Importe: USD {deletingImprovement.costo.toLocaleString()} &bull; Fecha: {deletingImprovement.fecha}
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-end gap-2.5 pt-2">
+                  <button
+                    type="button"
+                    disabled={isDeletingImprovement}
+                    onClick={() => setDeletingImprovement(null)}
+                    className="px-4 py-2.5 rounded-xl border border-stone-300 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 cursor-pointer min-h-[38px] disabled:opacity-50"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isDeletingImprovement}
+                    onClick={handleExecuteDeleteImprovement}
+                    className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-red-600 text-xs font-bold text-white hover:bg-red-700 transition cursor-pointer min-h-[38px] disabled:opacity-50"
+                  >
+                    {isDeletingImprovement ? (
+                      <>
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        <span>Eliminando...</span>
+                      </>
+                    ) : (
+                      <span>Eliminar Mejora</span>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

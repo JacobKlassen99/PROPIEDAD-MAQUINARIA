@@ -617,21 +617,21 @@ export const MachineryView: React.FC<Props> = ({
               REGISTRAR MOVIMIENTO
             </h2>
 
-            {/* Dos botones compactos estilo iOS: SERVICIO (verde suave) y GASTO (rojo suave) */}
+            {/* Dos botones compactos estilo iOS: SERVICIO (Verde John Deere) y GASTO (Rojo claro) */}
             <div className="grid grid-cols-2 gap-3 w-full">
               {/* Botón SERVICIO */}
               <button
                 type="button"
                 onClick={() => setCurrentScreen('ingreso_opciones')}
-                className="w-full min-h-[72px] sm:min-h-[76px] p-3 sm:p-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white shadow-xs border border-emerald-500/20 flex flex-col items-center justify-center gap-1 transition active:scale-[0.98] cursor-pointer select-none"
+                className="w-full min-h-[70px] sm:min-h-[74px] p-3 rounded-2xl bg-[#367C2B] hover:bg-[#2e6b25] active:bg-[#26581e] text-white shadow-xs border border-[#367C2B]/20 flex flex-col items-center justify-center gap-0.5 transition active:scale-[0.98] cursor-pointer select-none"
               >
                 <div className="flex items-center justify-center gap-1.5">
-                  <CirclePlus className="h-5 w-5 text-emerald-100 shrink-0" />
-                  <span className="text-sm sm:text-base font-bold tracking-tight">
+                  <CirclePlus className="h-4 w-4 text-white shrink-0" />
+                  <span className="text-sm sm:text-base font-bold tracking-tight text-white">
                     Servicio
                   </span>
                 </div>
-                <span className="text-[11px] sm:text-xs text-emerald-100/90 font-medium text-center truncate max-w-full px-1">
+                <span className="text-[11px] sm:text-xs text-white/90 font-medium text-center truncate max-w-full px-1">
                   Servicio o labor
                 </span>
               </button>
@@ -640,15 +640,15 @@ export const MachineryView: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={() => setCurrentScreen('gasto')}
-                className="w-full min-h-[72px] sm:min-h-[76px] p-3 sm:p-3.5 rounded-2xl bg-rose-500 hover:bg-rose-600 active:bg-rose-700 text-white shadow-xs border border-rose-400/20 flex flex-col items-center justify-center gap-1 transition active:scale-[0.98] cursor-pointer select-none"
+                className="w-full min-h-[70px] sm:min-h-[74px] p-3 rounded-2xl bg-[#FCE8E8] hover:bg-[#f8d7d7] active:bg-[#f4c6c6] text-[#B42323] shadow-xs border border-[#f3c2c2] flex flex-col items-center justify-center gap-0.5 transition active:scale-[0.98] cursor-pointer select-none"
               >
                 <div className="flex items-center justify-center gap-1.5">
-                  <CircleMinus className="h-5 w-5 text-rose-100 shrink-0" />
-                  <span className="text-sm sm:text-base font-bold tracking-tight">
+                  <CircleMinus className="h-4 w-4 text-[#B42323] shrink-0" />
+                  <span className="text-sm sm:text-base font-bold tracking-tight text-[#B42323]">
                     Gasto
                   </span>
                 </div>
-                <span className="text-[11px] sm:text-xs text-rose-100/90 font-medium text-center truncate max-w-full px-1">
+                <span className="text-[11px] sm:text-xs text-[#B42323]/80 font-medium text-center truncate max-w-full px-1">
                   Combustible y repuestos
                 </span>
               </button>
@@ -1435,8 +1435,8 @@ export const MachineryView: React.FC<Props> = ({
               </span>
             </div>
 
-            {/* Filtros: Búsqueda y Pestañas Segmentadas iOS */}
-            <div className="space-y-2.5">
+            {/* Filtros: Búsqueda y Dos Grupos Diferenciados iOS */}
+            <div className="space-y-3">
               <div className="relative">
                 <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
                 <input
@@ -1448,82 +1448,129 @@ export const MachineryView: React.FC<Props> = ({
                 />
               </div>
 
-              {/* Filtro Principal Segmentado: Todos, Servicios, Gastos */}
-              <div className="flex p-1 bg-slate-100 rounded-xl gap-1">
-                <button
-                  type="button"
-                  onClick={() => setHistorialFilter('todos')}
-                  className={`flex-1 min-h-[38px] text-xs font-bold rounded-lg transition cursor-pointer text-center ${
-                    historialFilter === 'todos'
-                      ? 'bg-white text-slate-900 shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  Todos ({allMachineryMovements.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setHistorialFilter('servicios')}
-                  className={`flex-1 min-h-[38px] text-xs font-bold rounded-lg transition cursor-pointer text-center ${
-                    historialFilter === 'servicios'
-                      ? 'bg-white text-emerald-800 shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  Servicios ({jobs.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setHistorialFilter('gastos')}
-                  className={`flex-1 min-h-[38px] text-xs font-bold rounded-lg transition cursor-pointer text-center ${
-                    historialFilter === 'gastos'
-                      ? 'bg-white text-rose-700 shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  Gastos ({machineryExpenses.length})
-                </button>
-              </div>
+              {/* PRIMER GRUPO: TIPO DE MOVIMIENTO */}
+              <div className="space-y-1.5">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block px-0.5">
+                  Tipo de movimiento
+                </span>
+                <div className="grid grid-cols-3 gap-2 w-full">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHistorialFilter('todos');
+                      setServiciosSubFilter('todos');
+                    }}
+                    className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl text-xs transition cursor-pointer min-h-[42px] select-none ${
+                      historialFilter === 'todos'
+                        ? 'bg-emerald-50 border-2 border-[#367C2B] text-[#367C2B] font-bold shadow-2xs'
+                        : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
+                    }`}
+                  >
+                    <ClipboardList className={`h-4 w-4 shrink-0 ${historialFilter === 'todos' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
+                    <span className="truncate">Todos ({allMachineryMovements.length})</span>
+                  </button>
 
-              {/* Sub-filtro de Servicios: Para otros vs En propiedad */}
-              {(historialFilter === 'servicios' || historialFilter === 'todos') && (
-                <div className="flex items-center gap-1.5 pt-1 overflow-x-auto pb-0.5">
-                  <span className="text-[11px] font-semibold text-slate-400 shrink-0 mr-1">Servicios:</span>
                   <button
                     type="button"
-                    onClick={() => setServiciosSubFilter('todos')}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shrink-0 ${
-                      serviciosSubFilter === 'todos'
-                        ? 'bg-slate-800 text-white shadow-2xs'
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    onClick={() => {
+                      setHistorialFilter('servicios');
+                      setServiciosSubFilter('todos');
+                    }}
+                    className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl text-xs transition cursor-pointer min-h-[42px] select-none ${
+                      historialFilter === 'servicios'
+                        ? 'bg-emerald-50 border-2 border-[#367C2B] text-[#367C2B] font-bold shadow-2xs'
+                        : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
                     }`}
                   >
-                    Todos ({jobs.length})
+                    <Tractor className={`h-4 w-4 shrink-0 ${historialFilter === 'servicios' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
+                    <span className="truncate">Servicios ({jobs.length})</span>
                   </button>
+
                   <button
                     type="button"
-                    onClick={() => setServiciosSubFilter('terceros')}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shrink-0 ${
-                      serviciosSubFilter === 'terceros'
-                        ? 'bg-blue-700 text-white shadow-2xs'
-                        : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200/60'
+                    onClick={() => {
+                      setHistorialFilter('gastos');
+                      setServiciosSubFilter('todos');
+                    }}
+                    className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl text-xs transition cursor-pointer min-h-[42px] select-none ${
+                      historialFilter === 'gastos'
+                        ? 'bg-emerald-50 border-2 border-[#367C2B] text-[#367C2B] font-bold shadow-2xs'
+                        : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
                     }`}
                   >
-                    Para otros ({externalJobs.length})
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setServiciosSubFilter('propiedad')}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shrink-0 ${
-                      serviciosSubFilter === 'propiedad'
-                        ? 'bg-emerald-700 text-white shadow-2xs'
-                        : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200/60'
-                    }`}
-                  >
-                    En propiedad ({propertyJobs.length})
+                    <Receipt className={`h-4 w-4 shrink-0 ${historialFilter === 'gastos' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
+                    <span className="truncate">Gastos ({machineryExpenses.length})</span>
                   </button>
                 </div>
+              </div>
+
+              {/* SEGUNDO GRUPO: DESTINO DEL SERVICIO (Sólo cuando Tipo es Servicios) */}
+              {historialFilter === 'servicios' && (
+                <div className="pt-2.5 border-t border-slate-100 space-y-1.5 animate-in fade-in duration-150">
+                  <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block px-0.5">
+                    Destino del servicio
+                  </span>
+                  <div className="grid grid-cols-3 gap-2 w-full">
+                    <button
+                      type="button"
+                      onClick={() => setServiciosSubFilter('todos')}
+                      className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl text-xs transition cursor-pointer min-h-[42px] select-none ${
+                        serviciosSubFilter === 'todos'
+                          ? 'bg-emerald-50 border-2 border-[#367C2B] text-[#367C2B] font-bold shadow-2xs'
+                          : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
+                      }`}
+                    >
+                      <ClipboardList className={`h-4 w-4 shrink-0 ${serviciosSubFilter === 'todos' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
+                      <span className="truncate">Todos ({jobs.length})</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setServiciosSubFilter('propiedad')}
+                      className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl text-xs transition cursor-pointer min-h-[42px] select-none ${
+                        serviciosSubFilter === 'propiedad'
+                          ? 'bg-emerald-50 border-2 border-[#367C2B] text-[#367C2B] font-bold shadow-2xs'
+                          : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
+                      }`}
+                    >
+                      <LandPlot className={`h-4 w-4 shrink-0 ${serviciosSubFilter === 'propiedad' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
+                      <span className="truncate">Propiedad ({propertyJobs.length})</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setServiciosSubFilter('terceros')}
+                      className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl text-xs transition cursor-pointer min-h-[42px] select-none ${
+                        serviciosSubFilter === 'terceros'
+                          ? 'bg-emerald-50 border-2 border-[#367C2B] text-[#367C2B] font-bold shadow-2xs'
+                          : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
+                      }`}
+                    >
+                      <User className={`h-4 w-4 shrink-0 ${serviciosSubFilter === 'terceros' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
+                      <span className="truncate">Otros ({externalJobs.length})</span>
+                    </button>
+                  </div>
+                </div>
               )}
+
+              {/* Indicación discreta debajo de los filtros */}
+              <div className="pt-0.5 px-0.5">
+                <span className="text-xs text-slate-500 font-medium">
+                  Mostrando:{' '}
+                  <strong className="text-slate-800 font-bold">
+                    {historialFilter === 'todos' && 'Todos los movimientos'}
+                    {historialFilter === 'gastos' && 'Gastos de maquinaria'}
+                    {historialFilter === 'servicios' && (
+                      <>
+                        Servicios &middot;{' '}
+                        {serviciosSubFilter === 'todos' && 'Todos'}
+                        {serviciosSubFilter === 'propiedad' && 'Propiedad'}
+                        {serviciosSubFilter === 'terceros' && 'Otros'}
+                      </>
+                    )}
+                  </strong>
+                </span>
+              </div>
             </div>
 
             {/* Listado Compacto de Movimientos estilo iOS Card */}
@@ -1759,22 +1806,25 @@ export const MachineryView: React.FC<Props> = ({
                 return (
                   <div
                     key={m.id}
-                    className="w-full rounded-2xl border border-slate-200 bg-slate-50/70 p-4 shadow-2xs space-y-3"
+                    className="w-full rounded-2xl border border-slate-200/90 bg-white p-3 sm:p-3.5 shadow-2xs space-y-2.5"
                   >
-                    <div className="flex items-start justify-between pb-2 border-b border-slate-200/60">
+                    {/* Encabezado */}
+                    <div className="flex items-center justify-between gap-2.5 pb-2 border-b border-slate-100">
                       <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                        <div className="w-10 h-10 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center shrink-0 shadow-2xs">
-                          <VisualIcon name={m.icono || m.tipo || 'tractor'} size="md" />
+                        <div className="w-9 h-9 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-center shrink-0 shadow-2xs">
+                          <VisualIcon name={m.icono || m.tipo || 'tractor'} size="sm" />
                         </div>
                         <div className="min-w-0 flex-1">
-                          <h4 className="text-base font-bold text-slate-900 truncate">{m.nombre}</h4>
-                          <p className="text-xs text-slate-500 truncate mt-0.5">
+                          <h4 className="text-sm font-bold text-slate-900 leading-snug break-words line-clamp-2">
+                            {m.nombre}
+                          </h4>
+                          <p className="text-[11px] text-slate-500 truncate">
                             {m.tipo || 'Tractor'}
                           </p>
                         </div>
                       </div>
                       <span
-                        className={`px-2.5 py-0.5 text-xs font-semibold rounded-full shrink-0 ${
+                        className={`px-2 py-0.5 text-[10px] font-bold rounded-full shrink-0 ${
                           m.estado === 'operativo'
                             ? 'bg-emerald-100 text-emerald-800'
                             : m.estado === 'mantenimiento'
@@ -1786,35 +1836,34 @@ export const MachineryView: React.FC<Props> = ({
                       </span>
                     </div>
 
-                    <div className="grid grid-cols-3 gap-2 text-center">
-                      <div className="bg-white p-2.5 rounded-xl border border-slate-200/70">
-                        <span className="text-[11px] text-slate-500 block font-medium">Horas</span>
-                        <p className="text-sm font-bold text-slate-900 font-mono mt-0.5">{hrs.toFixed(1)} h</p>
+                    {/* Estadísticas en tres columnas compactas */}
+                    <div className="grid grid-cols-3 divide-x divide-slate-200/80 bg-slate-50/80 py-2 rounded-xl border border-slate-100 text-center">
+                      <div className="px-1">
+                        <span className="text-[10px] text-slate-400 font-semibold block uppercase">Horas</span>
+                        <span className="text-xs sm:text-sm font-bold text-slate-900 font-mono">{hrs.toFixed(1)} h</span>
                       </div>
-                      <div className="bg-white p-2.5 rounded-xl border border-slate-200/70">
-                        <span className="text-[11px] text-slate-500 block font-medium">Hectáreas</span>
-                        <p className="text-sm font-bold text-slate-900 font-mono mt-0.5">{ha.toFixed(1)} ha</p>
+                      <div className="px-1">
+                        <span className="text-[10px] text-slate-400 font-semibold block uppercase">Hectáreas</span>
+                        <span className="text-xs sm:text-sm font-bold text-slate-900 font-mono">{ha.toFixed(1)} ha</span>
                       </div>
-                      <div className="bg-white p-2.5 rounded-xl border border-slate-200/70">
-                        <span className="text-[11px] text-slate-500 block font-medium">Trabajos</span>
-                        <p className="text-sm font-bold text-slate-900 font-mono mt-0.5">{machineJobs.length}</p>
+                      <div className="px-1">
+                        <span className="text-[10px] text-slate-400 font-semibold block uppercase">Trabajos</span>
+                        <span className="text-xs sm:text-sm font-bold text-slate-900 font-mono">{machineJobs.length}</span>
                       </div>
                     </div>
 
-                    {/* Acordeón de Trabajos y Tarifas */}
-                    <div className="pt-1 border-t border-slate-200/60">
+                    {/* Fila delgada para Tarifas y trabajos */}
+                    <div className="pt-0.5">
                       <button
                         type="button"
                         onClick={() => setExpandedMachineId(isExpanded ? null : m.id)}
-                        className="w-full flex items-center justify-between p-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-800 text-xs font-bold transition cursor-pointer min-h-[40px]"
+                        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200/80 text-slate-700 text-xs font-semibold transition cursor-pointer min-h-[34px]"
                       >
-                        <span className="flex items-center gap-1.5">
-                          <span>Tarifas y Trabajos ({machineJobTypesList.length})</span>
-                        </span>
+                        <span>Tarifas y trabajos ({machineJobTypesList.length})</span>
                         {isExpanded ? (
-                          <ChevronUp className="h-4 w-4 text-slate-500" />
+                          <ChevronUp className="h-3.5 w-3.5 text-slate-400" />
                         ) : (
-                          <ChevronDown className="h-4 w-4 text-slate-500" />
+                          <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
                         )}
                       </button>
 
