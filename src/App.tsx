@@ -217,8 +217,13 @@ export default function App() {
     },
   };
 
+  const [isInFinanzas, setIsInFinanzas] = useState(false);
+
   return (
     <div className="min-h-screen bg-[#F2F2F7] text-slate-900 flex flex-col font-sans selection:bg-emerald-100 selection:text-emerald-900">
+      {/* PWA Update Banner (Top Full-Width) */}
+      <PWAUpdateNotification />
+
       {/* Top Sticky Header Navbar */}
       <Navbar
         title={viewTitles[currentView]?.title || viewTitles.inicio.title}
@@ -226,7 +231,7 @@ export default function App() {
         activeCampaign={activeCampaign}
         currency={currency}
         onCurrencyToggle={toggleCurrency}
-        showCurrencyToggle={currentView === 'administracion'}
+        showCurrencyToggle={currentView === 'administracion' && !isInFinanzas}
         exchangeRate={exchangeRate}
         onRefresh={() => loadData(false)}
         isRefreshing={isRefreshing}
@@ -298,6 +303,7 @@ export default function App() {
               currency={currency}
               onRefreshData={() => loadData(false)}
               onRevokeAuthorization={() => handleNavigate('inicio')}
+              onFinanzasModeChange={setIsInFinanzas}
             />
           )}
         </main>
@@ -309,9 +315,6 @@ export default function App() {
         onNavigate={handleNavigate}
         session={session}
       />
-
-      {/* PWA Update Banner */}
-      <PWAUpdateNotification />
 
       {/* Apps Script Companion Code Modal */}
       <AppsScriptModal

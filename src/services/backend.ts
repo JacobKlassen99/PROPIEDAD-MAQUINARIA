@@ -1633,29 +1633,34 @@ export async function updateExpense(id: string, expense: Partial<Expense>): Prom
   const cantNum = expense.cantidad !== undefined ? (parseDecimalNumber(expense.cantidad) || 1) : undefined;
   const precioNum = expense.precio !== undefined ? parseDecimalNumber(expense.precio) : undefined;
   const gasMoneda = expense.moneda ? (expense.moneda === 'USD' ? 'USD' : 'BS') : undefined;
-  const tcNum = expense.tipoCambio !== undefined ? resolveEffectiveExchangeRate(expense.tipoCambio) : undefined;
+  const tcNum = expense.tipoCambio !== undefined ? parseDecimalNumber(expense.tipoCambio) : undefined;
   const totalNum =
     expense.total !== undefined
       ? parseDecimalNumber(expense.total)
       : (cantNum !== undefined && precioNum !== undefined ? cantNum * precioNum : undefined);
 
+  const gasModulo = expense.modulo
+    ? (expense.modulo === 'propiedad' ? 'PROPIEDAD' : 'MAQUINARIAS')
+    : undefined;
+
   const payload: Record<string, any> = {
     id,
     movimientoId: id,
-    modulo: 'PROPIEDAD',
     clase: 'GASTO',
     tipo: 'gasto',
+    ...(gasModulo ? { modulo: gasModulo } : {}),
     ...(expense.fecha ? { fecha: expense.fecha } : {}),
     ...(expense.campanaId ? { campanaId: expense.campanaId } : {}),
     ...(expense.itemGasto ? { descripcion: expense.itemGasto, item: expense.itemGasto, itemGasto: expense.itemGasto } : {}),
     ...(cantNum !== undefined ? { cantidad: cantNum } : {}),
-    ...(expense.unidad ? { unidad: expense.unidad } : {}),
+    ...(expense.unidad !== undefined ? { unidad: expense.unidad } : {}),
     ...(precioNum !== undefined ? { precioUnitario: precioNum, precio: precioNum } : {}),
     ...(totalNum !== undefined ? { importe: totalNum, total: totalNum } : {}),
     ...(gasMoneda ? { moneda: gasMoneda } : {}),
-    ...(tcNum !== undefined ? { tc: tcNum, tipoCambio: tcNum } : {}),
+    ...(tcNum !== undefined && tcNum > 0 ? { tc: tcNum, tipoCambio: tcNum } : {}),
     ...(expense.observacion !== undefined ? { observaciones: expense.observacion, observacion: expense.observacion } : {}),
-    ...(expense.loteId ? { loteId: expense.loteId } : {}),
+    ...(expense.loteId !== undefined ? { loteId: expense.loteId } : {}),
+    ...(expense.maquinariaId !== undefined ? { maquinaId: expense.maquinariaId, maquinariaId: expense.maquinariaId } : {}),
   };
 
   let res: any;
@@ -1675,7 +1680,7 @@ export async function updateExpense(id: string, expense: Partial<Expense>): Prom
 
   clearMemoryCache();
   return {
-    ...expense as any,
+    ...(expense as any),
     id,
     total: totalNum ?? (expense.total || 0),
   };

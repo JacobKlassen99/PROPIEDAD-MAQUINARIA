@@ -19,6 +19,7 @@ import {
   Wrench,
   ArrowLeft,
   BarChart3,
+  TrendingUp,
   Tag,
   Lock,
   Search,
@@ -100,6 +101,7 @@ interface Props {
   currency: Currency;
   onRefreshData: () => void | Promise<void>;
   onRevokeAuthorization?: () => void;
+  onFinanzasModeChange?: (inFinanzas: boolean) => void;
 }
 
 type AdminScreen =
@@ -253,6 +255,7 @@ export const AdminView: React.FC<Props> = ({
   currency,
   onRefreshData,
   onRevokeAuthorization,
+  onFinanzasModeChange,
 }) => {
   const [isAuthorized, setIsAuthorized] = useState<boolean>(() => hasAdminAuthorization());
   const [adminPasswordInput, setAdminPasswordInput] = useState('');
@@ -358,6 +361,17 @@ export const AdminView: React.FC<Props> = ({
 
   const [screen, setScreenState] = useState<AdminScreen>('main');
   const [prevScreen, setPrevScreen] = useState<AdminScreen>('settings');
+
+  useEffect(() => {
+    if (onFinanzasModeChange) {
+      onFinanzasModeChange(screen === 'reports');
+    }
+    return () => {
+      if (onFinanzasModeChange) {
+        onFinanzasModeChange(false);
+      }
+    };
+  }, [screen, onFinanzasModeChange]);
 
   const navigateTo = (target: AdminScreen) => {
     setPrevScreen(screen);
@@ -1647,24 +1661,10 @@ export const AdminView: React.FC<Props> = ({
     );
   }
 
-  // RENDER LEVEL 3: Financial Reports Screen
+  // RENDER LEVEL 3: Financial Reports Screen (FINANZAS)
   if (screen === 'reports') {
-    const backLabel =
-      prevScreen === 'main' ? 'Volver a Administración' : 'Volver a Configuración';
-
     return (
       <div className="space-y-4 w-full">
-        <div className="flex items-center gap-3 pb-3 border-b border-stone-200">
-          <button
-            type="button"
-            onClick={handleGoBack}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-stone-300 text-xs font-bold text-stone-700 hover:bg-stone-50 transition cursor-pointer shrink-0 min-h-[38px]"
-          >
-            <ArrowLeft className="h-4 w-4 text-emerald-700" />
-            <span>{backLabel}</span>
-          </button>
-        </div>
-
         <ReportsView
           campaigns={campaigns}
           activeCampaign={activeCampaign}
@@ -1676,6 +1676,7 @@ export const AdminView: React.FC<Props> = ({
           incomes={incomes}
           currency={currency}
           exchangeRate={exchangeRate}
+          onBack={handleGoBack}
         />
         {renderReauthModal()}
       </div>
@@ -1752,22 +1753,22 @@ export const AdminView: React.FC<Props> = ({
             <ChevronRight className="h-5 w-5 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
           </button>
 
-          {/* Option 2: Reportes financieros */}
+          {/* Option 2: FINANZAS */}
           <button
             type="button"
             onClick={() => navigateTo('reports')}
             className="w-full flex items-center justify-between p-4 sm:p-5 hover:bg-stone-50 transition cursor-pointer text-left group min-h-[64px]"
           >
             <div className="flex items-center gap-3.5 min-w-0">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-stone-100 text-stone-800 group-hover:bg-emerald-700 group-hover:text-white transition">
-                <BarChart3 className="h-5 w-5" />
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-800 group-hover:bg-emerald-700 group-hover:text-white transition">
+                <TrendingUp className="h-5 w-5" />
               </div>
               <div className="min-w-0">
                 <h3 className="text-sm font-bold text-stone-900 group-hover:text-emerald-800 transition">
-                  Reportes financieros
+                  FINANZAS
                 </h3>
                 <p className="text-xs text-stone-500 truncate">
-                  Resultados, ingresos y gastos
+                  Balances y resultados económicos
                 </p>
               </div>
             </div>

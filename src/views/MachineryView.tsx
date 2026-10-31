@@ -41,6 +41,7 @@ import {
   updateMachineryJob,
   deleteMachineryJob,
   createExpense,
+  updateExpense,
   deleteExpense,
   formatDateDDMMAAAA,
   isTechnicalId,
@@ -145,6 +146,17 @@ export const MachineryView: React.FC<Props> = ({
   // Deleting Job State (iOS Confirmation Modal)
   const [jobToDelete, setJobToDelete] = useState<MachineryJob | null>(null);
   const [deletingJob, setDeletingJob] = useState(false);
+
+  // Editing Expense State (iOS Modal)
+  const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
+  const [editExpFecha, setEditExpFecha] = useState('');
+  const [editExpMachineId, setEditExpMachineId] = useState('');
+  const [editExpItemGasto, setEditExpItemGasto] = useState('');
+  const [editExpCantidad, setEditExpCantidad] = useState<number | ''>('');
+  const [editExpUnidad, setEditExpUnidad] = useState('');
+  const [editExpPrecio, setEditExpPrecio] = useState<number | ''>('');
+  const [editExpMoneda, setEditExpMoneda] = useState<Currency>('BOB');
+  const [editExpObservacion, setEditExpObservacion] = useState('');
 
   const getAvailableJobsForMachine = (mId: string): MachineJobType[] => {
     if (!mId) return [];
@@ -452,6 +464,59 @@ export const MachineryView: React.FC<Props> = ({
       onRefreshData();
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar');
+    }
+  };
+
+  const handleOpenEditExpense = (exp: Expense) => {
+    setEditingExpense(exp);
+    setEditExpFecha(exp.fecha ? exp.fecha.slice(0, 10) : new Date().toISOString().slice(0, 10));
+    setEditExpMachineId(exp.maquinariaId || '');
+    setEditExpItemGasto(exp.itemGasto || 'Combustible');
+    setEditExpCantidad(exp.cantidad ?? 1);
+    setEditExpUnidad(exp.unidad || 'litros');
+    setEditExpPrecio(exp.precio ?? '');
+    setEditExpMoneda((exp.moneda as Currency) || 'BOB');
+    setEditExpObservacion(exp.observacion || '');
+  };
+
+  const handleSaveEditExpense = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingExpense) return;
+    setErrorMsg(null);
+    setSuccessMsg(null);
+
+    if (!editExpPrecio || Number(editExpPrecio) <= 0) {
+      setErrorMsg('Ingresa un precio unitario válido.');
+      return;
+    }
+
+    const machineObj = machines.find((m) => m.id === editExpMachineId);
+    const cantNum = Number(editExpCantidad) || 1;
+    const precioNum = Number(editExpPrecio);
+    const totalNum = cantNum * precioNum;
+
+    setSaving(true);
+    try {
+      await updateExpense(editingExpense.id, {
+        fecha: editExpFecha,
+        modulo: 'maquinarias',
+        maquinariaId: editExpMachineId || undefined,
+        maquinariaNombre: machineObj?.nombre || undefined,
+        itemGasto: editExpItemGasto,
+        cantidad: cantNum,
+        unidad: editExpUnidad,
+        precio: precioNum,
+        moneda: editExpMoneda,
+        total: totalNum,
+        observacion: editExpObservacion.trim(),
+      });
+      setSuccessMsg('Gasto de maquinaria actualizado exitosamente.');
+      setEditingExpense(null);
+      onRefreshData();
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Error al actualizar el gasto');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -1406,6 +1471,14 @@ export const MachineryView: React.FC<Props> = ({
                     </span>
                     <button
                       type="button"
+                      onClick={() => handleOpenEditExpense(exp)}
+                      className="p-1.5 text-stone-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition cursor-pointer"
+                      title="Editar gasto"
+                    >
+                      <Edit3 className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => handleDeleteExp(exp.id)}
                       className="p-1.5 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
                       title="Eliminar gasto"
@@ -1761,14 +1834,24 @@ export const MachineryView: React.FC<Props> = ({
                             </>
                           )}
                           {m.kind === 'gasto' && m.rawExpense && (
-                            <button
-                              type="button"
-                              onClick={() => setExpenseToDelete(m.rawExpense!)}
-                              className="w-full py-2 px-3 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer border border-rose-200 min-h-[38px]"
-                            >
-                              <Trash2 className="h-3.5 w-3.5 text-rose-600" />
-                              <span>Eliminar Gasto</span>
-                            </button>
+                            <div className="flex items-center gap-2 w-full">
+                              <button
+                                type="button"
+                                onClick={() => handleOpenEditExpense(m.rawExpense!)}
+                                className="flex-1 py-2 px-3 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer border border-blue-200 min-h-[38px]"
+                              >
+                                <Edit3 className="h-3.5 w-3.5 text-blue-700" />
+                                <span>Editar</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setExpenseToDelete(m.rawExpense!)}
+                                className="flex-1 py-2 px-3 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer border border-rose-200 min-h-[38px]"
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                                <span>Eliminar</span>
+                              </button>
+                            </div>
                           )}
                         </div>
                       </div>
@@ -2308,6 +2391,186 @@ export const MachineryView: React.FC<Props> = ({
                 {deletingExpense ? 'Eliminando...' : 'Eliminar Gasto'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* MODAL: EDITAR GASTO DE MAQUINARIA                             */}
+      {/* ============================================================ */}
+      {editingExpense && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs overflow-y-auto">
+          <div className="bg-white w-full max-w-lg rounded-3xl shadow-xl border border-slate-200 p-5 sm:p-6 space-y-4 my-8 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-blue-50 border border-blue-100">
+                  <Edit3 className="h-5 w-5 text-blue-700" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    Editar Gasto de Maquinaria
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Modificar datos del registro en Google Sheets
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingExpense(null)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditExpense} className="space-y-4">
+              {/* Fecha */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Fecha
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={editExpFecha}
+                  onChange={(e) => setEditExpFecha(e.target.value)}
+                  className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-600 focus:outline-none min-h-[44px]"
+                />
+              </div>
+
+              {/* Maquinaria */}
+              <VisualMachinePicker
+                label="Maquinaria / Equipo"
+                machines={machines}
+                selectedMachineId={editExpMachineId}
+                onSelectMachine={(m) => setEditExpMachineId(m.id)}
+              />
+
+              {/* Concepto / Ítem de gasto */}
+              <VisualExpenseItemPicker
+                label="Concepto de Gasto"
+                items={machineryExpenseItems}
+                selectedItemName={editExpItemGasto}
+                onSelectItem={(item) => {
+                  setEditExpItemGasto(item.nombre);
+                  if (item.unidad) setEditExpUnidad(item.unidad);
+                }}
+              />
+
+              {/* Cantidad y Unidad */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Cantidad
+                  </label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    required
+                    min="0.01"
+                    value={editExpCantidad}
+                    onChange={(e) => setEditExpCantidad(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-600 focus:outline-none font-bold min-h-[44px]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Unidad
+                  </label>
+                  <input
+                    type="text"
+                    value={editExpUnidad}
+                    onChange={(e) => setEditExpUnidad(e.target.value)}
+                    placeholder="litros, repuestos, etc."
+                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-600 focus:outline-none min-h-[44px]"
+                  />
+                </div>
+              </div>
+
+              {/* Precio y Moneda */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Precio Unitario
+                  </label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    required
+                    min="0.01"
+                    value={editExpPrecio}
+                    onChange={(e) => setEditExpPrecio(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-600 focus:outline-none font-bold min-h-[44px]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Moneda
+                  </label>
+                  <select
+                    value={editExpMoneda}
+                    onChange={(e) => setEditExpMoneda(e.target.value as Currency)}
+                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-600 focus:outline-none min-h-[44px]"
+                  >
+                    <option value="BOB">BOB (Bs)</option>
+                    <option value="USD">USD ($)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Total Calculado */}
+              <div className="bg-rose-50/80 p-3 rounded-xl border border-rose-200/70 flex items-center justify-between">
+                <div>
+                  <span className="text-[11px] text-rose-800 block uppercase font-bold">
+                    Total Gasto
+                  </span>
+                  <span className="text-[10px] text-slate-500">
+                    {editExpCantidad || 1} &times; {editExpMoneda} {editExpPrecio || 0}
+                  </span>
+                </div>
+                <span className="text-base font-black text-rose-950 font-mono">
+                  {formatMoney(
+                    (typeof editExpCantidad === 'number' ? editExpCantidad : 1) *
+                      (typeof editExpPrecio === 'number' ? editExpPrecio : 0),
+                    editExpMoneda
+                  )}
+                </span>
+              </div>
+
+              {/* Observaciones */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Observaciones
+                </label>
+                <textarea
+                  rows={2}
+                  value={editExpObservacion}
+                  onChange={(e) => setEditExpObservacion(e.target.value)}
+                  className="w-full text-sm p-3 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-600 focus:outline-none"
+                />
+              </div>
+
+              {/* Botones */}
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingExpense(null)}
+                  className="flex-1 min-h-[48px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm transition cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="flex-1 min-h-[48px] rounded-xl bg-blue-700 hover:bg-blue-800 active:bg-blue-900 text-white font-bold text-sm transition disabled:opacity-50 cursor-pointer"
+                >
+                  {saving ? 'Guardando...' : 'Guardar Cambios'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

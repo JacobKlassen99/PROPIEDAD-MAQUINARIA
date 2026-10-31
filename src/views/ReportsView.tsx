@@ -1,9 +1,8 @@
 import React, { useState, useMemo } from 'react';
+import * as XLSX from 'xlsx';
 import {
-  BarChart3,
-  Download,
+  TrendingUp,
   Printer,
-  DollarSign,
   Tractor,
   Trees,
   Layers,
@@ -12,6 +11,12 @@ import {
   ArrowLeft,
   Info,
   AlertCircle,
+  Search,
+  CheckCircle2,
+  LandPlot,
+  X,
+  FileSpreadsheet,
+  BookOpen,
 } from 'lucide-react';
 import {
   Campaign,
@@ -24,6 +29,8 @@ import {
   Currency,
   ExchangeRateConfig,
 } from '../types';
+import { VisualIcon } from '../components/VisualIcon';
+import { getIconDefinition } from '../services/iconCatalog';
 
 interface Props {
   campaigns?: Campaign[];
@@ -36,18 +43,59 @@ interface Props {
   incomes?: Income[];
   currency?: Currency;
   exchangeRate?: ExchangeRateConfig;
+  onBack?: () => void;
 }
 
 type ReportScreen =
   | 'menu'
-  | 'resumen'
+  | 'balance_general'
   | 'maquinarias'
-  | 'propiedad'
+  | 'propiedad_menu'
+  | 'propiedad_balance'
   | 'lotes'
-  | 'campanas';
+  | 'lote_detail'
+  | 'campanas'
+  | 'campana_detail'
+  | 'libro_diario';
+
+export interface DetailRecord {
+  id: string;
+  fecha: string;
+  concepto: string;
+  entidad?: string; // Lote, cliente o máquina
+  maquinaImplemento?: string;
+  cantidad?: number;
+  unidad?: string;
+  tarifa?: number;
+  monto: number;
+  icono?: string;
+}
+
+export interface LibroDiarioState {
+  title: string;
+  subtitle?: string;
+  totalAmount: number;
+  records: DetailRecord[];
+  returnScreen: ReportScreen;
+}
+
+interface TreeNode {
+  id: string;
+  label: string;
+  sublabel?: string;
+  type: 'group' | 'subgroup' | 'item' | 'detail';
+  amount: number;
+  isIncome?: boolean;
+  isExpense?: boolean;
+  isResult?: boolean;
+  isInformative?: boolean;
+  icon?: string;
+  records?: DetailRecord[];
+  children?: TreeNode[];
+}
 
 // ============================================================================
-// REACT ERROR BOUNDARY TO PREVENT WHITE SCREENS
+// REACT ERROR BOUNDARY
 // ============================================================================
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -68,31 +116,31 @@ export class ReportsErrorBoundary extends React.Component<
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    console.error('[ReportsErrorBoundary Error Caught]:', error, errorInfo);
+    console.error('[Finanzas ErrorBoundary caught an error]:', error, errorInfo);
   }
 
   render() {
     if (this.state.hasError) {
       return (
-        <div className="p-6 rounded-2xl bg-red-50 border border-red-200 text-red-900 space-y-4 max-w-xl mx-auto my-6 shadow-xs">
-          <div className="flex items-start gap-3">
-            <AlertCircle className="h-6 w-6 text-red-600 shrink-0 mt-0.5" />
-            <div>
-              <h3 className="text-base font-bold text-red-950">
-                Ocurrió un inconveniente al cargar el reporte
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-center space-y-3 max-w-xl mx-auto my-6 shadow-xs">
+          <div className="flex items-center justify-center gap-3">
+            <AlertCircle className="h-6 w-6 text-red-600 shrink-0" />
+            <div className="text-left">
+              <h3 className="text-sm font-bold text-red-950">
+                Ocurrió un inconveniente al cargar Finanzas
               </h3>
-              <p className="text-xs text-red-800 mt-1 leading-relaxed">
+              <p className="text-xs text-red-800 mt-0.5 leading-relaxed">
                 {this.state.error?.message ||
-                  'No se pudo presentar la información de reportes correctamente.'}
+                  'No se pudo presentar la información financiera correctamente.'}
               </p>
             </div>
           </div>
           <button
             type="button"
             onClick={() => this.setState({ hasError: false, error: null })}
-            className="px-4 py-2.5 bg-red-700 hover:bg-red-800 text-white font-bold text-xs rounded-xl transition cursor-pointer min-h-[40px]"
+            className="px-3 py-1.5 bg-red-700 hover:bg-red-800 text-white font-bold text-xs rounded-lg transition cursor-pointer"
           >
-            Reintentar vista de reportes
+            Reintentar vista de finanzas
           </button>
         </div>
       );
@@ -102,9 +150,9 @@ export class ReportsErrorBoundary extends React.Component<
 }
 
 // ============================================================================
-// MAIN REPORTS COMPONENT
+// MAIN COMPONENT: REPORTS / FINANZAS (COMPACT EXCEL + SEPARATE LIBRO DIARIO)
 // ============================================================================
-const ReportsViewInner: React.FC<Props> = ({
+const FinanzasViewInner: React.FC<Props> = ({
   campaigns = [],
   activeCampaign = null,
   machines = [],
@@ -113,10 +161,11 @@ const ReportsViewInner: React.FC<Props> = ({
   jobs = [],
   expenses = [],
   incomes = [],
-  currency: activeCurrency = 'BOB',
+  currency: initialCurrency = 'BOB',
   exchangeRate,
+  onBack,
 }) => {
-  // Defensive Normalization of Props (Guarantees Arrays even if caller passed null)
+  // Defensive array normalization
   const safeCampaigns = useMemo(
     () => (Array.isArray(campaigns) ? campaigns.filter(Boolean) : []),
     [campaigns]
@@ -151,60 +200,45 @@ const ReportsViewInner: React.FC<Props> = ({
 
   // Navigation State
   const [currentScreen, setCurrentScreen] = useState<ReportScreen>('menu');
-  const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null);
   const [selectedLotId, setSelectedLotId] = useState<string | null>(null);
   const [selectedCampaignDetailId, setSelectedCampaignDetailId] = useState<string | null>(null);
 
-  // --------------------------------------------------------------------------
-  // Gestiones Extraction & Selection
-  // --------------------------------------------------------------------------
-  const availableGestiones = useMemo(() => {
-    const gestionSet = new Set<string>();
+  // Libro Diario / Detalle Separate Screen State
+  const [libroDiarioData, setLibroDiarioData] = useState<LibroDiarioState | null>(null);
 
-    safeCampaigns.forEach((c) => {
-      if (!c) return;
-      const nombreStr = String(c.nombre ?? '');
-      const match = nombreStr.match(/\b(20\d{2})\b/);
-      if (match) {
-        gestionSet.add(match[1]);
-      } else if (c.fechaInicio) {
-        const year = String(c.fechaInicio).slice(0, 4);
-        if (year && year.startsWith('20')) gestionSet.add(year);
+  // Selected Campaign in Finanzas
+  const defaultCampaignId = useMemo(() => {
+    if (activeCampaign?.id) return String(activeCampaign.id);
+    const active = safeCampaigns.find((c) => c.activa);
+    if (active?.id) return String(active.id);
+    if (safeCampaigns[0]?.id) return String(safeCampaigns[0].id);
+    return 'default';
+  }, [activeCampaign, safeCampaigns]);
+
+  const [selectedCampaignId, setSelectedCampaignId] = useState<string>(defaultCampaignId);
+  const [showCampaignDropdown, setShowCampaignDropdown] = useState(false);
+
+  // Currency switcher state inside Finanzas
+  const [activeCurrency, setActiveCurrency] = useState<Currency>(initialCurrency || 'BOB');
+
+  // Lot search term
+  const [lotSearchTerm, setLotSearchTerm] = useState('');
+
+  // Selected Campaign Object
+  const currentCampaign = useMemo(() => {
+    return (
+      safeCampaigns.find((c) => String(c.id) === String(selectedCampaignId)) ||
+      safeCampaigns.find((c) => c.activa) ||
+      safeCampaigns[0] || {
+        id: 'default',
+        nombre: 'Campaña General',
+        activa: true,
+        estado: 'activa',
       }
-    });
+    );
+  }, [safeCampaigns, selectedCampaignId]);
 
-    [...safeJobs, ...safeExpenses, ...safeIncomes].forEach((item) => {
-      if (item && item.fecha) {
-        const year = String(item.fecha).slice(0, 4);
-        if (year && year.startsWith('20')) gestionSet.add(year);
-      }
-    });
-
-    if (gestionSet.size === 0) {
-      gestionSet.add('2026');
-    }
-
-    return Array.from(gestionSet).sort((a, b) => b.localeCompare(a));
-  }, [safeCampaigns, safeJobs, safeExpenses, safeIncomes]);
-
-  const defaultActiveGestion = useMemo(() => {
-    if (activeCampaign) {
-      const activeNombreStr = String(activeCampaign.nombre ?? '');
-      const match = activeNombreStr.match(/\b(20\d{2})\b/);
-      if (match) return match[1];
-      if (activeCampaign.fechaInicio) {
-        const year = String(activeCampaign.fechaInicio).slice(0, 4);
-        if (year && year.startsWith('20')) return year;
-      }
-    }
-    return availableGestiones[0] || '2026';
-  }, [activeCampaign, availableGestiones]);
-
-  const [selectedGestion, setSelectedGestion] = useState<string>(defaultActiveGestion);
-
-  // --------------------------------------------------------------------------
-  // Currency Conversion Helpers (Strictly using shared activeCurrency)
-  // --------------------------------------------------------------------------
+  // Currency conversion helper
   const toViewCurrency = (
     amount: number | undefined | null,
     itemMoneda: Currency | string = 'BOB',
@@ -244,1903 +278,2697 @@ const ReportsViewInner: React.FC<Props> = ({
     })}`;
   };
 
-  const formatOriginal = (amount: number | undefined | null, itemMoneda: Currency | string = 'BOB') => {
-    const symbol = String(itemMoneda || 'BOB')
-      .toUpperCase()
-      .includes('USD')
-      ? 'USD'
-      : 'Bs';
-    const num = typeof amount === 'number' && !isNaN(amount) ? amount : 0;
-    return `${symbol} ${num.toLocaleString('es-BO', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })}`;
+  // Helper getters
+  const getJobMachineId = (j: MachineryJob): string => {
+    return j.maquinariaId || (j as any).maquinaId || '';
   };
 
-  // --------------------------------------------------------------------------
-  // Dataset Filtered Strictly by Gestión
-  // --------------------------------------------------------------------------
-  const isCampaignInGestion = (c: Campaign | null | undefined, gestion: string) => {
-    if (!c) return false;
-    const nombreStr = String(c.nombre ?? '');
-    const fechaInicioStr = String(c.fechaInicio ?? '');
-    const fechaFinStr = String(c.fechaFin ?? '');
-
-    if (nombreStr.includes(gestion)) return true;
-    if (fechaInicioStr.startsWith(gestion)) return true;
-    if (fechaFinStr.startsWith(gestion)) return true;
-    return false;
+  const getJobName = (j: MachineryJob): string => {
+    return j.trabajoNombre || (j as any).trabajo || 'Labor de maquinaria';
   };
 
-  const isItemInGestion = (
-    item: { fecha?: string; campanaId?: string } | null | undefined,
-    gestion: string
+  const getJobIcon = (j: MachineryJob): string | undefined => {
+    return j.trabajoIcono || j.icono || j.maquinariaIcono;
+  };
+
+  const getExpenseMachineId = (e: Expense): string => {
+    return e.maquinariaId || (e as any).maquinaId || '';
+  };
+
+  const getExpenseRubro = (e: Expense): string => {
+    return e.itemGasto || (e as any).rubro || (e as any).categoria || 'Gastos operativos';
+  };
+
+  const getExpenseDescription = (e: Expense): string => {
+    return e.observacion || e.itemGasto || (e as any).concepto || (e as any).descripcion || 'Gasto registrado';
+  };
+
+  const getExpenseIcon = (e: Expense): string | undefined => {
+    return e.itemIcono || e.icono;
+  };
+
+  const getIncomeConcept = (i: Income): string => {
+    return i.concepto || (i as any).rubro || 'Ingreso registrado';
+  };
+
+  const getIncomeClient = (i: Income): string => {
+    return (i as any).cliente || i.observacion || '';
+  };
+
+  const getIncomeIcon = (i: Income): string | undefined => {
+    return i.icono;
+  };
+
+  const getLotSurface = (l: Lot | undefined): number => {
+    if (!l) return 0;
+    return typeof l.superficieHectareas === 'number'
+      ? l.superficieHectareas
+      : typeof l.superficie === 'number'
+      ? l.superficie
+      : 0;
+  };
+
+  const getLotCrop = (l: Lot | undefined): string => {
+    if (!l) return '';
+    return l.cultivoActual || (l as any).cultivo || '';
+  };
+
+  const getMachineIcon = (mId: string | undefined): string | undefined => {
+    if (!mId) return undefined;
+    const found = safeMachines.find((m) => String(m.id) === String(mId));
+    return found?.icono || found?.tipo || 'tractor';
+  };
+
+  // Match item to campaign
+  const matchesCampaign = (
+    item: { campanaId?: string; campana?: string; campanaNombre?: string; fecha?: string } | null | undefined,
+    targetCamp: Campaign | { id?: string; nombre?: string; fechaInicio?: string; fechaFin?: string }
   ) => {
-    if (!item) return false;
-    if (item.campanaId) {
-      const camp = safeCampaigns.find((c) => c && String(c.id) === String(item.campanaId));
-      if (camp && isCampaignInGestion(camp, gestion)) return true;
+    if (!item || !targetCamp) return false;
+    if (item.campanaId && targetCamp.id && String(item.campanaId) === String(targetCamp.id)) {
+      return true;
     }
-    const fechaStr = String(item.fecha ?? '');
-    if (fechaStr.startsWith(gestion)) return true;
+    const targetName = String(targetCamp.nombre ?? '').trim().toLowerCase();
+    const itemCampName = String(item.campana || item.campanaNombre || '').trim().toLowerCase();
+    if (itemCampName && targetName && itemCampName === targetName) {
+      return true;
+    }
+    const yearMatch = targetName.match(/\b(20\d{2})\b/);
+    if (yearMatch && item.fecha && String(item.fecha).startsWith(yearMatch[1])) {
+      return true;
+    }
+    if (item.fecha && targetCamp.fechaInicio && targetCamp.fechaFin) {
+      if (item.fecha >= targetCamp.fechaInicio && item.fecha <= targetCamp.fechaFin) {
+        return true;
+      }
+    }
     return false;
   };
 
-  const filteredJobs = useMemo(
-    () => safeJobs.filter((j) => isItemInGestion(j, selectedGestion)),
-    [safeJobs, selectedGestion, safeCampaigns]
+  // Datasets filtered by selected Campaign
+  const campaignJobs = useMemo(
+    () => safeJobs.filter((j) => matchesCampaign(j, currentCampaign)),
+    [safeJobs, currentCampaign]
+  );
+  const campaignExpenses = useMemo(
+    () => safeExpenses.filter((e) => matchesCampaign(e, currentCampaign)),
+    [safeExpenses, currentCampaign]
+  );
+  const campaignIncomes = useMemo(
+    () => safeIncomes.filter((i) => matchesCampaign(i, currentCampaign)),
+    [safeIncomes, currentCampaign]
   );
 
-  const filteredExpenses = useMemo(
-    () => safeExpenses.filter((e) => isItemInGestion(e, selectedGestion)),
-    [safeExpenses, selectedGestion, safeCampaigns]
-  );
+  // Helper to identify internal machinery job expenses that should be excluded from direct expenses
+  const isInternalMachineryJobExpense = (e: Expense): boolean => {
+    if (!e) return false;
+    if (e.esTrabajoPropio) return true;
+    if (e.trabajoId) return true;
+    const item = (e.itemGasto || (e as any).rubro || (e as any).concepto || '').trim();
+    const obs = (e.observacion || (e as any).descripcion || '').trim();
+    const pattern = /Servicio\s+Maquinaria\s+Propia|Trabajo\s+de\s+Maquinaria|Trabajo\s+en\s+Propiedad|Labores?\s+de\s+Maquinaria|Servicio\s+de\s+Maquinaria/i;
+    if (pattern.test(item) || pattern.test(obs)) return true;
+    return false;
+  };
 
-  const filteredIncomes = useMemo(
-    () => safeIncomes.filter((i) => isItemInGestion(i, selectedGestion)),
-    [safeIncomes, selectedGestion, safeCampaigns]
-  );
+  const getMachineName = (mId: string | undefined) => {
+    if (!mId) return 'Maquinaria general';
+    const found = safeMachines.find((m) => String(m.id) === String(mId));
+    return found ? found.nombre : `Máquina ${mId}`;
+  };
 
-  const gestionCampaigns = useMemo(
-    () => safeCampaigns.filter((c) => isCampaignInGestion(c, selectedGestion)),
-    [safeCampaigns, selectedGestion]
-  );
+  const getLotName = (lId: string | undefined) => {
+    if (!lId) return 'Lote general';
+    const found = safeLots.find((l) => String(l.id) === String(lId));
+    return found ? found.nombre : `Lote ${lId}`;
+  };
 
-  // --------------------------------------------------------------------------
-  // Aggregates
-  // --------------------------------------------------------------------------
-  const extJobIncomes = filteredJobs
-    .filter((j) => j && j.tipoTrabajo === 'tercero')
-    .reduce(
-      (sum, j) => sum + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
-      0
-    );
+  // Concept & Title Shortening Helper
+  const formatShortConceptName = (rawName: string | undefined): string => {
+    if (!rawName) return '';
+    let clean = rawName.trim();
+    clean = clean.replace(/^Servicio\s+Maquinaria\s+Propia\s*-\s*/i, '');
+    clean = clean.replace(/^Servicio\s+Maquinaria\s+Propia\s*/i, '');
+    clean = clean.replace(/^Servicio\s+a\s+terceros\s*-\s*/i, '');
+    clean = clean.replace(/^Servicio\s+a\s+terceros\s*/i, '');
+    clean = clean.replace(/^Trabajo\s+en\s+propiedad\s*-\s*/i, '');
+    clean = clean.replace(/^Trabajo\s+en\s+propiedad\s*/i, '');
+    clean = clean.replace(/^Trabajo\s+de\s+maquinaria\s*-\s*/i, '');
+    clean = clean.replace(/^Trabajo\s+de\s+maquinaria\s*/i, '');
+    clean = clean.replace(/^Labores\s+de\s+maquinaria\s*-\s*/i, '');
+    clean = clean.replace(/^Labores\s+de\s+maquinaria\s*/i, '');
 
-  const cropIncomes = filteredIncomes
-    .filter((i) => i && i.modulo === 'propiedad' && !i.esTrabajoPropio)
-    .reduce(
-      (sum, i) => sum + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
-      0
-    );
+    // Strip leading "con " or "con"
+    clean = clean.replace(/^con\s+/i, '');
 
-  const maqDirectExps = filteredExpenses
-    .filter((e) => e && e.modulo === 'maquinarias')
-    .reduce(
-      (sum, e) => sum + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
-      0
-    );
+    if (clean.includes('(') && clean.includes(')')) {
+      const withoutParens = clean.replace(/\s*\([^)]*\)/g, '').trim();
+      if (withoutParens.length > 0) clean = withoutParens;
+      else clean = clean.replace(/[()]/g, '').trim();
+    }
 
-  const propDirectExps = filteredExpenses
-    .filter((e) => e && e.modulo === 'propiedad' && !e.esTrabajoPropio)
-    .reduce(
-      (sum, e) => sum + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
-      0
-    );
+    if (clean.length > 0) {
+      clean = clean.charAt(0).toUpperCase() + clean.slice(1);
+    }
 
-  const intJobIncomes = filteredJobs
-    .filter((j) => j && j.tipoTrabajo === 'propiedad')
-    .reduce(
-      (sum, j) => sum + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
-      0
-    );
+    return clean || rawName;
+  };
 
-  const propMaqServiceExps = filteredExpenses
-    .filter((e) => e && e.modulo === 'propiedad' && e.esTrabajoPropio)
-    .reduce(
-      (sum, e) => sum + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
-      0
-    );
+  // Helper to determine if an implement name represents a real separate implement
+  const isRealImplement = (cleanImpName: string | undefined, cleanMachineName: string | undefined): boolean => {
+    if (!cleanImpName) return false;
+    const imp = cleanImpName.trim().toLowerCase();
+    const mac = (cleanMachineName || '').trim().toLowerCase();
 
-  const consolidatedIncomes = extJobIncomes + cropIncomes;
-  const consolidatedExpenses = maqDirectExps + propDirectExps;
-  const consolidatedProfit = consolidatedIncomes - consolidatedExpenses;
+    if (!imp) return false;
+    if (imp === mac) return false;
 
-  const totalHorasMaq = filteredJobs
-    .filter((j) => j && (j.unidad === 'hora' || (j.unidad as string) === 'h'))
-    .reduce((sum, j) => sum + (Number(j.cantidad) || 0), 0);
+    const genericPatterns = [
+      'labor de maquinaria',
+      'trabajo de maquinaria',
+      'labores de maquinaria',
+      'trabajos de maquinaria',
+      'labor',
+      'trabajo',
+      'maquinaria',
+      'sin implemento',
+      'servicio',
+      'servicio a terceros',
+      'trabajo en propiedad',
+      'servicio maquinaria propia',
+      'maquinaria general',
+    ];
 
-  const totalHectareasMaq = filteredJobs
-    .filter((j) => j && (j.unidad === 'hectarea' || (j.unidad as string) === 'ha'))
-    .reduce((sum, j) => sum + (Number(j.cantidad) || 0), 0);
+    if (genericPatterns.some((p) => imp === p || imp.startsWith('servicio maquinaria') || imp.startsWith('trabajo en propiedad'))) {
+      return false;
+    }
 
-  // --------------------------------------------------------------------------
-  // Print & Export Handlers
-  // --------------------------------------------------------------------------
+    return true;
+  };
+
+  // Helper to construct machine tree nodes without artificial implement children
+  const buildMachineTreeNodes = (
+    jobsList: MachineryJob[],
+    idPrefix: string,
+    entityLabelGetter: (j: MachineryJob) => string
+  ): TreeNode[] => {
+    const machineMap: Record<
+      string,
+      {
+        machineName: string;
+        machineTotal: number;
+        realImplements: Record<
+          string,
+          { impName: string; total: number; jobs: MachineryJob[]; icon?: string }
+        >;
+        directMachineJobs: MachineryJob[];
+      }
+    > = {};
+
+    jobsList.forEach((j) => {
+      const mId = getJobMachineId(j) || 'sin_maquina';
+      const mName = getMachineName(mId);
+      const cleanMName = formatShortConceptName(mName);
+      const rawImp = j.trabajoNombre || (j as any).trabajo || '';
+      const cleanImp = formatShortConceptName(rawImp);
+
+      if (!machineMap[mId]) {
+        machineMap[mId] = {
+          machineName: mName,
+          machineTotal: 0,
+          realImplements: {},
+          directMachineJobs: [],
+        };
+      }
+
+      const val = toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc);
+      machineMap[mId].machineTotal += val;
+
+      if (isRealImplement(cleanImp, cleanMName)) {
+        if (!machineMap[mId].realImplements[cleanImp]) {
+          machineMap[mId].realImplements[cleanImp] = {
+            impName: cleanImp,
+            total: 0,
+            jobs: [],
+            icon: getJobIcon(j) || getMachineIcon(mId),
+          };
+        }
+        machineMap[mId].realImplements[cleanImp].total += val;
+        machineMap[mId].realImplements[cleanImp].jobs.push(j);
+      } else {
+        machineMap[mId].directMachineJobs.push(j);
+      }
+    });
+
+    return Object.entries(machineMap).map(([mId, mData]) => {
+      const hasRealImplements = Object.keys(mData.realImplements).length > 0;
+
+      if (hasRealImplements) {
+        const impNodes: TreeNode[] = Object.entries(mData.realImplements).map(
+          ([impKey, impData]) => {
+            const records: DetailRecord[] = impData.jobs.map((j, idx) => ({
+              id: j.id || `${idPrefix}_imp_job_${idx}`,
+              fecha: j.fecha || '',
+              concepto: formatShortConceptName(j.trabajoNombre || impData.impName),
+              entidad: entityLabelGetter(j),
+              maquinaImplemento: mData.machineName,
+              cantidad: j.cantidad,
+              unidad: j.unidad,
+              tarifa: j.tarifa,
+              monto: toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+              icono: impData.icon,
+            }));
+
+            return {
+              id: `${idPrefix}_imp_${mId}_${impKey}`,
+              label: impData.impName,
+              icon: impData.icon,
+              type: 'item',
+              amount: impData.total,
+              records,
+            };
+          }
+        );
+
+        if (mData.directMachineJobs.length > 0) {
+          const directTotal = mData.directMachineJobs.reduce(
+            (acc, j) => acc + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+            0
+          );
+          const directRecords: DetailRecord[] = mData.directMachineJobs.map((j, idx) => ({
+            id: j.id || `${idPrefix}_dir_job_${idx}`,
+            fecha: j.fecha || '',
+            concepto: formatShortConceptName(j.trabajoNombre || mData.machineName),
+            entidad: entityLabelGetter(j),
+            maquinaImplemento: mData.machineName,
+            cantidad: j.cantidad,
+            unidad: j.unidad,
+            tarifa: j.tarifa,
+            monto: toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+            icono: getJobIcon(j) || getMachineIcon(mId),
+          }));
+
+          impNodes.push({
+            id: `${idPrefix}_direct_${mId}`,
+            label: mData.machineName,
+            icon: getMachineIcon(mId),
+            type: 'item',
+            amount: directTotal,
+            records: directRecords,
+          });
+        }
+
+        const allMachineRecords: DetailRecord[] = impNodes.flatMap((n) => n.records || []);
+
+        return {
+          id: `${idPrefix}_m_${mId}`,
+          label: mData.machineName,
+          icon: getMachineIcon(mId),
+          type: 'subgroup',
+          amount: mData.machineTotal,
+          children: impNodes,
+          records: allMachineRecords,
+        };
+      } else {
+        // NO REAL IMPLEMENTS: Single machine leaf node with no children
+        const directRecords: DetailRecord[] = mData.directMachineJobs.map((j, idx) => ({
+          id: j.id || `${idPrefix}_dir_job_${idx}`,
+          fecha: j.fecha || '',
+          concepto: formatShortConceptName(j.trabajoNombre || mData.machineName),
+          entidad: entityLabelGetter(j),
+          maquinaImplemento: mData.machineName,
+          cantidad: j.cantidad,
+          unidad: j.unidad,
+          tarifa: j.tarifa,
+          monto: toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+          icono: getJobIcon(j) || getMachineIcon(mId),
+        }));
+
+        return {
+          id: `${idPrefix}_m_${mId}`,
+          label: mData.machineName,
+          icon: getMachineIcon(mId),
+          type: 'item',
+          amount: mData.machineTotal,
+          records: directRecords,
+        };
+      }
+    });
+  };
+
+  // Helper to open the new full-screen Libro Diario view
+  const openLibroDiario = (rawTitle: string, subtitle: string | undefined, totalAmount: number, records: DetailRecord[]) => {
+    if (!records || records.length === 0) return;
+    const shortName = formatShortConceptName(rawTitle);
+    const displayTitle = shortName.toLowerCase().startsWith('detalle')
+      ? shortName
+      : `Detalle de ${shortName}`;
+
+    // Sort records chronologically (newest first)
+    const sortedRecords = [...records].sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+    setLibroDiarioData({
+      title: displayTitle,
+      subtitle,
+      totalAmount,
+      records: sortedRecords,
+      returnScreen: currentScreen,
+    });
+    setCurrentScreen('libro_diario');
+  };
+
+  // Recursively collect all records from a tree node
+  const collectNodeRecords = (node: TreeNode): DetailRecord[] => {
+    let result: DetailRecord[] = node.records ? [...node.records] : [];
+    if (node.children && node.children.length > 0) {
+      for (const child of node.children) {
+        result = result.concat(collectNodeRecords(child));
+      }
+    }
+    return result;
+  };
+
+  // Excel Export via SheetJS
+  const handleExportToExcel = (reportTitle: string, filename: string, tree: TreeNode[]) => {
+    const rows: (string | number)[][] = [
+      ['MAQUINARIAS Y PROPIEDAD - SISTEMA FINANCIERO'],
+      [reportTitle.toUpperCase()],
+      [
+        `Campaña: ${currentCampaign.nombre || 'Actual'}`,
+        `Moneda: ${activeCurrency === 'BOB' ? 'Bolivianos (Bs)' : 'Dólares (USD)'}`,
+        `Fecha de Emisión: ${new Date().toISOString().slice(0, 10)}`,
+        `T.C. Referencial: ${safeExchangeRate.tasaBobPerUsd || 6.96} BOB/USD`,
+      ],
+      [],
+      [
+        'Nivel',
+        'Concepto / Categoría',
+        'Fecha / Ref',
+        'Entidad / Referencia',
+        `Importe (${activeCurrency === 'BOB' ? 'Bs' : 'USD'})`,
+      ],
+    ];
+
+    const traverse = (nodeList: TreeNode[], level = 0) => {
+      for (const node of nodeList) {
+        const indent = '  '.repeat(level);
+        const prefix = level === 0 ? '' : level === 1 ? '• ' : '- ';
+        rows.push([
+          `Nivel ${level}`,
+          `${indent}${prefix}${node.label}`,
+          '',
+          node.sublabel || '',
+          node.amount,
+        ]);
+        if (node.children && node.children.length > 0) {
+          traverse(node.children, level + 1);
+        }
+      }
+    };
+
+    traverse(tree);
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+
+    ws['!cols'] = [
+      { wch: 10 },
+      { wch: 45 },
+      { wch: 12 },
+      { wch: 28 },
+      { wch: 18 },
+    ];
+
+    XLSX.utils.book_append_sheet(wb, ws, 'Balance');
+    const safeFilename = filename.replace(/[^a-zA-Z0-9_-]/g, '_');
+    XLSX.writeFile(wb, `${safeFilename}.xlsx`);
+  };
+
   const handlePrint = () => {
     window.print();
   };
 
-  const handleExportCSV = (reportName: string, rows: (string | number)[][]) => {
-    const csvContent =
-      'data:text/csv;charset=utf-8,' +
-      rows
-        .map((row) => row.map((cell) => `"${String(cell ?? '').replace(/"/g, '""')}"`).join(','))
-        .join('\n');
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute(
-      'download',
-      `reporte_${reportName}_gestion_${selectedGestion}_${new Date().toISOString().slice(0, 10)}.csv`
+  // ==========================================================================
+  // TREE GENERATOR 1: BALANCE GENERAL CONSOLIDADO
+  // ==========================================================================
+  const balanceGeneralTree = useMemo((): TreeNode[] => {
+    // 1. Servicios para otros (Maquinarias)
+    const extJobs = campaignJobs.filter((j) => j.tipoTrabajo === 'tercero');
+    const extJobsTotal = extJobs.reduce(
+      (acc, j) => acc + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+      0
     );
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
 
-  const exportResumenCSV = () => {
-    const rows = [
-      ['REPORTE', 'RESUMEN GENERAL'],
-      ['GESTIÓN', selectedGestion],
-      ['MONEDA REPORTE', activeCurrency],
-      [''],
-      ['CONCEPTO', `IMPORTE (${activeCurrency})`, 'DETALLE'],
-      ['Ingresos por Servicios a Terceros', extJobIncomes.toFixed(2), 'Cobrado a clientes externos'],
-      ['Ingresos por Venta de Cosechas', cropIncomes.toFixed(2), 'Ventas de productos agrícolas'],
-      ['TOTAL INGRESOS REALES', consolidatedIncomes.toFixed(2), 'Ingreso de caja externo'],
-      [''],
-      ['Gastos Directos de Maquinarias', maqDirectExps.toFixed(2), 'Diésel, repuestos, filtros'],
-      ['Gastos Directos de Propiedad', propDirectExps.toFixed(2), 'Semillas, fertilizantes, químicos'],
-      ['TOTAL GASTOS REALES', consolidatedExpenses.toFixed(2), 'Egresos reales de caja'],
-      [''],
-      ['RESULTADO GENERAL', consolidatedProfit.toFixed(2), 'Ingresos reales menos gastos reales'],
-      [''],
-      [
-        'NOTA INTERNA',
-        intJobIncomes.toFixed(2),
-        'Trabajo interno de maquinaria propia compensado internamente (no altera caja externa)',
-      ],
-    ];
-    handleExportCSV('resumen_general', rows);
-  };
-
-  const exportMaquinariasCSV = () => {
-    const rows = [
-      ['REPORTE', 'MAQUINARIAS'],
-      ['GESTIÓN', selectedGestion],
-      ['MONEDA REPORTE', activeCurrency],
-      [''],
-      [
-        'MAQUINARIA',
-        'TIPO',
-        'TRABAJOS',
-        'HORAS',
-        'HECTÁREAS',
-        `INGRESOS TERCEROS (${activeCurrency})`,
-        `TRABAJOS EN PROPIEDAD (${activeCurrency})`,
-        `GASTOS DIRECTOS (${activeCurrency})`,
-        `RESULTADO (${activeCurrency})`,
-      ],
-      ...safeMachines.map((m) => {
-        const mJobs = filteredJobs.filter((j) => j && j.maquinariaId === m.id);
-        const mExps = filteredExpenses.filter((e) => e && e.maquinariaId === m.id);
-        const hrs = mJobs
-          .filter((j) => j && (j.unidad === 'hora' || (j.unidad as string) === 'h'))
-          .reduce((s, j) => s + (Number(j.cantidad) || 0), 0);
-        const ha = mJobs
-          .filter((j) => j && (j.unidad === 'hectarea' || (j.unidad as string) === 'ha'))
-          .reduce((s, j) => s + (Number(j.cantidad) || 0), 0);
-        const incExt = mJobs
-          .filter((j) => j && j.tipoTrabajo === 'tercero')
-          .reduce((s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc), 0);
-        const incProp = mJobs
-          .filter((j) => j && j.tipoTrabajo === 'propiedad')
-          .reduce((s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc), 0);
-        const exp = mExps.reduce(
-          (s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
-          0
-        );
-        const res = incExt + incProp - exp;
-        return [
-          m.nombre || 'Sin nombre',
-          m.tipo || 'Maquinaria',
-          mJobs.length,
-          hrs.toFixed(1),
-          ha.toFixed(1),
-          incExt.toFixed(2),
-          incProp.toFixed(2),
-          exp.toFixed(2),
-          res.toFixed(2),
-        ];
-      }),
-      [''],
-      [
-        'TOTALES',
-        '',
-        filteredJobs.length,
-        totalHorasMaq.toFixed(1),
-        totalHectareasMaq.toFixed(1),
-        extJobIncomes.toFixed(2),
-        intJobIncomes.toFixed(2),
-        maqDirectExps.toFixed(2),
-        (extJobIncomes + intJobIncomes - maqDirectExps).toFixed(2),
-      ],
-    ];
-    handleExportCSV('maquinarias', rows);
-  };
-
-  const exportPropiedadCSV = () => {
-    const rows = [
-      ['REPORTE', 'PROPIEDAD'],
-      ['GESTIÓN', selectedGestion],
-      ['MONEDA REPORTE', activeCurrency],
-      [''],
-      ['CONCEPTO', `IMPORTE (${activeCurrency})`, 'DETALLE'],
-      ['Ingresos Agrícolas (Cosecha)', cropIncomes.toFixed(2), 'Venta de cosechas y productos agrícolas'],
-      ['Gastos Directos Agrícolas', propDirectExps.toFixed(2), 'Semillas, fertilizantes, químicos, mano de obra'],
-      ['Trabajos de Maquinaria Propia', propMaqServiceExps.toFixed(2), 'Costo interno de servicios asignado a lotes'],
-      [''],
-      [
-        'RESULTADO AGRÍCOLA',
-        (cropIncomes - propDirectExps - propMaqServiceExps).toFixed(2),
-        'Ingresos menos gastos directos y maquinaria propia',
-      ],
-    ];
-    handleExportCSV('propiedad', rows);
-  };
-
-  const exportLotesCSV = () => {
-    const rows = [
-      ['REPORTE', 'POR LOTE'],
-      ['GESTIÓN', selectedGestion],
-      ['MONEDA REPORTE', activeCurrency],
-      [''],
-      [
-        'LOTE',
-        'SUPERFICIE (HA)',
-        'CULTIVO',
-        `INGRESOS COSECHA (${activeCurrency})`,
-        `GASTOS DIRECTOS (${activeCurrency})`,
-        `MAQUINARIA PROPIA (${activeCurrency})`,
-        `RESULTADO LOTE (${activeCurrency})`,
-      ],
-      ...safeLots.map((l) => {
-        const lIncs = filteredIncomes
-          .filter((i) => i && i.loteId === l.id)
-          .reduce((s, i) => s + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc), 0);
-        const lExpDir = filteredExpenses
-          .filter((e) => e && e.loteId === l.id && !e.esTrabajoPropio)
-          .reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc), 0);
-        const lExpMaq = filteredExpenses
-          .filter((e) => e && e.loteId === l.id && e.esTrabajoPropio)
-          .reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc), 0);
-        const net = lIncs - (lExpDir + lExpMaq);
-        return [
-          l.nombre || 'Sin nombre',
-          l.superficieHectareas || 0,
-          l.cultivoActual || 'Sin cultivo',
-          lIncs.toFixed(2),
-          lExpDir.toFixed(2),
-          lExpMaq.toFixed(2),
-          net.toFixed(2),
-        ];
-      }),
-    ];
-    handleExportCSV('lotes', rows);
-  };
-
-  const exportCampanasCSV = () => {
-    const rows = [
-      ['REPORTE', 'POR CAMPAÑA'],
-      ['GESTIÓN', selectedGestion],
-      ['MONEDA REPORTE', activeCurrency],
-      [''],
-      [
-        'CAMPAÑA',
-        'ESTADO',
-        `INGRESOS (${activeCurrency})`,
-        `GASTOS DIRECTOS (${activeCurrency})`,
-        `MAQUINARIA PROPIA (${activeCurrency})`,
-        `RESULTADO (${activeCurrency})`,
-      ],
-      ...gestionCampaigns.map((c) => {
-        const cJobs = filteredJobs.filter((j) => j && j.campanaId === c.id);
-        const cIncs = filteredIncomes.filter((i) => i && i.campanaId === c.id);
-        const cExps = filteredExpenses.filter((e) => e && e.campanaId === c.id);
-
-        const ext = cJobs
-          .filter((j) => j && j.tipoTrabajo === 'tercero')
-          .reduce((s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc), 0);
-        const crop = cIncs
-          .filter((i) => i && i.modulo === 'propiedad' && !i.esTrabajoPropio)
-          .reduce((s, i) => s + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc), 0);
-        const expDir = cExps
-          .filter((e) => e && !e.esTrabajoPropio)
-          .reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc), 0);
-        const maqInt = cExps
-          .filter((e) => e && e.esTrabajoPropio)
-          .reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc), 0);
-        const net = ext + crop - (expDir + maqInt);
-
-        return [
-          c.nombre || 'Sin nombre',
-          c.activa ? 'Activa' : 'Cerrada',
-          (ext + crop).toFixed(2),
-          expDir.toFixed(2),
-          maqInt.toFixed(2),
-          net.toFixed(2),
-        ];
-      }),
-    ];
-    handleExportCSV('campanas', rows);
-  };
-
-  // --------------------------------------------------------------------------
-  // TOP BAR FOR SUB-REPORTS
-  // --------------------------------------------------------------------------
-  const renderSubReportHeader = (
-    title: string,
-    onBack: () => void,
-    onExportCSV: () => void,
-    subtitle?: string
-  ) => (
-    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-200">
-      <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={onBack}
-          className="no-print inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white border border-slate-300 text-xs font-bold text-slate-800 hover:bg-slate-50 transition cursor-pointer min-h-[44px] shadow-xs active:scale-95"
-        >
-          <ArrowLeft className="h-4 w-4 text-emerald-700 shrink-0" />
-          <span>Volver a Reportes</span>
-        </button>
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-base sm:text-lg font-bold text-slate-900 tracking-tight">
-              {title}
-            </h1>
-            <span className="text-[11px] font-bold text-emerald-800 bg-emerald-100 px-2.5 py-0.5 rounded-full whitespace-nowrap shrink-0">
-              Gestión {selectedGestion}
-            </span>
-          </div>
-          {subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}
-        </div>
-      </div>
-
-      <div className="no-print flex items-center gap-2 self-start sm:self-center">
-        {/* Active Currency Badge */}
-        <div className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 border border-slate-200 text-xs font-bold text-slate-700">
-          <span className="text-slate-400 font-normal">Moneda:</span>
-          <span className="font-mono text-emerald-800 font-extrabold">
-            {activeCurrency === 'BOB' ? 'Bs (BOB)' : 'USD ($)'}
-          </span>
-        </div>
-
-        <button
-          type="button"
-          onClick={onExportCSV}
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-slate-300 text-xs font-bold text-slate-700 hover:bg-slate-50 transition cursor-pointer min-h-[44px]"
-          title="Descargar este reporte en archivo CSV"
-        >
-          <Download className="h-4 w-4 text-slate-600" />
-          <span>CSV</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={handlePrint}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 text-white text-xs font-bold hover:bg-slate-800 transition cursor-pointer min-h-[44px] shadow-xs"
-          title="Imprimir o guardar en PDF este reporte"
-        >
-          <Printer className="h-4 w-4 text-emerald-400" />
-          <span>Imprimir</span>
-        </button>
-      </div>
-    </div>
-  );
-
-  const hasNoDataInGestion =
-    filteredJobs.length === 0 &&
-    filteredExpenses.length === 0 &&
-    filteredIncomes.length === 0;
-
-  // ==========================================================================
-  // SCREEN 1: MENU PRINCIPAL DE REPORTES
-  // ==========================================================================
-  if (currentScreen === 'menu') {
-    return (
-      <div className="space-y-6 max-w-2xl mx-auto w-full">
-        <style>{`
-          @media print {
-            .no-print { display: none !important; }
-            body { background: white !important; }
-          }
-        `}</style>
-
-        {/* Header Title */}
-        <div className="border-b border-slate-200 pb-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-700 text-white shadow-xs">
-              <BarChart3 className="h-5 w-5" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-slate-900 tracking-tight">
-                Reportes
-              </h1>
-              <p className="text-xs text-slate-500">
-                Consulta los resultados financieros y operativos por área
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* Top Control: Selector de Gestión Únicamente (Sección 2) */}
-        <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 shadow-xs space-y-2">
-          <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-              Gestión Agrícola
-            </label>
-            <div className="relative">
-              <select
-                value={selectedGestion}
-                onChange={(e) => setSelectedGestion(e.target.value)}
-                className="w-full appearance-none bg-slate-50 hover:bg-slate-100 border border-slate-300 text-slate-900 text-sm font-bold rounded-xl px-4 py-3 pr-10 focus:outline-none focus:ring-2 focus:ring-emerald-600 transition cursor-pointer min-h-[48px]"
-              >
-                {availableGestiones.map((gest) => {
-                  const isAct = gest === defaultActiveGestion;
-                  return (
-                    <option key={gest} value={gest}>
-                      Gestión {gest} {isAct ? '— Activa' : ''}
-                    </option>
-                  );
-                })}
-              </select>
-              <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3.5 text-slate-500">
-                <Calendar className="h-4 w-4 text-emerald-700" />
-              </div>
-            </div>
-          </div>
-
-          <p className="text-[11px] text-slate-500 pt-1">
-            Los datos de cada reporte se calculan automáticamente para la{' '}
-            <strong>Gestión {selectedGestion}</strong>. Usa el switch <strong>Bs / USD</strong> en la barra superior para cambiar la moneda.
-          </p>
-        </div>
-
-        {/* Las 5 Opciones Principales de Reportes */}
-        <div className="rounded-2xl border border-slate-200 bg-white divide-y divide-slate-100 shadow-xs overflow-hidden">
-          <button
-            type="button"
-            onClick={() => setCurrentScreen('resumen')}
-            className="w-full flex items-center justify-between p-4 sm:p-5 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left group min-h-[76px]"
-          >
-            <div className="flex items-center gap-4 min-w-0">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-800 group-hover:bg-emerald-700 group-hover:text-white transition shadow-xs">
-                <DollarSign className="h-6 w-6" />
-              </div>
-              <div className="min-w-0">
-                <h3 className="text-sm sm:text-base font-bold text-slate-900 group-hover:text-emerald-800 transition">
-                  Resumen general
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Cuánto ingresó, cuánto se gastó y cuánto quedó.
-                </p>
-              </div>
-            </div>
-            <ChevronRight className="h-5 w-5 text-slate-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setSelectedMachineId(null);
-              setCurrentScreen('maquinarias');
-            }}
-            className="w-full flex items-center justify-between p-4 sm:p-5 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left group min-h-[76px]"
-          >
-            <div className="flex items-center gap-4 min-w-0">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-sky-100 text-sky-800 group-hover:bg-sky-700 group-hover:text-white transition shadow-xs">
-                <Tractor className="h-6 w-6" />
-              </div>
-              <div className="min-w-0">
-                <h3 className="text-sm sm:text-base font-bold text-slate-900 group-hover:text-sky-800 transition">
-                  Maquinarias
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Servicios, gastos, trabajos realizados y resultados.
-                </p>
-              </div>
-            </div>
-            <ChevronRight className="h-5 w-5 text-slate-400 group-hover:text-sky-700 transition shrink-0 ml-2" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setCurrentScreen('propiedad')}
-            className="w-full flex items-center justify-between p-4 sm:p-5 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left group min-h-[76px]"
-          >
-            <div className="flex items-center gap-4 min-w-0">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-900 group-hover:bg-emerald-800 group-hover:text-white transition shadow-xs">
-                <Trees className="h-6 w-6" />
-              </div>
-              <div className="min-w-0">
-                <h3 className="text-sm sm:text-base font-bold text-slate-900 group-hover:text-emerald-900 transition">
-                  Propiedad
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Ingresos agrícolas, gastos y resultado.
-                </p>
-              </div>
-            </div>
-            <ChevronRight className="h-5 w-5 text-slate-400 group-hover:text-emerald-800 transition shrink-0 ml-2" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setSelectedLotId(null);
-              setCurrentScreen('lotes');
-            }}
-            className="w-full flex items-center justify-between p-4 sm:p-5 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left group min-h-[76px]"
-          >
-            <div className="flex items-center gap-4 min-w-0">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-purple-100 text-purple-800 group-hover:bg-purple-700 group-hover:text-white transition shadow-xs">
-                <Layers className="h-6 w-6" />
-              </div>
-              <div className="min-w-0">
-                <h3 className="text-sm sm:text-base font-bold text-slate-900 group-hover:text-purple-800 transition">
-                  Por lote
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Ingresos, gastos y resultado de cada lote.
-                </p>
-              </div>
-            </div>
-            <ChevronRight className="h-5 w-5 text-slate-400 group-hover:text-purple-700 transition shrink-0 ml-2" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setSelectedCampaignDetailId(null);
-              setCurrentScreen('campanas');
-            }}
-            className="w-full flex items-center justify-between p-4 sm:p-5 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left group min-h-[76px]"
-          >
-            <div className="flex items-center gap-4 min-w-0">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-amber-100 text-amber-800 group-hover:bg-amber-700 group-hover:text-white transition shadow-xs">
-                <Calendar className="h-6 w-6" />
-              </div>
-              <div className="min-w-0">
-                <h3 className="text-sm sm:text-base font-bold text-slate-900 group-hover:text-amber-800 transition">
-                  Por campaña
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Resultados de cada campaña agrícola.
-                </p>
-              </div>
-            </div>
-            <ChevronRight className="h-5 w-5 text-slate-400 group-hover:text-amber-700 transition shrink-0 ml-2" />
-          </button>
-        </div>
-
-        {/* Vistazo Rápido o Estado Vacío */}
-        {hasNoDataInGestion ? (
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 text-center space-y-2 shadow-xs">
-            <Info className="h-6 w-6 text-slate-400 mx-auto" />
-            <p className="text-xs font-bold text-slate-800">
-              No hay movimientos registrados en esta gestión ({selectedGestion})
-            </p>
-            <p className="text-[11px] text-slate-500">
-              Puedes seleccionar otra gestión en el menú desplegable superior.
-            </p>
-          </div>
-        ) : (
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 shadow-xs">
-            <div className="flex items-center justify-between mb-3 border-b border-slate-100 pb-2">
-              <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-                Vistazo Rápido &bull; Gestión {selectedGestion}
-              </span>
-              <span className="text-xs font-mono font-semibold text-slate-500">
-                {activeCurrency}
-              </span>
-            </div>
-            <div className="grid grid-cols-3 gap-2 sm:gap-3 text-center">
-              <div className="p-2 sm:p-3 rounded-xl bg-emerald-50/70 border border-emerald-100">
-                <span className="text-[10px] sm:text-xs font-semibold text-emerald-800 block">
-                  Ingresos Reales
-                </span>
-                <p className="text-sm sm:text-base font-bold text-emerald-950 font-mono mt-0.5 truncate">
-                  {formatMoney(consolidatedIncomes)}
-                </p>
-              </div>
-              <div className="p-2 sm:p-3 rounded-xl bg-red-50/70 border border-red-100">
-                <span className="text-[10px] sm:text-xs font-semibold text-red-800 block">
-                  Gastos Reales
-                </span>
-                <p className="text-sm sm:text-base font-bold text-red-950 font-mono mt-0.5 truncate">
-                  {formatMoney(consolidatedExpenses)}
-                </p>
-              </div>
-              <div className="p-2 sm:p-3 rounded-xl bg-slate-900 text-white shadow-xs">
-                <span className="text-[10px] sm:text-xs font-semibold text-emerald-400 block">
-                  Resultado
-                </span>
-                <p className="text-sm sm:text-base font-bold text-white font-mono mt-0.5 truncate">
-                  {formatMoney(consolidatedProfit)}
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
+    const extMachineChildren = buildMachineTreeNodes(
+      extJobs,
+      'bg_ext',
+      (j) => (j.cliente ? `Cliente: ${j.cliente}` : 'Servicio a tercero')
     );
-  }
 
-  // ==========================================================================
-  // SCREEN 2: REPORTE RESUMEN GENERAL
-  // ==========================================================================
-  if (currentScreen === 'resumen') {
-    return (
-      <div className="space-y-6 max-w-3xl mx-auto w-full">
-        {renderSubReportHeader(
-          'Resumen general',
-          () => setCurrentScreen('menu'),
-          exportResumenCSV,
-          'Cuánto ingresó, cuánto se gastó y cuánto quedó'
-        )}
-
-        {hasNoDataInGestion && (
-          <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center gap-2">
-            <Info className="h-4 w-4 shrink-0 text-amber-700" />
-            <span>No hay movimientos registrados en la Gestión {selectedGestion}.</span>
-          </div>
-        )}
-
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="rounded-2xl border border-emerald-200 bg-emerald-50/80 p-5 shadow-xs">
-            <span className="text-xs font-bold text-emerald-800 uppercase tracking-wider block">
-              Ingresos
-            </span>
-            <p className="text-2xl sm:text-3xl font-extrabold text-emerald-950 font-mono mt-1 break-words">
-              {formatMoney(consolidatedIncomes)}
-            </p>
-            <p className="text-[11px] text-emerald-800 mt-2 pt-2 border-t border-emerald-200/70 leading-relaxed">
-              Todo el dinero real ingresado desde clientes externos y venta de cosechas.
-            </p>
-          </div>
-
-          <div className="rounded-2xl border border-red-200 bg-red-50/80 p-5 shadow-xs">
-            <span className="text-xs font-bold text-red-800 uppercase tracking-wider block">
-              Gastos
-            </span>
-            <p className="text-2xl sm:text-3xl font-extrabold text-red-950 font-mono mt-1 break-words">
-              {formatMoney(consolidatedExpenses)}
-            </p>
-            <p className="text-[11px] text-red-800 mt-2 pt-2 border-t border-red-200/70 leading-relaxed">
-              Todos los gastos reales registrados en Maquinarias y Propiedad.
-            </p>
-          </div>
-
-          <div className="rounded-2xl border border-slate-300 bg-slate-900 text-white p-5 shadow-md">
-            <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider block">
-              Resultado
-            </span>
-            <p
-              className={`text-2xl sm:text-3xl font-extrabold font-mono mt-1 break-words ${
-                consolidatedProfit >= 0 ? 'text-white' : 'text-red-400'
-              }`}
-            >
-              {formatMoney(consolidatedProfit)}
-            </p>
-            <p className="text-[11px] text-slate-300 mt-2 pt-2 border-t border-slate-800 leading-relaxed">
-              Ingresos reales menos gastos reales de la gestión.
-            </p>
-          </div>
-        </div>
-
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-4">
-          <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider pb-2 border-b border-slate-100">
-            Detalle de Ingresos y Gastos
-          </h3>
-
-          <div className="space-y-3">
-            <div className="flex items-center justify-between p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
-              <div>
-                <p className="text-xs sm:text-sm font-bold text-slate-900">
-                  Ingresos por servicios a terceros
-                </p>
-                <p className="text-[11px] text-slate-500">
-                  Trabajos realizados para clientes externos con maquinaria
-                </p>
-              </div>
-              <span className="text-sm sm:text-base font-bold font-mono text-emerald-800">
-                {formatMoney(extJobIncomes)}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
-              <div>
-                <p className="text-xs sm:text-sm font-bold text-slate-900">
-                  Ingresos por venta de cosechas
-                </p>
-                <p className="text-[11px] text-slate-500">
-                  Ventas de granos y productos agrícolas cosechados
-                </p>
-              </div>
-              <span className="text-sm sm:text-base font-bold font-mono text-emerald-800">
-                {formatMoney(cropIncomes)}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
-              <div>
-                <p className="text-xs sm:text-sm font-bold text-slate-900">
-                  Gastos de Maquinarias
-                </p>
-                <p className="text-[11px] text-slate-500">
-                  Diésel, filtros, repuestos, aceites y mantenimiento de máquinas
-                </p>
-              </div>
-              <span className="text-sm sm:text-base font-bold font-mono text-red-700">
-                {formatMoney(maqDirectExps)}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
-              <div>
-                <p className="text-xs sm:text-sm font-bold text-slate-900">
-                  Gastos directos de Propiedad
-                </p>
-                <p className="text-[11px] text-slate-500">
-                  Semillas, fertilizantes, productos químicos y agroinsumos
-                </p>
-              </div>
-              <span className="text-sm sm:text-base font-bold font-mono text-red-700">
-                {formatMoney(propDirectExps)}
-              </span>
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4 space-y-1">
-            <div className="flex items-center gap-2">
-              <Info className="h-4 w-4 text-amber-800 shrink-0" />
-              <p className="text-xs font-bold text-amber-950">
-                Trabajos de maquinaria propia en la propiedad
-              </p>
-            </div>
-            <p className="text-xs text-amber-900 leading-relaxed">
-              Los trabajos realizados por la maquinaria propia en los lotes de la propiedad sumaron{' '}
-              <strong className="font-mono">{formatMoney(intJobIncomes)}</strong>. Estos costos
-              internos se asignan a los lotes para conocer su costo agrícola real, pero{' '}
-              <strong>no se suman como ingresos ni como gastos externos</strong> en este Resumen
-              General para no alterar la caja real.
-            </p>
-          </div>
-        </div>
-      </div>
+    // 2. Trabajos en propiedad (Maquinarias)
+    const internalJobs = campaignJobs.filter((j) => j.tipoTrabajo !== 'tercero');
+    const internalJobsTotal = internalJobs.reduce(
+      (acc, j) => acc + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+      0
     );
-  }
 
-  // ==========================================================================
-  // SCREEN 3: REPORTE MAQUINARIAS
-  // ==========================================================================
-  if (currentScreen === 'maquinarias') {
-    if (selectedMachineId) {
-      const machine = safeMachines.find((m) => m && m.id === selectedMachineId);
-      const mJobs = filteredJobs.filter((j) => j && j.maquinariaId === selectedMachineId);
-      const mExps = filteredExpenses.filter((e) => e && e.maquinariaId === selectedMachineId);
+    const propMachineTreeNodes = buildMachineTreeNodes(
+      internalJobs,
+      'bg_prop',
+      (j) => getLotName(j.loteId)
+    );
 
-      const mHrs = mJobs
-        .filter((j) => j && (j.unidad === 'hora' || (j.unidad as string) === 'h'))
-        .reduce((s, j) => s + (Number(j.cantidad) || 0), 0);
+    // 3. Ventas de cosecha (Propiedad)
+    const cropIncomes = campaignIncomes.filter(
+      (i) => i.modulo === 'propiedad' && !i.esTrabajoPropio
+    );
+    const cropIncomesTotal = cropIncomes.reduce(
+      (acc, i) => acc + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
+      0
+    );
 
-      const mHa = mJobs
-        .filter((j) => j && (j.unidad === 'hectarea' || (j.unidad as string) === 'ha'))
-        .reduce((s, j) => s + (Number(j.cantidad) || 0), 0);
+    const cropByLot: Record<string, { total: number; items: Income[] }> = {};
+    cropIncomes.forEach((i) => {
+      const lId = i.loteId || 'sin_lote';
+      if (!cropByLot[lId]) cropByLot[lId] = { total: 0, items: [] };
+      const val = toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc);
+      cropByLot[lId].total += val;
+      cropByLot[lId].items.push(i);
+    });
 
-      const mIncTerceros = mJobs
-        .filter((j) => j && j.tipoTrabajo === 'tercero')
-        .reduce(
-          (s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
-          0
-        );
-
-      const mIncPropiedad = mJobs
-        .filter((j) => j && j.tipoTrabajo === 'propiedad')
-        .reduce(
-          (s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
-          0
-        );
-
-      const mExpDirect = mExps.reduce(
-        (s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
-        0
-      );
-
-      const mResultado = mIncTerceros + mIncPropiedad - mExpDirect;
-
-      const jobsByLaborMap = new Map<
-        string,
-        {
-          nombre: string;
-          count: number;
-          ha: number;
-          hrs: number;
-          total: number;
-        }
-      >();
-
-      mJobs.forEach((j) => {
-        if (!j) return;
-        const obsStr = String(j.observacion ?? '');
-        const trabajoNombreStr = j.trabajoNombre ? String(j.trabajoNombre) : null;
-        const laborName =
-          trabajoNombreStr ||
-          (obsStr.includes('[Trabajo:')
-            ? obsStr.match(/\[Trabajo:\s*([^\]]+)\]/)?.[1]
-            : null) ||
-          'Labor estándar';
-
-        const existing = jobsByLaborMap.get(laborName) || {
-          nombre: laborName,
-          count: 0,
-          ha: 0,
-          hrs: 0,
-          total: 0,
+    const cropLotChildren: TreeNode[] = Object.entries(cropByLot).map(([lId, data]) => {
+      const records: DetailRecord[] = data.items.map((i, idx) => {
+        const client = getIncomeClient(i);
+        return {
+          id: i.id || `crop_inc_${idx}`,
+          fecha: i.fecha || '',
+          concepto: formatShortConceptName(getIncomeConcept(i)),
+          entidad: client ? `Comprador: ${client}` : getLotName(lId),
+          cantidad: i.cantidad,
+          unidad: i.unidad,
+          tarifa: i.precio,
+          monto: toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
+          icono: getIncomeIcon(i) || 'granos',
         };
-
-        existing.count += 1;
-        if (j.unidad === 'hectarea' || (j.unidad as string) === 'ha') {
-          existing.ha += Number(j.cantidad) || 0;
-        } else if (j.unidad === 'hora' || (j.unidad as string) === 'h') {
-          existing.hrs += Number(j.cantidad) || 0;
-        }
-        existing.total += toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc);
-        jobsByLaborMap.set(laborName, existing);
       });
 
-      const jobsByLabor = Array.from(jobsByLaborMap.values());
+      return {
+        id: `bg_ing_crop_${lId}`,
+        label: getLotName(lId),
+        icon: 'terreno',
+        type: 'item',
+        amount: data.total,
+        records,
+      };
+    });
+
+    const totalConsolidatedIncome = extJobsTotal + internalJobsTotal + cropIncomesTotal;
+
+    // 4. Gastos directos de Maquinarias
+    const directMachExpenses = campaignExpenses.filter((e) => e.modulo === 'maquinarias');
+    const directMachTotal = directMachExpenses.reduce(
+      (acc, e) => acc + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+      0
+    );
+
+    const machExpByRubro: Record<string, { total: number; items: Expense[] }> = {};
+    directMachExpenses.forEach((e) => {
+      const rubro = getExpenseRubro(e);
+      if (!machExpByRubro[rubro]) machExpByRubro[rubro] = { total: 0, items: [] };
+      const val = toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc);
+      machExpByRubro[rubro].total += val;
+      machExpByRubro[rubro].items.push(e);
+    });
+
+    const machExpChildren: TreeNode[] = Object.entries(machExpByRubro).map(([rubro, data]) => {
+      const records: DetailRecord[] = data.items.map((e, idx) => ({
+        id: e.id || `mach_exp_${idx}`,
+        fecha: e.fecha || '',
+        concepto: formatShortConceptName(getExpenseDescription(e)),
+        entidad: getMachineName(getExpenseMachineId(e)),
+        cantidad: e.cantidad,
+        unidad: e.unidad,
+        tarifa: e.precio,
+        monto: toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+        icono: getExpenseIcon(e) || getIconDefinition(rubro, 'gasto').id,
+      }));
+
+      return {
+        id: `bg_exp_mach_${rubro}`,
+        label: rubro,
+        icon: getIconDefinition(rubro, 'gasto').id || 'diesel',
+        type: 'item',
+        amount: data.total,
+        records,
+      };
+    });
+
+    // 5. Gastos directos de Propiedad
+    const directPropExpenses = campaignExpenses.filter(
+      (e) => e.modulo === 'propiedad' && !isInternalMachineryJobExpense(e)
+    );
+    const directPropTotal = directPropExpenses.reduce(
+      (acc, e) => acc + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+      0
+    );
+
+    const propExpByRubro: Record<string, { total: number; items: Expense[] }> = {};
+    directPropExpenses.forEach((e) => {
+      const rubro = getExpenseRubro(e);
+      if (!propExpByRubro[rubro]) propExpByRubro[rubro] = { total: 0, items: [] };
+      const val = toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc);
+      propExpByRubro[rubro].total += val;
+      propExpByRubro[rubro].items.push(e);
+    });
+
+    const propExpChildren: TreeNode[] = Object.entries(propExpByRubro).map(([rubro, data]) => {
+      const records: DetailRecord[] = data.items.map((e, idx) => ({
+        id: e.id || `prop_exp_${idx}`,
+        fecha: e.fecha || '',
+        concepto: formatShortConceptName(getExpenseDescription(e)),
+        entidad: getLotName(e.loteId),
+        cantidad: e.cantidad,
+        unidad: e.unidad,
+        tarifa: e.precio,
+        monto: toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+        icono: getExpenseIcon(e) || getIconDefinition(rubro, 'gasto').id,
+      }));
+
+      return {
+        id: `bg_exp_prop_${rubro}`,
+        label: rubro,
+        icon: getIconDefinition(rubro, 'gasto').id || 'insumo',
+        type: 'item',
+        amount: data.total,
+        records,
+      };
+    });
+
+    // 6. Trabajos de maquinaria (Propiedad)
+    const internalByLot: Record<string, { total: number; jobs: MachineryJob[] }> = {};
+    internalJobs.forEach((j) => {
+      const lId = j.loteId || 'sin_lote';
+      if (!internalByLot[lId]) internalByLot[lId] = { total: 0, jobs: [] };
+      const val = toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc);
+      internalByLot[lId].total += val;
+      internalByLot[lId].jobs.push(j);
+    });
+
+    const internalLotChildren: TreeNode[] = Object.entries(internalByLot).map(
+      ([lId, data]) => {
+        const records: DetailRecord[] = data.jobs.map((j, idx) => ({
+          id: j.id || `bg_rec_job_${idx}`,
+          fecha: j.fecha || '',
+          concepto: formatShortConceptName(getJobName(j)),
+          entidad: getLotName(lId),
+          maquinaImplemento: getMachineName(getJobMachineId(j)),
+          cantidad: j.cantidad,
+          unidad: j.unidad,
+          tarifa: j.tarifa,
+          monto: toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+          icono: getJobIcon(j) || 'tractor',
+        }));
+
+        return {
+          id: `bg_exp_jobs_${lId}`,
+          label: getLotName(lId),
+          icon: 'terreno',
+          type: 'item',
+          amount: data.total,
+          records,
+        };
+      }
+    );
+
+    const totalConsolidatedExpense = directMachTotal + directPropTotal + internalJobsTotal;
+    const consolidatedResult = totalConsolidatedIncome - totalConsolidatedExpense;
+
+    return [
+      {
+        id: 'bg_ingresos',
+        label: 'INGRESOS CONSOLIDADOS',
+        type: 'group',
+        amount: totalConsolidatedIncome,
+        isIncome: true,
+        children: [
+          {
+            id: 'bg_ing_ext',
+            label: 'Servicios para otros',
+            type: 'subgroup',
+            amount: extJobsTotal,
+            children: extMachineChildren,
+          },
+          {
+            id: 'bg_ing_prop',
+            label: 'Trabajos en propiedad',
+            type: 'subgroup',
+            amount: internalJobsTotal,
+            children: propMachineTreeNodes,
+          },
+          {
+            id: 'bg_ing_crops',
+            label: 'Ventas de cosecha',
+            type: 'subgroup',
+            amount: cropIncomesTotal,
+            children: cropLotChildren,
+          },
+        ],
+      },
+      {
+        id: 'bg_gastos',
+        label: 'GASTOS CONSOLIDADOS',
+        type: 'group',
+        amount: totalConsolidatedExpense,
+        isExpense: true,
+        children: [
+          {
+            id: 'bg_exp_mach',
+            label: 'Gastos de Maquinarias',
+            type: 'subgroup',
+            amount: directMachTotal,
+            children: machExpChildren,
+          },
+          {
+            id: 'bg_exp_prop',
+            label: 'Gastos de Propiedad',
+            type: 'subgroup',
+            amount: directPropTotal,
+            children: propExpChildren,
+          },
+          {
+            id: 'bg_exp_machinery',
+            label: 'Trabajos de maquinaria',
+            type: 'subgroup',
+            amount: internalJobsTotal,
+            children: internalLotChildren,
+          },
+        ],
+      },
+      {
+        id: 'bg_resultado',
+        label: 'RESULTADO CONSOLIDADO',
+        type: 'group',
+        amount: consolidatedResult,
+        isResult: true,
+      },
+    ];
+  }, [campaignJobs, campaignIncomes, campaignExpenses, activeCurrency, safeExchangeRate]);
+
+  // ==========================================================================
+  // TREE GENERATOR 2: BALANCE DE MAQUINARIAS
+  // ==========================================================================
+  const balanceMaquinariasTree = useMemo((): TreeNode[] => {
+    // 1. Trabajos en propiedad
+    const propJobs = campaignJobs.filter((j) => j.tipoTrabajo !== 'tercero');
+    const propJobsTotal = propJobs.reduce(
+      (acc, j) => acc + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+      0
+    );
+
+    // Grouping: Machine -> Implement (Job Type)
+    // Structure:
+    // Machine (e.g. New Holland TS115)
+    //   -> Implement (e.g. Romplow) [Accumulated total, appears ONCE!]
+    const propMachineTreeNodes = buildMachineTreeNodes(
+      propJobs,
+      'maq_prop',
+      (j) => getLotName(j.loteId)
+    );
+
+    // 2. Servicios para otros
+    const extJobs = campaignJobs.filter((j) => j.tipoTrabajo === 'tercero');
+    const extJobsTotal = extJobs.reduce(
+      (acc, j) => acc + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+      0
+    );
+
+    const extMachineTreeNodes = buildMachineTreeNodes(
+      extJobs,
+      'maq_ext',
+      (j) => (j.cliente ? `Cliente: ${j.cliente}` : 'Servicio a tercero')
+    );
+
+    const totalMaqIncome = propJobsTotal + extJobsTotal;
+
+    // 3. Gastos de maquinaria
+    const machExpenses = campaignExpenses.filter((e) => e.modulo === 'maquinarias');
+    const machExpensesTotal = machExpenses.reduce(
+      (acc, e) => acc + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+      0
+    );
+
+    const machExpByRubro: Record<string, { total: number; items: Expense[] }> = {};
+    machExpenses.forEach((e) => {
+      const rubro = getExpenseRubro(e);
+      if (!machExpByRubro[rubro]) machExpByRubro[rubro] = { total: 0, items: [] };
+      const val = toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc);
+      machExpByRubro[rubro].total += val;
+      machExpByRubro[rubro].items.push(e);
+    });
+
+    const machExpRubroChildren: TreeNode[] = Object.entries(machExpByRubro).map(
+      ([rubro, data]) => {
+        const records: DetailRecord[] = data.items.map((e, idx) => ({
+          id: e.id || `mach_exp_${idx}`,
+          fecha: e.fecha || '',
+          concepto: formatShortConceptName(getExpenseDescription(e)),
+          entidad: getMachineName(getExpenseMachineId(e)),
+          cantidad: e.cantidad,
+          unidad: e.unidad,
+          tarifa: e.precio,
+          monto: toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+          icono: getExpenseIcon(e) || getIconDefinition(rubro, 'gasto').id,
+        }));
+
+        return {
+          id: `maq_exp_${rubro}`,
+          label: rubro,
+          icon: getIconDefinition(rubro, 'gasto').id || 'diesel',
+          type: 'item',
+          amount: data.total,
+          records,
+        };
+      }
+    );
+
+    const maqResult = totalMaqIncome - machExpensesTotal;
+
+    return [
+      {
+        id: 'maq_ingresos',
+        label: 'INGRESOS DE MAQUINARIAS',
+        type: 'group',
+        amount: totalMaqIncome,
+        isIncome: true,
+        children: [
+          {
+            id: 'maq_ing_prop',
+            label: 'Trabajos en propiedad',
+            type: 'subgroup',
+            amount: propJobsTotal,
+            children: propMachineTreeNodes,
+          },
+          {
+            id: 'maq_ing_ext',
+            label: 'Servicios para otros',
+            type: 'subgroup',
+            amount: extJobsTotal,
+            children: extMachineTreeNodes,
+          },
+        ],
+      },
+      {
+        id: 'maq_gastos',
+        label: 'GASTOS DE MAQUINARIAS',
+        type: 'group',
+        amount: machExpensesTotal,
+        isExpense: true,
+        children: [
+          {
+            id: 'maq_exp_directos',
+            label: 'Gastos directos',
+            type: 'subgroup',
+            amount: machExpensesTotal,
+            children: machExpRubroChildren,
+          },
+        ],
+      },
+      {
+        id: 'maq_resultado',
+        label: 'RESULTADO OPERATIVO',
+        type: 'group',
+        amount: maqResult,
+        isResult: true,
+      },
+    ];
+  }, [campaignJobs, campaignExpenses, activeCurrency, safeExchangeRate]);
+
+  // ==========================================================================
+  // TREE GENERATOR 3: BALANCE DE PROPIEDAD
+  // ==========================================================================
+  const balancePropiedadTree = useMemo((): TreeNode[] => {
+    // 1. Ventas de Cosecha
+    const cropIncomes = campaignIncomes.filter(
+      (i) => i.modulo === 'propiedad' && !i.esTrabajoPropio
+    );
+    const cropIncomesTotal = cropIncomes.reduce(
+      (acc, i) => acc + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
+      0
+    );
+
+    const cropByLot: Record<string, { total: number; items: Income[] }> = {};
+    cropIncomes.forEach((i) => {
+      const lId = i.loteId || 'sin_lote';
+      if (!cropByLot[lId]) cropByLot[lId] = { total: 0, items: [] };
+      const val = toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc);
+      cropByLot[lId].total += val;
+      cropByLot[lId].items.push(i);
+    });
+
+    const cropLotChildren: TreeNode[] = Object.entries(cropByLot).map(([lId, data]) => {
+      const records: DetailRecord[] = data.items.map((i, idx) => {
+        const client = getIncomeClient(i);
+        return {
+          id: i.id || `crop_inc_${idx}`,
+          fecha: i.fecha || '',
+          concepto: formatShortConceptName(getIncomeConcept(i)),
+          entidad: client ? `Comprador: ${client}` : getLotName(lId),
+          cantidad: i.cantidad,
+          unidad: i.unidad,
+          tarifa: i.precio,
+          monto: toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
+          icono: getIncomeIcon(i) || 'granos',
+        };
+      });
+
+      return {
+        id: `prop_ing_crop_${lId}`,
+        label: getLotName(lId),
+        icon: 'terreno',
+        type: 'item',
+        amount: data.total,
+        records,
+      };
+    });
+
+    // 2. Gastos Directos Propiedad
+    const propDirectExpenses = campaignExpenses.filter(
+      (e) => e.modulo === 'propiedad' && !isInternalMachineryJobExpense(e)
+    );
+    const propDirectTotal = propDirectExpenses.reduce(
+      (acc, e) => acc + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+      0
+    );
+
+    const propDirectByRubro: Record<string, { total: number; items: Expense[] }> = {};
+    propDirectExpenses.forEach((e) => {
+      const rubro = getExpenseRubro(e);
+      if (!propDirectByRubro[rubro]) propDirectByRubro[rubro] = { total: 0, items: [] };
+      const val = toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc);
+      propDirectByRubro[rubro].total += val;
+      propDirectByRubro[rubro].items.push(e);
+    });
+
+    const propDirectChildren: TreeNode[] = Object.entries(propDirectByRubro).map(
+      ([rubro, data]) => {
+        const records: DetailRecord[] = data.items.map((e, idx) => ({
+          id: e.id || `prop_exp_${idx}`,
+          fecha: e.fecha || '',
+          concepto: formatShortConceptName(getExpenseDescription(e)),
+          entidad: getLotName(e.loteId),
+          cantidad: e.cantidad,
+          unidad: e.unidad,
+          tarifa: e.precio,
+          monto: toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+          icono: getExpenseIcon(e) || getIconDefinition(rubro, 'gasto').id,
+        }));
+
+        return {
+          id: `prop_exp_direct_${rubro}`,
+          label: rubro,
+          icon: getIconDefinition(rubro, 'gasto').id || 'insumo',
+          type: 'item',
+          amount: data.total,
+          records,
+        };
+      }
+    );
+
+    // 3. Trabajos de maquinaria recibidos
+    const internalJobs = campaignJobs.filter((j) => j.tipoTrabajo !== 'tercero');
+    const internalJobsTotal = internalJobs.reduce(
+      (acc, j) => acc + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+      0
+    );
+
+    const internalByLot: Record<string, { total: number; jobs: MachineryJob[] }> = {};
+    internalJobs.forEach((j) => {
+      const lId = j.loteId || 'sin_lote';
+      if (!internalByLot[lId]) internalByLot[lId] = { total: 0, jobs: [] };
+      const val = toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc);
+      internalByLot[lId].total += val;
+      internalByLot[lId].jobs.push(j);
+    });
+
+    const internalLotChildren: TreeNode[] = Object.entries(internalByLot).map(
+      ([lId, data]) => {
+        const records: DetailRecord[] = data.jobs.map((j, idx) => ({
+          id: j.id || `rec_job_${idx}`,
+          fecha: j.fecha || '',
+          concepto: formatShortConceptName(getJobName(j)),
+          entidad: getLotName(lId),
+          maquinaImplemento: getMachineName(getJobMachineId(j)),
+          cantidad: j.cantidad,
+          unidad: j.unidad,
+          tarifa: j.tarifa,
+          monto: toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+          icono: getJobIcon(j) || 'tractor',
+        }));
+
+        return {
+          id: `prop_exp_jobs_${lId}`,
+          label: getLotName(lId),
+          icon: 'terreno',
+          type: 'item',
+          amount: data.total,
+          records,
+        };
+      }
+    );
+
+    const totalPropExpenses = propDirectTotal + internalJobsTotal;
+    const propResult = cropIncomesTotal - totalPropExpenses;
+
+    return [
+      {
+        id: 'prop_ingresos',
+        label: 'INGRESOS DE PROPIEDAD',
+        type: 'group',
+        amount: cropIncomesTotal,
+        isIncome: true,
+        children: [
+          {
+            id: 'prop_ing_crops',
+            label: 'Ventas de cosecha',
+            type: 'subgroup',
+            amount: cropIncomesTotal,
+            children: cropLotChildren,
+          },
+        ],
+      },
+      {
+        id: 'prop_gastos',
+        label: 'GASTOS DE PROPIEDAD',
+        type: 'group',
+        amount: totalPropExpenses,
+        isExpense: true,
+        children: [
+          {
+            id: 'prop_exp_direct',
+            label: 'Gastos directos',
+            type: 'subgroup',
+            amount: propDirectTotal,
+            children: propDirectChildren,
+          },
+          {
+            id: 'prop_exp_machinery',
+            label: 'Trabajos de maquinaria',
+            type: 'subgroup',
+            amount: internalJobsTotal,
+            children: internalLotChildren,
+          },
+        ],
+      },
+      {
+        id: 'prop_resultado',
+        label: 'RESULTADO OPERATIVO',
+        type: 'group',
+        amount: propResult,
+        isResult: true,
+      },
+    ];
+  }, [campaignIncomes, campaignExpenses, campaignJobs, activeCurrency, safeExchangeRate]);
+
+  // ==========================================================================
+  // TREE GENERATOR 4: REPORTE INDIVIDUAL DE LOTE
+  // ==========================================================================
+  const selectedLot = useMemo(() => {
+    return safeLots.find((l) => String(l.id) === String(selectedLotId));
+  }, [safeLots, selectedLotId]);
+
+  const balanceLoteTree = useMemo((): TreeNode[] => {
+    if (!selectedLot) return [];
+    const lotIdStr = String(selectedLot.id);
+
+    // 1. Incomes for this lot
+    const lotIncomes = campaignIncomes.filter(
+      (i) => String(i.loteId) === lotIdStr && !i.esTrabajoPropio
+    );
+    const lotIncomesTotal = lotIncomes.reduce(
+      (acc, i) => acc + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
+      0
+    );
+
+    const lotIncomeRecords: DetailRecord[] = lotIncomes.map((i, idx) => {
+      const client = getIncomeClient(i);
+      return {
+        id: i.id || `lote_inc_${idx}`,
+        fecha: i.fecha || '',
+        concepto: getIncomeConcept(i),
+        entidad: client ? `Comprador: ${client}` : selectedLot.nombre,
+        cantidad: i.cantidad,
+        unidad: i.unidad,
+        tarifa: i.precio,
+        monto: toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
+        icono: getIncomeIcon(i) || 'granos',
+      };
+    });
+
+    // 2. Direct Expenses for this lot
+    const lotDirectExpenses = campaignExpenses.filter(
+      (e) => String(e.loteId) === lotIdStr && !isInternalMachineryJobExpense(e)
+    );
+    const lotDirectTotal = lotDirectExpenses.reduce(
+      (acc, e) => acc + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+      0
+    );
+
+    const lotDirectByRubro: Record<string, { total: number; items: Expense[] }> = {};
+    lotDirectExpenses.forEach((e) => {
+      const rubro = getExpenseRubro(e);
+      if (!lotDirectByRubro[rubro]) lotDirectByRubro[rubro] = { total: 0, items: [] };
+      const val = toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc);
+      lotDirectByRubro[rubro].total += val;
+      lotDirectByRubro[rubro].items.push(e);
+    });
+
+    const lotDirectChildren: TreeNode[] = Object.entries(lotDirectByRubro).map(
+      ([rubro, data]) => {
+        const records: DetailRecord[] = data.items.map((e, idx) => ({
+          id: e.id || `lote_exp_${idx}`,
+          fecha: e.fecha || '',
+          concepto: getExpenseDescription(e),
+          entidad: selectedLot.nombre,
+          cantidad: e.cantidad,
+          unidad: e.unidad,
+          tarifa: e.precio,
+          monto: toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+          icono: getExpenseIcon(e) || getIconDefinition(rubro, 'gasto').id,
+        }));
+
+        return {
+          id: `lote_exp_dir_${rubro}`,
+          label: rubro,
+          icon: getIconDefinition(rubro, 'gasto').id || 'insumo',
+          type: 'item',
+          amount: data.total,
+          records,
+        };
+      }
+    );
+
+    // 3. Machinery jobs on this lot
+    const lotJobs = campaignJobs.filter((j) => String(j.loteId) === lotIdStr);
+    const lotJobsTotal = lotJobs.reduce(
+      (acc, j) => acc + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+      0
+    );
+
+    const lotJobsByImp: Record<string, { total: number; jobs: MachineryJob[]; icon?: string }> = {};
+    lotJobs.forEach((j) => {
+      const impKey = getJobName(j);
+      if (!lotJobsByImp[impKey]) {
+        lotJobsByImp[impKey] = {
+          total: 0,
+          jobs: [],
+          icon: getJobIcon(j) || 'tractor',
+        };
+      }
+      const val = toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc);
+      lotJobsByImp[impKey].total += val;
+      lotJobsByImp[impKey].jobs.push(j);
+    });
+
+    const lotJobChildren: TreeNode[] = Object.entries(lotJobsByImp).map(([impKey, data]) => {
+      const records: DetailRecord[] = data.jobs.map((j, idx) => ({
+        id: j.id || `lote_job_${idx}`,
+        fecha: j.fecha || '',
+        concepto: impKey,
+        entidad: selectedLot.nombre,
+        maquinaImplemento: getMachineName(getJobMachineId(j)),
+        cantidad: j.cantidad,
+        unidad: j.unidad,
+        tarifa: j.tarifa,
+        monto: toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+        icono: data.icon,
+      }));
+
+      return {
+        id: `lote_job_imp_${impKey}`,
+        label: impKey,
+        icon: data.icon,
+        type: 'item',
+        amount: data.total,
+        records,
+      };
+    });
+
+    const totalLotExpense = lotDirectTotal + lotJobsTotal;
+    const lotResult = lotIncomesTotal - totalLotExpense;
+
+    return [
+      {
+        id: 'lote_tree_ing',
+        label: 'INGRESOS DEL LOTE',
+        type: 'group',
+        amount: lotIncomesTotal,
+        isIncome: true,
+        children: [
+          {
+            id: 'lote_tree_ing_sales',
+            label: 'Ventas de cosecha',
+            type: 'subgroup',
+            amount: lotIncomesTotal,
+            records: lotIncomeRecords,
+          },
+        ],
+      },
+      {
+        id: 'lote_tree_exp',
+        label: 'GASTOS DEL LOTE',
+        type: 'group',
+        amount: totalLotExpense,
+        isExpense: true,
+        children: [
+          {
+            id: 'lote_tree_exp_dir',
+            label: 'Gastos directos en lote',
+            type: 'subgroup',
+            amount: lotDirectTotal,
+            children: lotDirectChildren,
+          },
+          {
+            id: 'lote_tree_exp_jobs',
+            label: 'Labores de maquinaria recibidas',
+            type: 'subgroup',
+            amount: lotJobsTotal,
+            children: lotJobChildren,
+          },
+        ],
+      },
+      {
+        id: 'lote_tree_res',
+        label: 'RESULTADO ECONÓMICO DEL LOTE',
+        sublabel: `${selectedLot.nombre} · ${getLotSurface(selectedLot)} ha`,
+        type: 'group',
+        amount: lotResult,
+        isResult: true,
+      },
+    ];
+  }, [
+    selectedLot,
+    campaignIncomes,
+    campaignExpenses,
+    campaignJobs,
+    activeCurrency,
+    safeExchangeRate,
+  ]);
+
+  // ==========================================================================
+  // TREE GENERATOR 5: REPORTE INDIVIDUAL DE CAMPAÑA
+  // ==========================================================================
+  const selectedCampaignDetail = useMemo(() => {
+    return safeCampaigns.find((c) => String(c.id) === String(selectedCampaignDetailId));
+  }, [safeCampaigns, selectedCampaignDetailId]);
+
+  const balanceCampanaTree = useMemo((): TreeNode[] => {
+    if (!selectedCampaignDetail) return [];
+
+    const cJobs = safeJobs.filter((j) => matchesCampaign(j, selectedCampaignDetail));
+    const cExpenses = safeExpenses.filter((e) => matchesCampaign(e, selectedCampaignDetail));
+    const cIncomes = safeIncomes.filter((i) => matchesCampaign(i, selectedCampaignDetail));
+
+    const extJobs = cJobs.filter((j) => j.tipoTrabajo === 'tercero');
+    const extJobsTotal = extJobs.reduce(
+      (acc, j) => acc + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+      0
+    );
+
+    const extRecords: DetailRecord[] = extJobs.map((j, idx) => ({
+      id: j.id || `c_ext_${idx}`,
+      fecha: j.fecha || '',
+      concepto: formatShortConceptName(getJobName(j)),
+      entidad: j.cliente ? `Cliente: ${j.cliente}` : 'Tercero',
+      maquinaImplemento: getMachineName(getJobMachineId(j)),
+      cantidad: j.cantidad,
+      unidad: j.unidad,
+      tarifa: j.tarifa,
+      monto: toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+      icono: getJobIcon(j) || 'tractor',
+    }));
+
+    const internalJobs = cJobs.filter((j) => j.tipoTrabajo !== 'tercero');
+    const internalJobsTotal = internalJobs.reduce(
+      (acc, j) => acc + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+      0
+    );
+
+    const internalRecords: DetailRecord[] = internalJobs.map((j, idx) => ({
+      id: j.id || `c_int_${idx}`,
+      fecha: j.fecha || '',
+      concepto: formatShortConceptName(getJobName(j)),
+      entidad: getLotName(j.loteId),
+      maquinaImplemento: getMachineName(getJobMachineId(j)),
+      cantidad: j.cantidad,
+      unidad: j.unidad,
+      tarifa: j.tarifa,
+      monto: toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+      icono: getJobIcon(j) || 'tractor',
+    }));
+
+    const cropIncomes = cIncomes.filter((i) => i.modulo === 'propiedad' && !i.esTrabajoPropio);
+    const cropIncomesTotal = cropIncomes.reduce(
+      (acc, i) => acc + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
+      0
+    );
+
+    const cropRecords: DetailRecord[] = cropIncomes.map((i, idx) => ({
+      id: i.id || `c_crop_${idx}`,
+      fecha: i.fecha || '',
+      concepto: formatShortConceptName(getIncomeConcept(i)),
+      entidad: getIncomeClient(i) ? `Comprador: ${getIncomeClient(i)}` : getLotName(i.loteId),
+      cantidad: i.cantidad,
+      unidad: i.unidad,
+      tarifa: i.precio,
+      monto: toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
+      icono: getIncomeIcon(i) || 'granos',
+    }));
+
+    const totalIncome = extJobsTotal + internalJobsTotal + cropIncomesTotal;
+
+    const machExpenses = cExpenses.filter((e) => e.modulo === 'maquinarias');
+    const machExpensesTotal = machExpenses.reduce(
+      (acc, e) => acc + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+      0
+    );
+
+    const machRecords: DetailRecord[] = machExpenses.map((e, idx) => ({
+      id: e.id || `c_mexp_${idx}`,
+      fecha: e.fecha || '',
+      concepto: formatShortConceptName(getExpenseDescription(e)),
+      entidad: getMachineName(getExpenseMachineId(e)),
+      cantidad: e.cantidad,
+      unidad: e.unidad,
+      tarifa: e.precio,
+      monto: toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+      icono: getExpenseIcon(e) || 'diesel',
+    }));
+
+    const propExpenses = cExpenses.filter(
+      (e) => e.modulo === 'propiedad' && !isInternalMachineryJobExpense(e)
+    );
+    const propExpensesTotal = propExpenses.reduce(
+      (acc, e) => acc + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+      0
+    );
+
+    const propRecords: DetailRecord[] = propExpenses.map((e, idx) => ({
+      id: e.id || `c_pexp_${idx}`,
+      fecha: e.fecha || '',
+      concepto: formatShortConceptName(getExpenseDescription(e)),
+      entidad: getLotName(e.loteId),
+      cantidad: e.cantidad,
+      unidad: e.unidad,
+      tarifa: e.precio,
+      monto: toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
+      icono: getExpenseIcon(e) || 'insumo',
+    }));
+
+    const totalExpense = machExpensesTotal + propExpensesTotal + internalJobsTotal;
+    const cResult = totalIncome - totalExpense;
+
+    return [
+      {
+        id: 'cd_ingresos',
+        label: 'INGRESOS CONSOLIDADOS',
+        type: 'group',
+        amount: totalIncome,
+        isIncome: true,
+        children: [
+          {
+            id: 'cd_ing_ext',
+            label: 'Servicios para otros (Maquinarias)',
+            type: 'subgroup',
+            amount: extJobsTotal,
+            records: extRecords,
+          },
+          {
+            id: 'cd_ing_prop',
+            label: 'Trabajos en propiedad (Maquinarias)',
+            type: 'subgroup',
+            amount: internalJobsTotal,
+            records: internalRecords,
+          },
+          {
+            id: 'cd_ing_crop',
+            label: 'Ventas de cosecha (Propiedad)',
+            type: 'subgroup',
+            amount: cropIncomesTotal,
+            records: cropRecords,
+          },
+        ],
+      },
+      {
+        id: 'cd_gastos',
+        label: 'GASTOS CONSOLIDADOS',
+        type: 'group',
+        amount: totalExpense,
+        isExpense: true,
+        children: [
+          {
+            id: 'cd_exp_mach',
+            label: 'Gastos directos de Maquinarias',
+            type: 'subgroup',
+            amount: machExpensesTotal,
+            records: machRecords,
+          },
+          {
+            id: 'cd_exp_prop',
+            label: 'Gastos directos de Propiedad',
+            type: 'subgroup',
+            amount: propExpensesTotal,
+            records: propRecords,
+          },
+          {
+            id: 'cd_exp_jobs',
+            label: 'Trabajos de maquinaria (Propiedad)',
+            type: 'subgroup',
+            amount: internalJobsTotal,
+            records: internalRecords,
+          },
+        ],
+      },
+      {
+        id: 'cd_resultado',
+        label: `RESULTADO ${selectedCampaignDetail.nombre.toUpperCase()}`,
+        type: 'group',
+        amount: cResult,
+        isResult: true,
+      },
+    ];
+  }, [
+    selectedCampaignDetail,
+    safeJobs,
+    safeExpenses,
+    safeIncomes,
+    activeCurrency,
+    safeExchangeRate,
+  ]);
+
+  // ==========================================================================
+  // LOTS SUMMARY DATA
+  // ==========================================================================
+  const lotsSummary = useMemo(() => {
+    return safeLots.map((lot) => {
+      const lotIdStr = String(lot.id);
+      const lotIncomes = campaignIncomes
+        .filter((i) => String(i.loteId) === lotIdStr && !i.esTrabajoPropio)
+        .reduce((sum, i) => sum + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc), 0);
+
+      const lotDirectExp = campaignExpenses
+        .filter((e) => String(e.loteId) === lotIdStr && !isInternalMachineryJobExpense(e))
+        .reduce((sum, e) => sum + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc), 0);
+
+      const lotMachExp = campaignJobs
+        .filter((j) => String(j.loteId) === lotIdStr)
+        .reduce(
+          (sum, j) => sum + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+          0
+        );
+
+      const totalExp = lotDirectExp + lotMachExp;
+      const netResult = lotIncomes - totalExp;
+      const superficie = getLotSurface(lot);
+      const marginPerHa = superficie > 0 ? netResult / superficie : null;
+
+      return {
+        lot,
+        incomes: lotIncomes,
+        expenses: totalExp,
+        directExpenses: lotDirectExp,
+        machineryExpenses: lotMachExp,
+        result: netResult,
+        superficie,
+        marginPerHa,
+      };
+    });
+  }, [safeLots, campaignIncomes, campaignExpenses, campaignJobs, activeCurrency, safeExchangeRate]);
+
+  const filteredLotsSummary = useMemo(() => {
+    if (!lotSearchTerm.trim()) return lotsSummary;
+    const term = lotSearchTerm.toLowerCase();
+    return lotsSummary.filter((item) => {
+      const crop = getLotCrop(item.lot);
+      return (
+        item.lot.nombre.toLowerCase().includes(term) ||
+        (crop && crop.toLowerCase().includes(term))
+      );
+    });
+  }, [lotsSummary, lotSearchTerm]);
+
+  // ==========================================================================
+  // CAMPAIGNS SUMMARY DATA
+  // ==========================================================================
+  const campaignsSummary = useMemo(() => {
+    const sorted = [...safeCampaigns].sort((a, b) => {
+      const dateA = a.fechaInicio || a.nombre || '';
+      const dateB = b.fechaInicio || b.nombre || '';
+      return dateB.localeCompare(dateA);
+    });
+
+    return sorted.map((camp) => {
+      const cJobs = safeJobs.filter((j) => matchesCampaign(j, camp));
+      const cExpenses = safeExpenses.filter((e) => matchesCampaign(e, camp));
+      const cIncomes = safeIncomes.filter((i) => matchesCampaign(i, camp));
+
+      const extJobs = cJobs
+        .filter((j) => j.tipoTrabajo === 'tercero')
+        .reduce(
+          (sum, j) => sum + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
+          0
+        );
+
+      const cropIncomes = cIncomes
+        .filter((i) => i.modulo === 'propiedad' && !i.esTrabajoPropio)
+        .reduce((sum, i) => sum + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc), 0);
+
+      const machExpenses = cExpenses
+        .filter((e) => e.modulo === 'maquinarias')
+        .reduce((sum, e) => sum + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc), 0);
+
+      const propExpenses = cExpenses
+        .filter((e) => e.modulo === 'propiedad' && !isInternalMachineryJobExpense(e))
+        .reduce((sum, e) => sum + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc), 0);
+
+      const totalIncome = extJobs + cropIncomes;
+      const totalExpense = machExpenses + propExpenses;
+      const netResult = totalIncome - totalExpense;
+
+      return {
+        campaign: camp,
+        totalIncome,
+        totalExpense,
+        result: netResult,
+      };
+    });
+  }, [safeCampaigns, safeJobs, safeExpenses, safeIncomes, activeCurrency, safeExchangeRate]);
+
+  // ==========================================================================
+  // COMPONENT: UNIFORM COMPACT EXCEL BALANCE TREE ROW RENDERER
+  // (NO INDIVIDUAL OPERATIONS INSIDE BALANCE! TAPPING OPENS SEPARATE SCREEN)
+  // ==========================================================================
+  const renderTreeNode = (node: TreeNode, level = 0) => {
+    const hasChildren = !!node.children && node.children.length > 0;
+    const allRecords = collectNodeRecords(node);
+    const hasRecords = allRecords.length > 0;
+
+    // RESULT ROW (Level 0 Special Row)
+    if (node.isResult) {
+      const isPositive = node.amount >= 0;
+      const isZero = node.amount === 0;
+
+      const bgClass = isZero
+        ? 'bg-stone-200/80 text-stone-900 border-stone-300'
+        : isPositive
+        ? 'bg-emerald-100 text-emerald-950 border-emerald-500'
+        : 'bg-red-100 text-red-950 border-red-500';
+
+      const textClass = isZero
+        ? 'text-stone-800'
+        : isPositive
+        ? 'text-emerald-800'
+        : 'text-red-800';
 
       return (
-        <div className="space-y-6 max-w-3xl mx-auto w-full">
-          {renderSubReportHeader(
-            machine?.nombre || 'Reporte de Máquina',
-            () => setSelectedMachineId(null),
-            exportMaquinariasCSV,
-            `Detalle operativo de ${machine?.tipo || 'Maquinaria'} en Gestión ${selectedGestion}`
-          )}
-
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Trabajos para Terceros
-              </span>
-              <p className="text-xl font-bold font-mono text-emerald-800 mt-1">
-                {formatMoney(mIncTerceros)}
-              </p>
-              <span className="text-[10px] text-slate-400">
-                {mJobs.filter((j) => j && j.tipoTrabajo === 'tercero').length} servicios cobrados
-              </span>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Trabajo en Propiedad
-              </span>
-              <p className="text-xl font-bold font-mono text-emerald-900 mt-1">
-                {formatMoney(mIncPropiedad)}
-              </p>
-              <span className="text-[10px] text-slate-400">
-                {mJobs.filter((j) => j && j.tipoTrabajo === 'propiedad').length} labores internas
-              </span>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Gastos Directos
-              </span>
-              <p className="text-xl font-bold font-mono text-red-700 mt-1">
-                {formatMoney(mExpDirect)}
-              </p>
-              <span className="text-[10px] text-slate-400">{mExps.length} gastos cargados</span>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Total Hectáreas
-              </span>
-              <p className="text-xl font-bold font-mono text-slate-900 mt-1">
-                {mHa.toFixed(1)} ha
-              </p>
-              <span className="text-[10px] text-slate-400">Superficie trabajada</span>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Total Horas
-              </span>
-              <p className="text-xl font-bold font-mono text-slate-900 mt-1">
-                {mHrs.toFixed(1)} horas
-              </p>
-              <span className="text-[10px] text-slate-400">Tiempo de labor</span>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-slate-900 text-white shadow-xs">
-              <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider block">
-                Resultado Neto
-              </span>
-              <p
-                className={`text-xl font-bold font-mono mt-1 ${
-                  mResultado >= 0 ? 'text-emerald-300' : 'text-red-400'
-                }`}
-              >
-                {formatMoney(mResultado)}
-              </p>
-              <span className="text-[10px] text-slate-400">Ingresos menos gastos</span>
-            </div>
+        <div
+          key={node.id}
+          className={`flex items-center justify-between border-2 px-2.5 py-1.5 my-1 rounded-sm shadow-2xs text-xs font-bold ${bgClass}`}
+        >
+          <div className="min-w-0 pr-2">
+            <span className="uppercase tracking-tight block font-black truncate">
+              {node.label}
+            </span>
           </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-3">
-            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider pb-2 border-b border-slate-100">
-              Trabajos por Implemento o Tipo de Labor ({jobsByLabor.length})
-            </h3>
-
-            {jobsByLabor.length > 0 ? (
-              <div className="space-y-2.5">
-                {jobsByLabor.map((item, idx) => (
-                  <div
-                    key={idx}
-                    className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
-                  >
-                    <div>
-                      <h4 className="text-sm font-bold text-slate-900">{item.nombre}</h4>
-                      <p className="text-xs text-slate-500 mt-0.5">
-                        {item.count} trabajos realizados &bull;{' '}
-                        {item.ha > 0 && <span>{item.ha.toFixed(1)} ha </span>}
-                        {item.ha > 0 && item.hrs > 0 && <span>&bull; </span>}
-                        {item.hrs > 0 && <span>{item.hrs.toFixed(1)} horas</span>}
-                      </p>
-                    </div>
-                    <div className="text-right sm:self-center">
-                      <span className="text-sm font-bold font-mono text-emerald-800">
-                        {formatMoney(item.total)}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-slate-400 py-4 text-center">
-                No hay labores registradas para esta máquina en la Gestión {selectedGestion}.
-              </p>
-            )}
-          </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-3">
-            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider pb-2 border-b border-slate-100">
-              Historial de Servicios en Gestión {selectedGestion} ({mJobs.length})
-            </h3>
-
-            {mJobs.length > 0 ? (
-              <div className="space-y-2">
-                {mJobs.map((j) => (
-                  <div
-                    key={j.id}
-                    className="p-3 rounded-xl bg-slate-50 border border-slate-200/70 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-xs"
-                  >
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-slate-800">{j.fecha}</span>
-                        <span className="text-slate-400">&bull;</span>
-                        <span className="font-bold text-slate-900">
-                          {j.tipoTrabajo === 'tercero'
-                            ? `Cliente: ${j.cliente || 'Tercero'}`
-                            : `Lote: ${j.loteNombre || 'Propiedad'}`}
-                        </span>
-                      </div>
-                      <p className="text-slate-500 text-[11px] mt-0.5">
-                        {j.trabajoNombre || 'Servicio'} &bull; {j.cantidad}{' '}
-                        {j.unidad === 'hora' || (j.unidad as string) === 'h' ? 'horas' : 'ha'}{' '}
-                        &times; {formatOriginal(j.tarifa, j.moneda)}/{j.unidad}
-                      </p>
-                    </div>
-                    <div className="text-right">
-                      <span className="font-mono font-bold text-slate-900 text-xs">
-                        {formatOriginal(j.total, j.moneda)}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-slate-400 py-4 text-center">
-                Sin registros de servicios en este período.
-              </p>
-            )}
+          <div className="text-right shrink-0">
+            <span className={`text-xs sm:text-sm font-black font-mono tabular-nums ${textClass}`}>
+              {!isZero && isPositive ? '+' : ''}
+              {formatMoney(node.amount)}
+            </span>
           </div>
         </div>
       );
     }
 
-    return (
-      <div className="space-y-6 max-w-3xl mx-auto w-full">
-        {renderSubReportHeader(
-          'Maquinarias',
-          () => setCurrentScreen('menu'),
-          exportMaquinariasCSV,
-          'Servicios, gastos, trabajos realizados y resultados'
-        )}
-
-        {hasNoDataInGestion && (
-          <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center gap-2">
-            <Info className="h-4 w-4 shrink-0 text-amber-700" />
-            <span>No hay trabajos ni gastos de maquinaria en la Gestión {selectedGestion}.</span>
-          </div>
-        )}
-
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-          <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-              Servicios a Terceros
-            </span>
-            <p className="text-xl sm:text-2xl font-bold font-mono text-emerald-800 mt-1">
-              {formatMoney(extJobIncomes)}
-            </p>
-            <span className="text-[10px] text-slate-400">Ingresos externos reales</span>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-              Gastos de Maquinaria
-            </span>
-            <p className="text-xl sm:text-2xl font-bold font-mono text-red-700 mt-1">
-              {formatMoney(maqDirectExps)}
-            </p>
-            <span className="text-[10px] text-slate-400">Diésel, filtros y repuestos</span>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-slate-900 text-white shadow-xs">
-            <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider block">
-              Resultado Maquinarias
-            </span>
-            <p className="text-xl sm:text-2xl font-bold font-mono text-white mt-1">
-              {formatMoney(extJobIncomes + intJobIncomes - maqDirectExps)}
-            </p>
-            <span className="text-[10px] text-slate-400">Incluye valor de labores propias</span>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-              Trabajos Realizados
-            </span>
-            <p className="text-xl sm:text-2xl font-bold font-mono text-slate-900 mt-1">
-              {filteredJobs.length}
-            </p>
-            <span className="text-[10px] text-slate-400">Servicios totales</span>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-              Total Hectáreas
-            </span>
-            <p className="text-xl sm:text-2xl font-bold font-mono text-emerald-900 mt-1">
-              {totalHectareasMaq.toFixed(1)} ha
-            </p>
-            <span className="text-[10px] text-slate-400">Superficie trabajada</span>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-              Total Horas
-            </span>
-            <p className="text-xl sm:text-2xl font-bold font-mono text-sky-900 mt-1">
-              {totalHorasMaq.toFixed(1)} horas
-            </p>
-            <span className="text-[10px] text-slate-400">Tiempo trabajado</span>
-          </div>
-        </div>
-
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-4">
-          <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-              Máquinas Registradas ({safeMachines.length})
-            </h3>
-            <span className="text-[11px] text-slate-500">
-              Toca una máquina para ver su reporte individual
-            </span>
-          </div>
-
-          <div className="space-y-3">
-            {safeMachines.map((m) => {
-              const mJobs = filteredJobs.filter((j) => j && j.maquinariaId === m.id);
-              const mExps = filteredExpenses.filter((e) => e && e.maquinariaId === m.id);
-
-              const hrs = mJobs
-                .filter((j) => j && (j.unidad === 'hora' || (j.unidad as string) === 'h'))
-                .reduce((s, j) => s + (Number(j.cantidad) || 0), 0);
-              const ha = mJobs
-                .filter((j) => j && (j.unidad === 'hectarea' || (j.unidad as string) === 'ha'))
-                .reduce((s, j) => s + (Number(j.cantidad) || 0), 0);
-
-              const incExt = mJobs
-                .filter((j) => j && j.tipoTrabajo === 'tercero')
-                .reduce(
-                  (s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
-                  0
-                );
-              const incProp = mJobs
-                .filter((j) => j && j.tipoTrabajo === 'propiedad')
-                .reduce(
-                  (s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
-                  0
-                );
-              const exp = mExps.reduce(
-                (s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
-                0
-              );
-              const net = incExt + incProp - exp;
-
-              return (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => setSelectedMachineId(m.id)}
-                  className="w-full text-left p-4 rounded-xl bg-slate-50 hover:bg-slate-100/80 active:bg-slate-200/70 border border-slate-200 transition cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 group"
-                >
-                  <div className="flex items-center gap-3.5 min-w-0">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sky-100 text-sky-800 group-hover:bg-sky-700 group-hover:text-white transition">
-                      <Tractor className="h-5 w-5" />
-                    </div>
-                    <div className="min-w-0">
-                      <h4 className="text-sm font-bold text-slate-900 group-hover:text-sky-800 transition truncate">
-                        {m.nombre || 'Sin nombre'}
-                      </h4>
-                      <p className="text-xs text-slate-500">
-                        {m.tipo || 'Maquinaria'} &bull; {mJobs.length} trabajos &bull;{' '}
-                        {ha > 0 && <span>{ha.toFixed(1)} ha </span>}
-                        {ha > 0 && hrs > 0 && <span>&bull; </span>}
-                        {hrs > 0 && <span>{hrs.toFixed(1)} horas</span>}
-                        {ha === 0 && hrs === 0 && <span>0 horas / ha</span>}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-200/60">
-                    <div className="text-left sm:text-right">
-                      <span className="text-[10px] text-slate-400 block sm:inline mr-1">
-                        Resultado:
-                      </span>
-                      <span
-                        className={`text-sm font-bold font-mono ${
-                          net >= 0 ? 'text-emerald-800' : 'text-red-700'
-                        }`}
-                      >
-                        {formatMoney(net)}
-                      </span>
-                    </div>
-                    <span className="text-xs font-semibold text-sky-700 group-hover:translate-x-0.5 transition flex items-center">
-                      Ver reporte &gt;
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
-
-            {safeMachines.length === 0 && (
-              <p className="text-xs text-slate-400 py-6 text-center">
-                No hay máquinas registradas en el sistema.
-              </p>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // ==========================================================================
-  // SCREEN 4: REPORTE PROPIEDAD
-  // ==========================================================================
-  if (currentScreen === 'propiedad') {
-    const propResultadoAgricola = cropIncomes - propDirectExps - propMaqServiceExps;
-
-    return (
-      <div className="space-y-6 max-w-3xl mx-auto w-full">
-        {renderSubReportHeader(
-          'Propiedad',
-          () => setCurrentScreen('menu'),
-          exportPropiedadCSV,
-          'Ingresos agrícolas, gastos y resultado'
-        )}
-
-        {hasNoDataInGestion && (
-          <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center gap-2">
-            <Info className="h-4 w-4 shrink-0 text-amber-700" />
-            <span>No hay movimientos agrícolas registrados en la Gestión {selectedGestion}.</span>
-          </div>
-        )}
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="rounded-2xl border border-emerald-200 bg-emerald-50/80 p-5 shadow-xs">
-            <span className="text-xs font-bold text-emerald-800 uppercase tracking-wider block">
-              Ingresos Agrícolas
-            </span>
-            <p className="text-2xl sm:text-3xl font-extrabold text-emerald-950 font-mono mt-1 break-words">
-              {formatMoney(cropIncomes)}
-            </p>
-            <p className="text-[11px] text-emerald-800 mt-2 pt-2 border-t border-emerald-200/70 leading-relaxed">
-              Dinero recibido por ventas de cosechas y otros ingresos agrícolas reales.
-            </p>
-          </div>
-
-          <div className="rounded-2xl border border-red-200 bg-red-50/80 p-5 shadow-xs">
-            <span className="text-xs font-bold text-red-800 uppercase tracking-wider block">
-              Gastos Directos
-            </span>
-            <p className="text-2xl sm:text-3xl font-extrabold text-red-950 font-mono mt-1 break-words">
-              {formatMoney(propDirectExps)}
-            </p>
-            <p className="text-[11px] text-red-800 mt-2 pt-2 border-t border-red-200/70 leading-relaxed">
-              Semillas, fertilizantes, productos químicos, insumos y gastos directos.
-            </p>
-          </div>
-
-          <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-5 shadow-xs">
-            <span className="text-xs font-bold text-amber-900 uppercase tracking-wider block">
-              Trabajos de Maquinaria Propia
-            </span>
-            <p className="text-2xl sm:text-3xl font-extrabold text-amber-950 font-mono mt-1 break-words">
-              {formatMoney(propMaqServiceExps)}
-            </p>
-            <p className="text-[11px] text-amber-800 mt-2 pt-2 border-t border-amber-200/70 leading-relaxed">
-              Costo asignado a los lotes por trabajos internos realizados por maquinaria propia.
-            </p>
-          </div>
-
-          <div className="rounded-2xl border border-slate-300 bg-slate-900 text-white p-5 shadow-md">
-            <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider block">
-              Resultado Agrícola
-            </span>
-            <p
-              className={`text-2xl sm:text-3xl font-extrabold font-mono mt-1 break-words ${
-                propResultadoAgricola >= 0 ? 'text-white' : 'text-red-400'
-              }`}
-            >
-              {formatMoney(propResultadoAgricola)}
-            </p>
-            <p className="text-[11px] text-slate-300 mt-2 pt-2 border-t border-slate-800 leading-relaxed">
-              Ingresos agrícolas menos gastos directos y costos internos de maquinaria.
-            </p>
-          </div>
-        </div>
-
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-3">
-          <div className="flex items-center gap-2">
-            <Info className="h-4 w-4 text-emerald-700 shrink-0" />
-            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-              Explicación del Resultado Agrícola
-            </h3>
-          </div>
-          <p className="text-xs text-slate-600 leading-relaxed">
-            El costo de los trabajos de maquinaria propia ({formatMoney(propMaqServiceExps)}) se
-            incluye aquí para conocer la rentabilidad neta real de los cultivos y lotes. Sin
-            embargo, en el <strong>Resumen General</strong> consolidado no se duplica como gasto
-            externo, ya que no representa una salida de dinero fuera de la operación.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  // ==========================================================================
-  // SCREEN 5: REPORTE POR LOTE
-  // ==========================================================================
-  if (currentScreen === 'lotes') {
-    if (selectedLotId) {
-      const lot = safeLots.find((l) => l && l.id === selectedLotId);
-      const isUnassigned = selectedLotId === 'unassigned';
-
-      const lJobs = isUnassigned
-        ? filteredJobs.filter((j) => j && !j.loteId && j.tipoTrabajo === 'propiedad')
-        : filteredJobs.filter((j) => j && j.loteId === selectedLotId);
-
-      const lIncs = isUnassigned
-        ? filteredIncomes.filter((i) => i && !i.loteId)
-        : filteredIncomes.filter((i) => i && i.loteId === selectedLotId);
-
-      const lExpDir = (
-        isUnassigned
-          ? filteredExpenses.filter((e) => e && !e.loteId && !e.esTrabajoPropio)
-          : filteredExpenses.filter((e) => e && e.loteId === selectedLotId && !e.esTrabajoPropio)
-      ).reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc), 0);
-
-      const lExpMaq = (
-        isUnassigned
-          ? filteredExpenses.filter((e) => e && !e.loteId && e.esTrabajoPropio)
-          : filteredExpenses.filter((e) => e && e.loteId === selectedLotId && e.esTrabajoPropio)
-      ).reduce((s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc), 0);
-
-      const lTotalIncs = lIncs.reduce(
-        (s, i) => s + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
-        0
-      );
-
-      const lNet = lTotalIncs - (lExpDir + lExpMaq);
-
+    // INFORMATIONAL ROW (e.g. Intercompany Transfers)
+    if (node.isInformative) {
       return (
-        <div className="space-y-6 max-w-3xl mx-auto w-full">
-          {renderSubReportHeader(
-            isUnassigned ? 'Sin lote asignado' : lot?.nombre || 'Reporte del Lote',
-            () => setSelectedLotId(null),
-            exportLotesCSV,
-            isUnassigned
-              ? `Movimientos agrícolas sin asignación de lote en Gestión ${selectedGestion}`
-              : `Superficie: ${lot?.superficieHectareas || 0} ha · Cultivo: ${
-                  lot?.cultivoActual || 'Sin cultivo'
-                }`
-          )}
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Ingresos Cosecha
-              </span>
-              <p className="text-lg sm:text-xl font-bold font-mono text-emerald-800 mt-1">
-                {formatMoney(lTotalIncs)}
-              </p>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Gastos Directos
-              </span>
-              <p className="text-lg sm:text-xl font-bold font-mono text-red-700 mt-1">
-                {formatMoney(lExpDir)}
-              </p>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Maquinaria Propia
-              </span>
-              <p className="text-lg sm:text-xl font-bold font-mono text-amber-800 mt-1">
-                {formatMoney(lExpMaq)}
-              </p>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-slate-900 text-white shadow-xs">
-              <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider block">
-                Resultado Neto
-              </span>
-              <p
-                className={`text-lg sm:text-xl font-bold font-mono mt-1 ${
-                  lNet >= 0 ? 'text-white' : 'text-red-400'
-                }`}
-              >
-                {formatMoney(lNet)}
-              </p>
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-3">
-            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider pb-2 border-b border-slate-100">
-              Trabajos de Maquinaria Realizados ({lJobs.length})
-            </h3>
-
-            {lJobs.length > 0 ? (
-              <div className="space-y-2">
-                {lJobs.map((j) => (
-                  <div
-                    key={j.id}
-                    className="p-3 rounded-xl bg-slate-50 border border-slate-200/70 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-xs"
-                  >
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-slate-800">{j.fecha}</span>
-                        <span className="text-slate-400">&bull;</span>
-                        <span className="font-bold text-slate-900">
-                          {j.maquinariaNombre || 'Maquinaria'}
-                        </span>
-                      </div>
-                      <p className="text-slate-500 text-[11px] mt-0.5">
-                        {j.trabajoNombre || 'Labor'} &bull; {j.cantidad}{' '}
-                        {j.unidad === 'hora' || (j.unidad as string) === 'h' ? 'horas' : 'ha'}{' '}
-                        &times; {formatOriginal(j.tarifa, j.moneda)}/{j.unidad}
-                      </p>
-                    </div>
-                    <div className="text-right">
-                      <span className="font-mono font-bold text-slate-900 text-xs">
-                        {formatOriginal(j.total, j.moneda)}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-slate-400 py-3 text-center">
-                Sin labores de maquinaria registradas en este lote.
-              </p>
-            )}
-          </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-3">
-            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider pb-2 border-b border-slate-100">
-              Gastos Directos de Insumos (
-              {
-                (isUnassigned
-                  ? filteredExpenses.filter((e) => e && !e.loteId && !e.esTrabajoPropio)
-                  : filteredExpenses.filter((e) => e && e.loteId === selectedLotId && !e.esTrabajoPropio)
-                ).length
+        <div key={node.id} className="my-1 border border-stone-200/80 bg-stone-100/70 text-xs">
+          <div
+            onClick={() => {
+              if (hasRecords) {
+                openLibroDiario(node.label, node.sublabel, node.amount, allRecords);
               }
-              )
-            </h3>
-
-            {(isUnassigned
-              ? filteredExpenses.filter((e) => e && !e.loteId && !e.esTrabajoPropio)
-              : filteredExpenses.filter((e) => e && e.loteId === selectedLotId && !e.esTrabajoPropio)
-            ).length > 0 ? (
-              <div className="space-y-2">
-                {(isUnassigned
-                  ? filteredExpenses.filter((e) => e && !e.loteId && !e.esTrabajoPropio)
-                  : filteredExpenses.filter((e) => e && e.loteId === selectedLotId && !e.esTrabajoPropio)
-                ).map((e) => (
-                  <div
-                    key={e.id}
-                    className="p-3 rounded-xl bg-slate-50 border border-slate-200/70 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-xs"
-                  >
-                    <div>
-                      <span className="font-semibold text-slate-800">{e.fecha}</span> &bull;{' '}
-                      <span className="font-bold text-slate-900">{e.itemGasto}</span>
-                      {e.observacion && (
-                        <p className="text-slate-500 text-[11px] mt-0.5">{e.observacion}</p>
-                      )}
-                    </div>
-                    <div className="text-right">
-                      <span className="font-mono font-bold text-red-700 text-xs">
-                        {formatOriginal(e.total, e.moneda)}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-slate-400 py-3 text-center">
-                Sin gastos directos registrados.
-              </p>
-            )}
+            }}
+            className={`flex items-center justify-between px-2.5 py-1.5 ${
+              hasRecords ? 'cursor-pointer hover:bg-stone-200/60' : ''
+            }`}
+          >
+            <div className="flex items-center gap-1.5 min-w-0">
+              <Info className="h-3.5 w-3.5 text-stone-500 shrink-0" />
+              <span className="font-bold text-stone-800 truncate">{node.label}</span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0 font-mono font-semibold text-stone-700">
+              <span>{formatMoney(node.amount)}</span>
+              {hasRecords && <ChevronRight className="h-3.5 w-3.5 text-stone-400" />}
+            </div>
           </div>
+
+          {node.children && (
+            <div className="divide-y divide-stone-200/60 border-t border-stone-200/60 font-bold">
+              {node.children.map((child) => renderTreeNode(child, level + 1))}
+            </div>
+          )}
         </div>
       );
     }
 
-    const unassignedExpenses = filteredExpenses.filter((e) => e && !e.loteId);
-    const unassignedIncomes = filteredIncomes.filter((i) => i && !i.loteId);
+    // LEVEL 0: MAIN GROUPS (INGRESOS, GASTOS)
+    if (level === 0) {
+      const isInc = node.isIncome;
+      return (
+        <div
+          key={node.id}
+          className={`border my-1 text-xs ${
+            isInc
+              ? 'border-emerald-300 bg-emerald-100/90 text-emerald-950'
+              : 'border-red-300 bg-red-100/90 text-red-950'
+          }`}
+        >
+          {/* Header Row */}
+          <div className="flex items-center justify-between px-2.5 py-1.5 font-bold">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="uppercase tracking-tight font-extrabold truncate">
+                {node.label}
+              </span>
+            </div>
 
+            <div className="text-right shrink-0 ml-2">
+              <span
+                className={`text-xs sm:text-sm font-black font-mono tabular-nums ${
+                  isInc ? 'text-emerald-900' : 'text-red-900'
+                }`}
+              >
+                {isInc ? '+' : '-'}
+                {formatMoney(node.amount)}
+              </span>
+            </div>
+          </div>
+
+          {/* Children Container */}
+          {hasChildren && (
+            <div className="divide-y divide-stone-200/80 border-t border-stone-200/80 bg-white">
+              {node.children!.map((child) => renderTreeNode(child, level + 1))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // LEVEL 1: SUBGROUPS / SUBTOTALS (e.g. "Gastos directos", "Trabajos de maquinaria", "Servicios para otros", "Ventas de cosecha")
+    if (level === 1) {
+      return (
+        <div key={node.id} className="bg-stone-200/70 text-stone-950 border-b border-stone-300">
+          <div
+            onClick={() => {
+              if (hasRecords) {
+                openLibroDiario(node.label, node.sublabel, node.amount, allRecords);
+              }
+            }}
+            className={`flex items-center justify-between px-2.5 py-1.5 ${
+              hasRecords ? 'cursor-pointer hover:bg-stone-300/60 transition' : ''
+            }`}
+          >
+            <div className="flex items-center gap-1.5 min-w-0 pl-1">
+              <span className="font-extrabold text-xs sm:text-sm text-stone-950 truncate">
+                {node.label}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0 ml-2">
+              <span className="font-extrabold font-mono text-xs sm:text-sm text-stone-950 tabular-nums">
+                {formatMoney(node.amount)}
+              </span>
+              {hasRecords && <ChevronRight className="h-4 w-4 text-stone-500" />}
+            </div>
+          </div>
+
+          {hasChildren && (
+            <div className="divide-y divide-stone-200/60 bg-white">
+              {node.children!.map((child) => renderTreeNode(child, level + 1))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // LEVEL 2: CATEGORIES / MACHINES / LOTS / EXPENSE ITEMS
+    if (level === 2) {
+      return (
+        <div key={node.id} className="bg-white text-stone-900 border-b border-stone-200/60">
+          <div
+            onClick={() => {
+              if (hasRecords) {
+                openLibroDiario(node.label, node.sublabel, node.amount, allRecords);
+              }
+            }}
+            className={`flex items-center justify-between px-2.5 py-1 ${
+              hasRecords ? 'cursor-pointer hover:bg-stone-50 transition' : ''
+            }`}
+          >
+            <div className="flex items-center gap-1.5 min-w-0 pl-3.5 sm:pl-5">
+              {node.icon && (
+                <VisualIcon
+                  iconId={node.icon}
+                  name={node.label}
+                  size={14}
+                  className="inline-block shrink-0"
+                />
+              )}
+              <span className="font-bold text-xs text-stone-900 truncate">
+                {node.label}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0 ml-2 font-mono font-semibold text-xs text-stone-800 tabular-nums">
+              <span>{formatMoney(node.amount)}</span>
+              {hasRecords && <ChevronRight className="h-3.5 w-3.5 text-stone-400" />}
+            </div>
+          </div>
+
+          {hasChildren && (
+            <div className="divide-y divide-stone-100 bg-stone-50/50">
+              {node.children!.map((child) => renderTreeNode(child, level + 1))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // LEVEL 3: REAL IMPLEMENTS / LEAF DETAILS
     return (
-      <div className="space-y-6 max-w-3xl mx-auto w-full">
-        {renderSubReportHeader(
-          'Por lote',
-          () => setCurrentScreen('menu'),
-          exportLotesCSV,
-          'Ingresos, gastos y resultado de cada lote'
-        )}
-
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-4">
-          <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-              Lotes Agrícolas ({safeLots.length})
-            </h3>
-            <span className="text-[11px] text-slate-500">
-              Toca un lote para ver sus gastos e ingresos detallados
+      <div key={node.id} className="bg-stone-50/60 text-stone-700 border-b border-stone-100">
+        <div
+          onClick={() => {
+            if (hasRecords) {
+              openLibroDiario(node.label, node.sublabel, node.amount, allRecords);
+            }
+          }}
+          className={`flex items-center justify-between px-2.5 py-0.5 sm:py-1 ${
+            hasRecords ? 'cursor-pointer hover:bg-stone-100/70 transition' : ''
+          }`}
+        >
+          <div className="flex items-center gap-1.5 min-w-0 pl-7 sm:pl-10">
+            {node.icon && (
+              <VisualIcon
+                iconId={node.icon}
+                name={node.label}
+                size={13}
+                className="inline-block shrink-0 opacity-80"
+              />
+            )}
+            <span className="font-normal text-[11px] sm:text-xs text-stone-700 truncate">
+              {node.label}
             </span>
           </div>
 
-          <div className="space-y-3">
-            {safeLots.map((l) => {
-              const lIncs = filteredIncomes
-                .filter((i) => i && i.loteId === l.id)
-                .reduce(
-                  (s, i) => s + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
-                  0
-                );
-              const lExpDir = filteredExpenses
-                .filter((e) => e && e.loteId === l.id && !e.esTrabajoPropio)
-                .reduce(
-                  (s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
-                  0
-                );
-              const lExpMaq = filteredExpenses
-                .filter((e) => e && e.loteId === l.id && e.esTrabajoPropio)
-                .reduce(
-                  (s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
-                  0
-                );
-              const net = lIncs - (lExpDir + lExpMaq);
+          <div className="flex items-center gap-1.5 shrink-0 ml-2 font-mono text-[11px] sm:text-xs text-stone-700 tabular-nums">
+            <span>{formatMoney(node.amount)}</span>
+            {hasRecords && <ChevronRight className="h-3 w-3 text-stone-400" />}
+          </div>
+        </div>
 
-              return (
-                <button
-                  key={l.id}
-                  type="button"
-                  onClick={() => setSelectedLotId(l.id)}
-                  className="w-full text-left p-4 rounded-xl bg-slate-50 hover:bg-slate-100/80 active:bg-slate-200/70 border border-slate-200 transition cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 group"
-                >
-                  <div className="flex items-center gap-3.5 min-w-0">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-purple-100 text-purple-800 group-hover:bg-purple-700 group-hover:text-white transition">
-                      <Layers className="h-5 w-5" />
-                    </div>
-                    <div className="min-w-0">
-                      <h4 className="text-sm font-bold text-slate-900 group-hover:text-purple-800 transition truncate">
-                        {l.nombre || 'Sin nombre'}
-                      </h4>
-                      <p className="text-xs text-slate-500">
-                        {l.superficieHectareas || 0} ha &bull; Cultivo:{' '}
-                        {l.cultivoActual || 'Sin cultivo'}
-                      </p>
-                    </div>
-                  </div>
+        {hasChildren && (
+          <div className="divide-y divide-stone-100 bg-white">
+            {node.children!.map((child) => renderTreeNode(child, level + 1))}
+          </div>
+        )}
+      </div>
+    );
+  };
 
-                  <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-200/60">
-                    <div className="text-left sm:text-right">
-                      <span className="text-[10px] text-slate-400 block sm:inline mr-1">
-                        Resultado:
-                      </span>
-                      <span
-                        className={`text-sm font-bold font-mono ${
-                          net >= 0 ? 'text-emerald-800' : 'text-red-700'
-                        }`}
-                      >
-                        {formatMoney(net)}
-                      </span>
-                    </div>
-                    <span className="text-xs font-semibold text-purple-700 group-hover:translate-x-0.5 transition flex items-center">
-                      Ver reporte &gt;
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
+  // ==========================================================================
+  // UNIFORM TREE BALANCE TABLE WRAPPER
+  // ==========================================================================
+  const renderBalanceView = (
+    title: string,
+    subtitle: string,
+    treeData: TreeNode[],
+    filenamePrefix: string
+  ) => {
+    return (
+      <div className="space-y-2">
+        {/* Compact Title & Action Toolbar Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-1.5 border-b border-stone-200">
+          <div>
+            <h2 className="text-sm sm:text-base font-bold text-stone-900 tracking-tight">
+              {title}
+            </h2>
+            <p className="text-[11px] text-stone-500">
+              {subtitle} &bull; Campaña {currentCampaign.nombre}
+            </p>
+          </div>
 
-            {(unassignedExpenses.length > 0 || unassignedIncomes.length > 0) && (
-              <button
-                type="button"
-                onClick={() => setSelectedLotId('unassigned')}
-                className="w-full text-left p-4 rounded-xl bg-amber-50/70 hover:bg-amber-100/80 border border-amber-200 transition cursor-pointer flex items-center justify-between gap-3 group"
-              >
-                <div className="flex items-center gap-3.5 min-w-0">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-200 text-amber-900">
-                    <AlertCircle className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-bold text-amber-950">
-                      Sin lote asignado
-                    </h4>
-                    <p className="text-xs text-amber-800">
-                      {unassignedExpenses.length} gastos y {unassignedIncomes.length} ingresos sin
-                      lote específico
-                    </p>
-                  </div>
-                </div>
-                <span className="text-xs font-semibold text-amber-900 group-hover:translate-x-0.5 transition">
-                  Ver detalle &gt;
-                </span>
-              </button>
-            )}
+          {/* Action Tools */}
+          <div className="flex items-center gap-1.5 no-print">
+            {/* Export to Excel (.xlsx) */}
+            <button
+              type="button"
+              onClick={() =>
+                handleExportToExcel(
+                  `${title} - Campaña ${currentCampaign.nombre}`,
+                  `${filenamePrefix}_${currentCampaign.nombre}_${activeCurrency}`,
+                  treeData
+                )
+              }
+              className="flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold transition cursor-pointer min-h-[30px] shadow-2xs"
+            >
+              <FileSpreadsheet className="h-3.5 w-3.5" />
+              <span>Excel</span>
+            </button>
 
-            {safeLots.length === 0 && (
-              <p className="text-xs text-slate-400 py-6 text-center">
-                No hay lotes configurados en el sistema.
-              </p>
-            )}
+            {/* Quick Print */}
+            <button
+              type="button"
+              onClick={handlePrint}
+              className="flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-stone-300 text-[11px] font-semibold text-stone-700 hover:bg-stone-50 transition cursor-pointer min-h-[30px]"
+            >
+              <Printer className="h-3.5 w-3.5 text-stone-600" />
+              <span>Imprimir</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Tree Table Container */}
+        <div className="border border-stone-300 bg-white rounded-sm shadow-2xs overflow-hidden print:border-stone-400">
+          <div className="bg-stone-200/90 border-b border-stone-300 px-2.5 py-1 flex items-center justify-between text-[11px] font-bold text-stone-700 tracking-wider uppercase">
+            <span>Concepto / Agrupación Financiera</span>
+            <span>Importe ({activeCurrency === 'BOB' ? 'Bs' : 'USD'})</span>
+          </div>
+
+          <div className="divide-y divide-stone-200">
+            {treeData.map((node) => renderTreeNode(node))}
           </div>
         </div>
       </div>
     );
-  }
+  };
 
   // ==========================================================================
-  // SCREEN 6: REPORTE POR CAMPAÑA
+  // COMPACT TOP CONTROLS BAR (Campaign Selector + Currency Switcher)
   // ==========================================================================
-  if (currentScreen === 'campanas') {
-    if (selectedCampaignDetailId) {
-      const camp = safeCampaigns.find((c) => c && c.id === selectedCampaignDetailId);
-      const isUnassignedCamp = selectedCampaignDetailId === 'unassigned';
-
-      const cJobs = isUnassignedCamp
-        ? filteredJobs.filter((j) => j && !j.campanaId)
-        : filteredJobs.filter((j) => j && j.campanaId === selectedCampaignDetailId);
-
-      const cIncs = isUnassignedCamp
-        ? filteredIncomes.filter((i) => i && !i.campanaId)
-        : filteredIncomes.filter((i) => i && i.campanaId === selectedCampaignDetailId);
-
-      const cExps = isUnassignedCamp
-        ? filteredExpenses.filter((e) => e && !e.campanaId)
-        : filteredExpenses.filter((e) => e && e.campanaId === selectedCampaignDetailId);
-
-      const ext = cJobs
-        .filter((j) => j && j.tipoTrabajo === 'tercero')
-        .reduce(
-          (s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
-          0
-        );
-
-      const crop = cIncs
-        .filter((i) => i && i.modulo === 'propiedad' && !i.esTrabajoPropio)
-        .reduce(
-          (s, i) => s + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
-          0
-        );
-
-      const expDir = cExps
-        .filter((e) => e && !e.esTrabajoPropio)
-        .reduce(
-          (s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
-          0
-        );
-
-      const maqInt = cExps
-        .filter((e) => e && e.esTrabajoPropio)
-        .reduce(
-          (s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
-          0
-        );
-
-      const campNet = ext + crop - (expDir + maqInt);
-
-      const lotIdsInCamp = new Set<string>();
-      cJobs.forEach((j) => j && j.loteId && lotIdsInCamp.add(j.loteId));
-      cIncs.forEach((i) => i && i.loteId && lotIdsInCamp.add(i.loteId));
-      cExps.forEach((e) => e && e.loteId && lotIdsInCamp.add(e.loteId));
-      const associatedLots = safeLots.filter((l) => l && lotIdsInCamp.has(l.id));
-
-      return (
-        <div className="space-y-6 max-w-3xl mx-auto w-full">
-          {renderSubReportHeader(
-            isUnassignedCamp ? 'Sin campaña' : camp?.nombre || 'Reporte de Campaña',
-            () => setSelectedCampaignDetailId(null),
-            exportCampanasCSV,
-            isUnassignedCamp
-              ? `Movimientos sin campaña asignada en Gestión ${selectedGestion}`
-              : `Estado: ${camp?.activa ? 'Activa' : 'Cerrada'} &bull; Gestión ${selectedGestion}`
-          )}
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Ingresos
-              </span>
-              <p className="text-lg sm:text-xl font-bold font-mono text-emerald-800 mt-1">
-                {formatMoney(ext + crop)}
-              </p>
-              <span className="text-[10px] text-slate-400">Terceros + Cosecha</span>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Gastos Directos
-              </span>
-              <p className="text-lg sm:text-xl font-bold font-mono text-red-700 mt-1">
-                {formatMoney(expDir)}
-              </p>
-              <span className="text-[10px] text-slate-400">Insumos y operación</span>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Maquinaria Propia
-              </span>
-              <p className="text-lg sm:text-xl font-bold font-mono text-amber-800 mt-1">
-                {formatMoney(maqInt)}
-              </p>
-              <span className="text-[10px] text-slate-400">Costo interno</span>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-slate-900 text-white shadow-xs">
-              <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider block">
-                Resultado
-              </span>
-              <p
-                className={`text-lg sm:text-xl font-bold font-mono mt-1 ${
-                  campNet >= 0 ? 'text-white' : 'text-red-400'
-                }`}
-              >
-                {formatMoney(campNet)}
-              </p>
-              <span className="text-[10px] text-slate-400">Neto de campaña</span>
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-3">
-            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider pb-2 border-b border-slate-100">
-              Lotes Asociados a esta Campaña ({associatedLots.length})
-            </h3>
-
-            {associatedLots.length > 0 ? (
-              <div className="space-y-2">
-                {associatedLots.map((l) => (
-                  <div
-                    key={l.id}
-                    className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-between text-xs"
-                  >
-                    <div>
-                      <h4 className="font-bold text-slate-900">{l.nombre || 'Sin nombre'}</h4>
-                      <p className="text-slate-500 text-[11px]">
-                        {l.superficieHectareas || 0} ha &bull; {l.cultivoActual || 'Sin cultivo'}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedLotId(l.id);
-                        setCurrentScreen('lotes');
-                      }}
-                      className="text-emerald-700 hover:text-emerald-900 font-semibold text-xs cursor-pointer"
-                    >
-                      Ver lote &gt;
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-slate-400 py-3 text-center">
-                No hay lotes con movimientos asociados a esta campaña.
-              </p>
-            )}
-          </div>
-        </div>
-      );
-    }
-
-    const unassignedCampJobs = filteredJobs.filter((j) => j && !j.campanaId);
-    const unassignedCampExps = filteredExpenses.filter((e) => e && !e.campanaId);
-
+  const renderTopControls = () => {
     return (
-      <div className="space-y-6 max-w-3xl mx-auto w-full">
-        {renderSubReportHeader(
-          'Por campaña',
-          () => setCurrentScreen('menu'),
-          exportCampanasCSV,
-          'Resultados de cada campaña agrícola'
-        )}
+      <div className="bg-white border border-stone-200/80 p-2 rounded-lg shadow-2xs no-print mb-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          {/* Campaign Selector */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setShowCampaignDropdown((prev) => !prev)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-stone-100 hover:bg-stone-200/80 border border-stone-300 text-xs font-bold text-stone-800 transition cursor-pointer min-h-[32px]"
+            >
+              <Calendar className="h-3.5 w-3.5 text-emerald-700 shrink-0" />
+              <span>{currentCampaign.nombre}</span>
+              {currentCampaign.activa && (
+                <span className="text-[9px] font-bold text-emerald-800 bg-emerald-100 px-1.5 py-0.2 rounded-full">
+                  Activa
+                </span>
+              )}
+              <ChevronRight className="h-3.5 w-3.5 text-stone-500 shrink-0 rotate-90" />
+            </button>
 
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-4">
-          <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-              Campañas de la Gestión {selectedGestion} ({gestionCampaigns.length})
-            </h3>
-            <span className="text-[11px] text-slate-500">
-              Toca una campaña para ver su resultado detallado
-            </span>
-          </div>
-
-          <div className="space-y-3">
-            {gestionCampaigns.map((c) => {
-              const cJobs = filteredJobs.filter((j) => j && j.campanaId === c.id);
-              const cIncs = filteredIncomes.filter((i) => i && i.campanaId === c.id);
-              const cExps = filteredExpenses.filter((e) => e && e.campanaId === c.id);
-
-              const ext = cJobs
-                .filter((j) => j && j.tipoTrabajo === 'tercero')
-                .reduce(
-                  (s, j) => s + toViewCurrency(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
-                  0
-                );
-              const crop = cIncs
-                .filter((i) => i && i.modulo === 'propiedad' && !i.esTrabajoPropio)
-                .reduce(
-                  (s, i) => s + toViewCurrency(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
-                  0
-                );
-              const expDir = cExps
-                .filter((e) => e && !e.esTrabajoPropio)
-                .reduce(
-                  (s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
-                  0
-                );
-              const maqInt = cExps
-                .filter((e) => e && e.esTrabajoPropio)
-                .reduce(
-                  (s, e) => s + toViewCurrency(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
-                  0
-                );
-              const net = ext + crop - (expDir + maqInt);
-
-              return (
-                <button
-                  key={c.id}
-                  type="button"
-                  onClick={() => setSelectedCampaignDetailId(c.id)}
-                  className="w-full text-left p-4 rounded-xl bg-slate-50 hover:bg-slate-100/80 active:bg-slate-200/70 border border-slate-200 transition cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 group"
-                >
-                  <div className="flex items-center gap-3.5 min-w-0">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-800 group-hover:bg-amber-700 group-hover:text-white transition">
-                      <Calendar className="h-5 w-5" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <h4 className="text-sm font-bold text-slate-900 group-hover:text-amber-800 transition truncate">
-                          {c.nombre || 'Sin nombre'}
-                        </h4>
-                        <span
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                            c.activa
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : 'bg-slate-200 text-slate-700'
+            {/* Campaign Dropdown */}
+            {showCampaignDropdown && (
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setShowCampaignDropdown(false)}
+                />
+                <div className="absolute left-0 top-full mt-1 z-50 w-64 rounded-lg bg-white border border-stone-300 shadow-xl overflow-hidden divide-y divide-stone-100 animate-fadeIn">
+                  <div className="p-2 bg-stone-50 text-[10px] font-bold text-stone-500 uppercase tracking-wider">
+                    Seleccionar Campaña a Consultar
+                  </div>
+                  <div className="max-h-56 overflow-y-auto">
+                    {safeCampaigns.map((c) => {
+                      const isSelected = String(c.id) === String(selectedCampaignId);
+                      return (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedCampaignId(String(c.id));
+                            setShowCampaignDropdown(false);
+                          }}
+                          className={`w-full flex items-center justify-between p-2 text-left hover:bg-stone-50 transition cursor-pointer text-xs ${
+                            isSelected ? 'bg-emerald-50 font-bold text-emerald-900' : 'text-stone-800'
                           }`}
                         >
-                          {c.activa ? 'Activa' : 'Cerrada'}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-500 mt-0.5">
-                        Ingresos: {formatMoney(ext + crop)} &bull; Gastos: {formatMoney(expDir + maqInt)}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-200/60">
-                    <div className="text-left sm:text-right">
-                      <span className="text-[10px] text-slate-400 block sm:inline mr-1">
-                        Resultado:
-                      </span>
-                      <span
-                        className={`text-sm font-bold font-mono ${
-                          net >= 0 ? 'text-emerald-800' : 'text-red-700'
-                        }`}
-                      >
-                        {formatMoney(net)}
-                      </span>
-                    </div>
-                    <span className="text-xs font-semibold text-amber-700 group-hover:translate-x-0.5 transition flex items-center">
-                      Ver reporte &gt;
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
-
-            {(unassignedCampJobs.length > 0 || unassignedCampExps.length > 0) && (
-              <button
-                type="button"
-                onClick={() => setSelectedCampaignDetailId('unassigned')}
-                className="w-full text-left p-4 rounded-xl bg-amber-50/70 hover:bg-amber-100/80 border border-amber-200 transition cursor-pointer flex items-center justify-between gap-3 group"
-              >
-                <div className="flex items-center gap-3.5 min-w-0">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-200 text-amber-900">
-                    <AlertCircle className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-bold text-amber-950">
-                      Sin campaña asignada
-                    </h4>
-                    <p className="text-xs text-amber-800">
-                      {unassignedCampJobs.length} trabajos y {unassignedCampExps.length} gastos sin
-                      campaña específica
-                    </p>
+                          <div className="min-w-0 pr-2">
+                            <p className="truncate font-semibold">{c.nombre}</p>
+                            <p className="text-[10px] text-stone-400">
+                              {c.fechaInicio || 'Sin fecha'} &bull; {c.estado || 'registrada'}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {c.activa && (
+                              <span className="text-[9px] font-bold text-emerald-800 bg-emerald-100 px-1 rounded">
+                                Activa
+                              </span>
+                            )}
+                            {isSelected && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />}
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
-                <span className="text-xs font-semibold text-amber-900 group-hover:translate-x-0.5 transition">
-                  Ver detalle &gt;
-                </span>
-              </button>
+              </>
             )}
+          </div>
 
-            {gestionCampaigns.length === 0 && (
-              <p className="text-xs text-slate-400 py-6 text-center">
-                No se encontraron campañas específicas para la Gestión {selectedGestion}.
-              </p>
+          {/* Module-specific Currency Switcher */}
+          <div className="flex items-center gap-0.5 bg-stone-100 p-0.5 rounded-md border border-stone-300">
+            <button
+              type="button"
+              onClick={() => setActiveCurrency('BOB')}
+              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
+                activeCurrency === 'BOB'
+                  ? 'bg-white text-stone-900 shadow-2xs'
+                  : 'text-stone-500 hover:text-stone-800'
+              }`}
+            >
+              Bs
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveCurrency('USD')}
+              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
+                activeCurrency === 'USD'
+                  ? 'bg-white text-emerald-800 shadow-2xs'
+                  : 'text-stone-500 hover:text-stone-800'
+              }`}
+            >
+              USD
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ==========================================================================
+  // UNIFIED TOP NAVIGATION ("Volver" button)
+  // ==========================================================================
+  const renderBackButton = () => {
+    let label = 'Volver a Administración';
+    let targetAction = onBack || (() => {});
+
+    if (currentScreen === 'balance_general') {
+      label = 'Volver a Finanzas';
+      targetAction = () => setCurrentScreen('menu');
+    } else if (currentScreen === 'maquinarias') {
+      label = 'Volver a Finanzas';
+      targetAction = () => setCurrentScreen('menu');
+    } else if (currentScreen === 'propiedad_menu') {
+      label = 'Volver a Finanzas';
+      targetAction = () => setCurrentScreen('menu');
+    } else if (currentScreen === 'propiedad_balance') {
+      label = 'Volver a Propiedad';
+      targetAction = () => setCurrentScreen('propiedad_menu');
+    } else if (currentScreen === 'lotes') {
+      label = 'Volver a Propiedad';
+      targetAction = () => setCurrentScreen('propiedad_menu');
+    } else if (currentScreen === 'lote_detail') {
+      label = 'Volver a Lotes';
+      targetAction = () => setCurrentScreen('lotes');
+    } else if (currentScreen === 'campanas') {
+      label = 'Volver a Finanzas';
+      targetAction = () => setCurrentScreen('menu');
+    } else if (currentScreen === 'campana_detail') {
+      label = 'Volver a Campañas';
+      targetAction = () => setCurrentScreen('campanas');
+    } else if (currentScreen === 'libro_diario') {
+      label = 'Volver al balance';
+      targetAction = () => {
+        if (libroDiarioData?.returnScreen) {
+          setCurrentScreen(libroDiarioData.returnScreen);
+        } else {
+          setCurrentScreen('menu');
+        }
+      };
+    }
+
+    return (
+      <div className="pb-2 border-b border-stone-200 no-print">
+        <button
+          type="button"
+          onClick={targetAction}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white border border-stone-300 text-xs font-bold text-stone-700 hover:bg-stone-50 transition cursor-pointer shrink-0 min-h-[32px]"
+        >
+          <ArrowLeft className="h-3.5 w-3.5 text-emerald-700" />
+          <span>{label}</span>
+        </button>
+      </div>
+    );
+  };
+
+  // ==========================================================================
+  // SCREEN: DETALLE / LIBRO DIARIO (PANTALLA SEPARADA NUEVA)
+  // ==========================================================================
+  if (currentScreen === 'libro_diario' && libroDiarioData) {
+    const { title, subtitle, totalAmount, records } = libroDiarioData;
+
+    return (
+      <div className="space-y-3 max-w-3xl mx-auto w-full">
+        {renderBackButton()}
+
+        {/* Header Summary Box */}
+        <div className="bg-white border border-stone-300 p-3 rounded-md shadow-2xs flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="flex items-center gap-2">
+              <BookOpen className="h-4 w-4 text-emerald-700 shrink-0" />
+              <h2 className="text-sm sm:text-base font-bold text-stone-900">
+                {title}
+              </h2>
+            </div>
+            {subtitle && (
+              <p className="text-xs text-stone-500 mt-0.5">{subtitle}</p>
+            )}
+            <p className="text-[11px] text-stone-500 mt-0.5 font-mono">
+              Campaña: <strong>{currentCampaign.nombre}</strong> &bull; Operaciones:{' '}
+              <strong>{records.length}</strong>
+            </p>
+          </div>
+
+          <div className="text-right shrink-0 bg-stone-100 px-3 py-1.5 rounded border border-stone-300">
+            <span className="text-[10px] font-bold uppercase text-stone-500 block">
+              Total Acumulado ({activeCurrency})
+            </span>
+            <span className="text-sm sm:text-base font-extrabold font-mono tabular-nums text-stone-900 block">
+              {formatMoney(totalAmount)}
+            </span>
+          </div>
+        </div>
+
+        {/* Top Controls (Bs/USD + Excel + Print) */}
+        <div className="flex items-center justify-between gap-2 no-print">
+          <div className="flex items-center gap-0.5 bg-stone-100 p-0.5 rounded border border-stone-300">
+            <button
+              type="button"
+              onClick={() => setActiveCurrency('BOB')}
+              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
+                activeCurrency === 'BOB'
+                  ? 'bg-white text-stone-900 shadow-2xs'
+                  : 'text-stone-500 hover:text-stone-800'
+              }`}
+            >
+              Bs
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveCurrency('USD')}
+              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
+                activeCurrency === 'USD'
+                  ? 'bg-white text-emerald-800 shadow-2xs'
+                  : 'text-stone-500 hover:text-stone-800'
+              }`}
+            >
+              USD
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() =>
+                handleExportToExcel(
+                  `${title} - Campaña ${currentCampaign.nombre}`,
+                  `Libro_Diario_${title.replace(/[^a-zA-Z0-9]/g, '_')}_${activeCurrency}`,
+                  [
+                    {
+                      id: 'ld_export',
+                      label: title,
+                      type: 'group',
+                      amount: totalAmount,
+                      children: records.map((r) => ({
+                        id: r.id,
+                        label: r.concepto,
+                        date: r.fecha,
+                        entity: r.entidad,
+                        unitInfo: r.cantidad ? `${r.cantidad} ${r.unidad || 'u'}` : undefined,
+                        type: 'detail',
+                        amount: r.monto,
+                      })),
+                    },
+                  ]
+                )
+              }
+              className="flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold transition cursor-pointer min-h-[30px]"
+            >
+              <FileSpreadsheet className="h-3.5 w-3.5" />
+              <span>Excel</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handlePrint}
+              className="flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-stone-300 text-[11px] font-semibold text-stone-700 hover:bg-stone-50 transition cursor-pointer min-h-[30px]"
+            >
+              <Printer className="h-3.5 w-3.5 text-stone-600" />
+              <span>Imprimir</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Libro Diario Table */}
+        <div className="border border-stone-300 bg-white rounded-sm shadow-2xs overflow-hidden print:border-stone-400">
+          <div className="bg-stone-200/90 border-b border-stone-300 px-2 py-1.5 grid grid-cols-12 text-[11px] font-bold text-stone-700 uppercase tracking-wider gap-1">
+            <span className="col-span-2 sm:col-span-2">Fecha</span>
+            <span className="col-span-5 sm:col-span-4">Concepto / Descripción</span>
+            <span className="col-span-2 sm:col-span-3">Entidad / Ref</span>
+            <span className="col-span-3 sm:col-span-3 text-right">Importe ({activeCurrency})</span>
+          </div>
+
+          <div className="divide-y divide-stone-200">
+            {records.map((r) => (
+              <div
+                key={r.id}
+                className="px-2 py-1.5 grid grid-cols-12 text-xs hover:bg-stone-50 transition gap-1 items-center"
+              >
+                <div className="col-span-2 sm:col-span-2 font-mono text-[11px] text-stone-500 truncate">
+                  {r.fecha || '-'}
+                </div>
+
+                <div className="col-span-5 sm:col-span-4 min-w-0 pr-1">
+                  <div className="flex items-center gap-1.5">
+                    {r.icono && (
+                      <VisualIcon
+                        iconId={r.icono}
+                        name={r.concepto}
+                        size={14}
+                        className="inline-block shrink-0"
+                      />
+                    )}
+                    <span className="font-semibold text-stone-900 truncate">
+                      {r.concepto}
+                    </span>
+                  </div>
+                  {r.maquinaImplemento && (
+                    <span className="text-[10px] text-stone-400 block truncate">
+                      {r.maquinaImplemento}
+                    </span>
+                  )}
+                </div>
+
+                <div className="col-span-2 sm:col-span-3 text-[11px] text-stone-600 truncate">
+                  {r.entidad || '-'}
+                  {r.cantidad ? (
+                    <span className="text-[10px] text-stone-400 block font-mono">
+                      {r.cantidad} {r.unidad || 'u'}{' '}
+                      {r.tarifa ? `@ ${r.tarifa}` : ''}
+                    </span>
+                  ) : null}
+                </div>
+
+                <div className="col-span-3 sm:col-span-3 text-right font-mono font-bold text-stone-900 tabular-nums">
+                  {formatMoney(r.monto)}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Table Summary Footer */}
+          <div className="bg-stone-100 border-t-2 border-stone-300 px-2 py-1.5 flex items-center justify-between text-xs font-extrabold text-stone-900">
+            <span>TOTAL REGISTRADO ({records.length} movimientos)</span>
+            <span className="font-mono tabular-nums text-sm">
+              {formatMoney(totalAmount)}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ==========================================================================
+  // SCREEN: MAIN MENU DE FINANZAS
+  // ==========================================================================
+  if (currentScreen === 'menu') {
+    const bgResultNode = balanceGeneralTree.find((n) => n.isResult);
+    const maqResultNode = balanceMaquinariasTree.find((n) => n.isResult);
+    const propResultNode = balancePropiedadTree.find((n) => n.isResult);
+
+    const menuOptions = [
+      {
+        id: 'balance_general' as const,
+        title: 'Balance general',
+        desc: 'Consolidado integral de la empresa',
+        icon: <Layers className="h-4 w-4 text-emerald-700" />,
+        result: bgResultNode?.amount ?? 0,
+      },
+      {
+        id: 'maquinarias' as const,
+        title: 'Maquinarias',
+        desc: 'Servicios para otros, labores internas y costos directos',
+        icon: <Tractor className="h-4 w-4 text-amber-700" />,
+        result: maqResultNode?.amount ?? 0,
+      },
+      {
+        id: 'propiedad_menu' as const,
+        title: 'Propiedad',
+        desc: 'Balance agrícola de lotes y ventas de cosecha',
+        icon: <Trees className="h-4 w-4 text-blue-700" />,
+        result: propResultNode?.amount ?? 0,
+      },
+      {
+        id: 'campanas' as const,
+        title: 'Por campaña',
+        desc: 'Histórico comparativo y balances por período',
+        icon: <Calendar className="h-4 w-4 text-purple-700" />,
+        extraInfo: `${safeCampaigns.length} campañas`,
+      },
+    ];
+
+    return (
+      <div className="space-y-3 max-w-2xl mx-auto w-full">
+        {renderBackButton()}
+
+        {/* Header Title */}
+        <div>
+          <h1 className="text-base sm:text-lg font-bold text-stone-900 tracking-tight flex items-center gap-2">
+            <TrendingUp className="h-5 w-5 text-emerald-700" />
+            <span>FINANZAS</span>
+          </h1>
+          <p className="text-xs text-stone-500">
+            Balances y resultados económicos de la empresa
+          </p>
+        </div>
+
+        {renderTopControls()}
+
+        {/* Compact Excel-style Menu Table */}
+        <div className="border border-stone-300 bg-white rounded-sm shadow-2xs overflow-hidden divide-y divide-stone-200">
+          <div className="bg-stone-100 px-3 py-1.5 flex items-center justify-between text-[11px] font-bold text-stone-700 uppercase tracking-wider">
+            <span>Módulo / Consulta Financiera</span>
+            <span>Resultado ({activeCurrency})</span>
+          </div>
+
+          {menuOptions.map((opt) => {
+            const hasResult = typeof opt.result === 'number';
+            const isPos = (opt.result ?? 0) >= 0;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => setCurrentScreen(opt.id)}
+                className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-stone-50 transition cursor-pointer text-left group"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="shrink-0 p-1 rounded bg-stone-100 border border-stone-200">
+                    {opt.icon}
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="text-xs font-bold text-stone-900 group-hover:text-emerald-800 transition">
+                      {opt.title}
+                    </h3>
+                    <p className="text-[11px] text-stone-500 truncate">{opt.desc}</p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0 ml-2">
+                  {hasResult ? (
+                    <span
+                      className={`text-xs font-bold font-mono tabular-nums ${
+                        isPos ? 'text-emerald-700' : 'text-red-700'
+                      }`}
+                    >
+                      {isPos ? '+' : ''}
+                      {formatMoney(opt.result)}
+                    </span>
+                  ) : (
+                    <span className="text-[11px] font-semibold text-stone-500">
+                      {opt.extraInfo}
+                    </span>
+                  )}
+                  <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition" />
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  // ==========================================================================
+  // SCREEN: BALANCE GENERAL CONSOLIDADO
+  // ==========================================================================
+  if (currentScreen === 'balance_general') {
+    return (
+      <div className="space-y-3 max-w-3xl mx-auto w-full">
+        {renderBackButton()}
+        {renderTopControls()}
+        {renderBalanceView(
+          'Balance General Consolidado',
+          'Ingresos reales y gastos directos de la empresa',
+          balanceGeneralTree,
+          'Balance_General'
+        )}
+      </div>
+    );
+  }
+
+  // ==========================================================================
+  // SCREEN: BALANCE DE MAQUINARIAS
+  // ==========================================================================
+  if (currentScreen === 'maquinarias') {
+    return (
+      <div className="space-y-3 max-w-3xl mx-auto w-full">
+        {renderBackButton()}
+        {renderTopControls()}
+        {renderBalanceView(
+          'Balance de Maquinarias',
+          'Trabajos en propiedad, servicios para otros y gastos operativos',
+          balanceMaquinariasTree,
+          'Balance_Maquinarias'
+        )}
+      </div>
+    );
+  }
+
+  // ==========================================================================
+  // SCREEN: PROPIEDAD SUBMENU
+  // ==========================================================================
+  if (currentScreen === 'propiedad_menu') {
+    return (
+      <div className="space-y-3 max-w-2xl mx-auto w-full">
+        {renderBackButton()}
+
+        <div>
+          <h2 className="text-base font-bold text-stone-900 tracking-tight flex items-center gap-2">
+            <Trees className="h-5 w-5 text-emerald-700" />
+            <span>Módulo Propiedad</span>
+          </h2>
+          <p className="text-xs text-stone-500">
+            Selecciona la consulta financiera que deseas realizar
+          </p>
+        </div>
+
+        {renderTopControls()}
+
+        <div className="border border-stone-300 bg-white rounded-sm shadow-2xs overflow-hidden divide-y divide-stone-200">
+          <div className="bg-stone-100 px-3 py-1.5 flex items-center justify-between text-[11px] font-bold text-stone-700 uppercase tracking-wider">
+            <span>Consulta Financiera</span>
+            <span>Acción</span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setCurrentScreen('propiedad_balance')}
+            className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-stone-50 transition cursor-pointer text-left group"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="shrink-0 p-1 rounded bg-emerald-50 border border-emerald-200">
+                <Trees className="h-4 w-4 text-emerald-700" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-xs font-bold text-stone-900 group-hover:text-emerald-800 transition">
+                  Balance de Propiedad
+                </h3>
+                <p className="text-[11px] text-stone-500 truncate">
+                  Ingresos por cosechas, insumos y labores recibidas
+                </p>
+              </div>
+            </div>
+            <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setCurrentScreen('lotes')}
+            className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-stone-50 transition cursor-pointer text-left group"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="shrink-0 p-1 rounded bg-blue-50 border border-blue-200">
+                <LandPlot className="h-4 w-4 text-blue-700" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-xs font-bold text-stone-900 group-hover:text-blue-800 transition">
+                    Reportes por lote
+                  </h3>
+                  <span className="text-[10px] font-bold text-blue-800 bg-blue-100 px-1.5 rounded">
+                    {safeLots.length}
+                  </span>
+                </div>
+                <p className="text-[11px] text-stone-500 truncate">
+                  Resultados individuales y margen económico por hectárea
+                </p>
+              </div>
+            </div>
+            <ChevronRight className="h-4 w-4 text-stone-400 group-hover:text-emerald-700 transition shrink-0" />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ==========================================================================
+  // SCREEN: BALANCE DE PROPIEDAD
+  // ==========================================================================
+  if (currentScreen === 'propiedad_balance') {
+    return (
+      <div className="space-y-3 max-w-3xl mx-auto w-full">
+        {renderBackButton()}
+        {renderTopControls()}
+        {renderBalanceView(
+          'Balance de Propiedad',
+          'Ventas de cosecha, insumos directos y trabajos de maquinaria',
+          balancePropiedadTree,
+          'Balance_Propiedad'
+        )}
+      </div>
+    );
+  }
+
+  // ==========================================================================
+  // SCREEN: REPORTES POR LOTE (COMPACT LIST)
+  // ==========================================================================
+  if (currentScreen === 'lotes') {
+    return (
+      <div className="space-y-3 max-w-3xl mx-auto w-full">
+        {renderBackButton()}
+        {renderTopControls()}
+
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm sm:text-base font-bold text-stone-900 tracking-tight flex items-center gap-2">
+              <LandPlot className="h-4 w-4 text-emerald-700" />
+              <span>Reportes por Lote ({safeLots.length})</span>
+            </h2>
+            <p className="text-[11px] text-stone-500">
+              Desglose económico y márgenes por hectárea en Campaña {currentCampaign.nombre}
+            </p>
+          </div>
+
+          <div className="relative w-full sm:w-60">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-stone-400" />
+            <input
+              type="text"
+              value={lotSearchTerm}
+              onChange={(e) => setLotSearchTerm(e.target.value)}
+              placeholder="Buscar lote o cultivo..."
+              className="w-full pl-8 pr-3 py-1 rounded-md border border-stone-300 bg-white text-xs focus:outline-none focus:border-emerald-600 transition min-h-[30px]"
+            />
+            {lotSearchTerm && (
+              <button
+                type="button"
+                onClick={() => setLotSearchTerm('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600"
+              >
+                <X className="h-3 w-3" />
+              </button>
             )}
           </div>
         </div>
+
+        {/* Compact Lots Excel Table */}
+        <div className="border border-stone-300 bg-white rounded-sm shadow-2xs overflow-hidden divide-y divide-stone-200">
+          <div className="bg-stone-100 px-2.5 py-1.5 flex items-center justify-between text-[11px] font-bold text-stone-700 uppercase tracking-wider">
+            <span>Lote / Cultivo / Superficie</span>
+            <span>Resultado / Margen ha</span>
+          </div>
+
+          {filteredLotsSummary.length === 0 ? (
+            <div className="p-6 text-center text-stone-500 text-xs">
+              No se encontraron lotes que coincidan con la búsqueda.
+            </div>
+          ) : (
+            filteredLotsSummary.map(
+              ({
+                lot,
+                incomes: lInc,
+                expenses: lExp,
+                result: lRes,
+                superficie: lSup,
+                marginPerHa: lMargin,
+              }) => {
+                const isPositive = lRes >= 0;
+                const crop = getLotCrop(lot);
+                return (
+                  <button
+                    key={lot.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedLotId(String(lot.id));
+                      setCurrentScreen('lote_detail');
+                    }}
+                    className="w-full flex items-center justify-between px-2.5 py-2 hover:bg-stone-50 transition cursor-pointer text-left group"
+                  >
+                    <div className="min-w-0 pr-2">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-xs font-bold text-stone-900 group-hover:text-emerald-800 transition">
+                          {lot.nombre}
+                        </span>
+                        {crop && (
+                          <span className="text-[10px] font-medium text-stone-600 bg-stone-100 px-1.5 py-0.2 rounded">
+                            {crop}
+                          </span>
+                        )}
+                        <span className="text-[10px] font-mono text-stone-500">
+                          ({lSup} ha)
+                        </span>
+                      </div>
+                      <div className="text-[10px] font-mono text-stone-500 mt-0.5">
+                        Ingresos: {formatMoney(lInc)} &bull; Gastos: {formatMoney(lExp)}
+                      </div>
+                    </div>
+
+                    <div className="text-right shrink-0 font-mono tabular-nums flex items-center gap-1.5">
+                      <div>
+                        <span
+                          className={`text-xs font-bold block ${
+                            isPositive ? 'text-emerald-700' : 'text-red-700'
+                          }`}
+                        >
+                          {isPositive ? '+' : ''}
+                          {formatMoney(lRes)}
+                        </span>
+                        {lMargin !== null && (
+                          <span
+                            className={`text-[10px] font-semibold block ${
+                              lMargin >= 0 ? 'text-emerald-600' : 'text-red-600'
+                            }`}
+                          >
+                            {lMargin >= 0 ? '+' : ''}
+                            {formatMoney(lMargin)}/ha
+                          </span>
+                        )}
+                      </div>
+                      <ChevronRight className="h-3.5 w-3.5 text-stone-400 group-hover:text-emerald-700" />
+                    </div>
+                  </button>
+                );
+              }
+            )
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ==========================================================================
+  // SCREEN: REPORTE INDIVIDUAL DE LOTE (DETAIL BALANCE)
+  // ==========================================================================
+  if (currentScreen === 'lote_detail' && selectedLot) {
+    const lotSummaryItem = lotsSummary.find(
+      (item) => String(item.lot.id) === String(selectedLot.id)
+    );
+
+    return (
+      <div className="space-y-3 max-w-3xl mx-auto w-full">
+        {renderBackButton()}
+        {renderTopControls()}
+
+        {/* Lot Header Bar */}
+        <div className="bg-white border border-stone-300 p-2.5 rounded-sm flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="flex items-center gap-1.5">
+              <LandPlot className="h-4 w-4 text-emerald-700 shrink-0" />
+              <h2 className="text-sm font-bold text-stone-900">
+                {selectedLot.nombre}
+              </h2>
+            </div>
+            <p className="text-[11px] text-stone-500 mt-0.5 font-mono">
+              Cultivo: {getLotCrop(selectedLot) || 'Sin cultivo'} &bull; Superficie:{' '}
+              {getLotSurface(selectedLot)} ha &bull; Campaña {currentCampaign.nombre}
+            </p>
+          </div>
+
+          {lotSummaryItem && lotSummaryItem.marginPerHa !== null && (
+            <div className="text-right shrink-0 bg-stone-100 px-2 py-1 rounded border border-stone-300">
+              <span className="text-[9px] font-bold uppercase text-stone-500 block">
+                Margen por hectárea
+              </span>
+              <span
+                className={`text-xs font-extrabold font-mono tabular-nums block ${
+                  lotSummaryItem.marginPerHa >= 0 ? 'text-emerald-700' : 'text-red-700'
+                }`}
+              >
+                {lotSummaryItem.marginPerHa >= 0 ? '+' : ''}
+                {formatMoney(lotSummaryItem.marginPerHa)}/ha
+              </span>
+            </div>
+          )}
+        </div>
+
+        {renderBalanceView(
+          `Balance del Lote: ${selectedLot.nombre}`,
+          `Ventas asignadas, gastos directos y labores de maquinaria en ${selectedLot.nombre}`,
+          balanceLoteTree,
+          `Reporte_Lote_${selectedLot.nombre}`
+        )}
+      </div>
+    );
+  }
+
+  // ==========================================================================
+  // SCREEN: POR CAMPAÑA (COMPACT LIST)
+  // ==========================================================================
+  if (currentScreen === 'campanas') {
+    return (
+      <div className="space-y-3 max-w-3xl mx-auto w-full">
+        {renderBackButton()}
+
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm sm:text-base font-bold text-stone-900 tracking-tight flex items-center gap-2">
+              <Calendar className="h-4 w-4 text-emerald-700" />
+              <span>Reportes por Campaña ({safeCampaigns.length})</span>
+            </h2>
+            <p className="text-[11px] text-stone-500">
+              Histórico financiero consolidado ordenado de más reciente a más antigua
+            </p>
+          </div>
+
+          <div className="flex items-center gap-0.5 bg-stone-100 p-0.5 rounded border border-stone-300 self-start sm:self-auto">
+            <button
+              type="button"
+              onClick={() => setActiveCurrency('BOB')}
+              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
+                activeCurrency === 'BOB'
+                  ? 'bg-white text-stone-900 shadow-2xs'
+                  : 'text-stone-500 hover:text-stone-800'
+              }`}
+            >
+              Bs
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveCurrency('USD')}
+              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
+                activeCurrency === 'USD'
+                  ? 'bg-white text-emerald-800 shadow-2xs'
+                  : 'text-stone-500 hover:text-stone-800'
+              }`}
+            >
+              USD
+            </button>
+          </div>
+        </div>
+
+        <div className="border border-stone-300 bg-white rounded-sm shadow-2xs overflow-hidden divide-y divide-stone-200">
+          <div className="bg-stone-100 px-2.5 py-1.5 flex items-center justify-between text-[11px] font-bold text-stone-700 uppercase tracking-wider">
+            <span>Campaña Agrícola / Período</span>
+            <span>Resultado Consolidado ({activeCurrency})</span>
+          </div>
+
+          {campaignsSummary.map(({ campaign: c, totalIncome, totalExpense, result: cRes }) => {
+            const isPositive = cRes >= 0;
+            return (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => {
+                  setSelectedCampaignDetailId(String(c.id));
+                  setCurrentScreen('campana_detail');
+                }}
+                className="w-full flex items-center justify-between px-2.5 py-2 hover:bg-stone-50 transition cursor-pointer text-left group"
+              >
+                <div className="min-w-0 pr-2">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-xs font-bold text-stone-900 group-hover:text-emerald-800 transition">
+                      {c.nombre}
+                    </span>
+                    {c.activa && (
+                      <span className="text-[9px] font-bold text-emerald-800 bg-emerald-100 px-1.5 rounded">
+                        Activa
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[10px] font-mono text-stone-500 mt-0.5">
+                    Ingresos: {formatMoney(totalIncome)} &bull; Gastos: {formatMoney(totalExpense)}
+                  </div>
+                </div>
+
+                <div className="text-right shrink-0 font-mono tabular-nums flex items-center gap-1.5">
+                  <span
+                    className={`text-xs font-bold block ${
+                      isPositive ? 'text-emerald-700' : 'text-red-700'
+                    }`}
+                  >
+                    {isPositive ? '+' : ''}
+                    {formatMoney(cRes)}
+                  </span>
+                  <ChevronRight className="h-3.5 w-3.5 text-stone-400 group-hover:text-emerald-700" />
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  // ==========================================================================
+  // SCREEN: REPORTE INDIVIDUAL DE CAMPAÑA (DETAIL BALANCE)
+  // ==========================================================================
+  if (currentScreen === 'campana_detail' && selectedCampaignDetail) {
+    return (
+      <div className="space-y-3 max-w-3xl mx-auto w-full">
+        {renderBackButton()}
+
+        <div className="flex justify-end no-print">
+          <div className="flex items-center gap-0.5 bg-stone-100 p-0.5 rounded border border-stone-300">
+            <button
+              type="button"
+              onClick={() => setActiveCurrency('BOB')}
+              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
+                activeCurrency === 'BOB'
+                  ? 'bg-white text-stone-900 shadow-2xs'
+                  : 'text-stone-500 hover:text-stone-800'
+              }`}
+            >
+              Bs
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveCurrency('USD')}
+              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
+                activeCurrency === 'USD'
+                  ? 'bg-white text-emerald-800 shadow-2xs'
+                  : 'text-stone-500 hover:text-stone-800'
+              }`}
+            >
+              USD
+            </button>
+          </div>
+        </div>
+
+        {renderBalanceView(
+          `Balance: ${selectedCampaignDetail.nombre}`,
+          `Resultado consolidado de la campaña ${selectedCampaignDetail.nombre}`,
+          balanceCampanaTree,
+          `Balance_Campana_${selectedCampaignDetail.nombre}`
+        )}
       </div>
     );
   }
@@ -2148,11 +2976,13 @@ const ReportsViewInner: React.FC<Props> = ({
   return null;
 };
 
-// Export ReportsView wrapped in ReportsErrorBoundary
+// ============================================================================
+// EXPORTED COMPONENT WRAPPED WITH ERROR BOUNDARY
+// ============================================================================
 export const ReportsView: React.FC<Props> = (props) => {
   return (
     <ReportsErrorBoundary>
-      <ReportsViewInner {...props} />
+      <FinanzasViewInner {...props} />
     </ReportsErrorBoundary>
   );
 };

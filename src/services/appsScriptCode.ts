@@ -2441,6 +2441,7 @@ function handleUpdateMovement(id, m, userSession) {
     if (map['clase'] !== undefined) sheet.getRange(foundIdx, map['clase'] + 1).setValue(finalClase);
     if (map['descripcion'] !== undefined) sheet.getRange(foundIdx, map['descripcion'] + 1).setValue(finalDesc);
     if (map['loteid'] !== undefined) sheet.getRange(foundIdx, map['loteid'] + 1).setValue(finalLoteId);
+    if (map['maquinaid'] !== undefined && (m.maquinaId !== undefined || m.maquinariaId !== undefined)) sheet.getRange(foundIdx, map['maquinaid'] + 1).setValue(String(m.maquinaId || m.maquinariaId || '').trim());
     if (map['cantidad'] !== undefined) sheet.getRange(foundIdx, map['cantidad'] + 1).setValue(finalCant);
     if (map['unidad'] !== undefined) sheet.getRange(foundIdx, map['unidad'] + 1).setValue(finalUnidad);
     if (map['preciounitario'] !== undefined) sheet.getRange(foundIdx, map['preciounitario'] + 1).setValue(finalPrecio);
