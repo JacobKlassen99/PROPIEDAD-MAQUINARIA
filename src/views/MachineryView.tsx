@@ -3,6 +3,7 @@ import {
   Tractor,
   CirclePlus,
   CircleMinus,
+  TrendingDown,
   HandCoins,
   LandPlot,
   Receipt,
@@ -76,6 +77,23 @@ type MachineryScreen =
   | 'gasto'
   | 'historial'
   | 'resumen';
+
+const toYYYYMMDD = (dStr: string | undefined): string => {
+  if (!dStr) return new Date().toISOString().slice(0, 10);
+  const clean = String(dStr).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(clean)) {
+    return clean.slice(0, 10);
+  }
+  const parts = clean.split(/[/.-]/);
+  if (parts.length === 3) {
+    if (parts[0].length === 4) {
+      return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+    } else if (parts[2].length === 4) {
+      return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+    }
+  }
+  return clean.slice(0, 10);
+};
 
 export const MachineryView: React.FC<Props> = ({
   activeCampaign,
@@ -372,17 +390,39 @@ export const MachineryView: React.FC<Props> = ({
 
   const handleOpenEditJob = (j: MachineryJob) => {
     setEditingJob(j);
-    setEditFecha(j.fecha ? j.fecha.slice(0, 10) : new Date().toISOString().slice(0, 10));
-    setEditMachineId(j.maquinariaId || '');
-    setEditJobTypeId(j.trabajoTipoId || '');
-    setEditJobNombre(j.trabajoNombre || '');
-    setEditTipoTrabajo(j.tipoTrabajo || 'tercero');
+    setEditFecha(toYYYYMMDD(j.fecha));
+
+    const mId = j.maquinariaId || (j as any).maquinaId || (j as any).id_maquina || '';
+    setEditMachineId(mId);
+
+    const jobName = j.trabajoNombre || (j as any).trabajo || (j as any).labor || '';
+    setEditJobNombre(jobName);
+
+    const availableJobs = getAvailableJobsForMachine(mId);
+    let matchedTypeId = j.trabajoTipoId || '';
+    if (!matchedTypeId && jobName) {
+      const match = availableJobs.find(
+        (x) => x.nombre.toLowerCase().trim() === jobName.toLowerCase().trim()
+      );
+      if (match) matchedTypeId = match.id;
+    }
+    setEditJobTypeId(matchedTypeId);
+
+    const dest = j.tipoTrabajo || (j.loteId ? 'propiedad' : 'tercero');
+    setEditTipoTrabajo(dest);
     setEditCliente(j.cliente || '');
     setEditLotId(j.loteId || '');
-    setEditCantidad(j.cantidad ?? '');
-    setEditUnidad(j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'hectarea' : 'hora');
-    setEditTarifa(j.tarifa ?? '');
-    setEditMoneda(j.moneda || 'BOB');
+
+    const cantVal = typeof j.cantidad === 'number' ? j.cantidad : parseFloat(String(j.cantidad || 0));
+    setEditCantidad(isNaN(cantVal) || cantVal <= 0 ? '' : cantVal);
+
+    const rawU = String(j.unidad || 'hora').toLowerCase();
+    setEditUnidad(rawU.includes('ha') || rawU.includes('hect') ? 'hectarea' : 'hora');
+
+    const tarifaVal = typeof j.tarifa === 'number' ? j.tarifa : parseFloat(String(j.tarifa || 0));
+    setEditTarifa(isNaN(tarifaVal) ? '' : tarifaVal);
+
+    setEditMoneda((j.moneda as Currency) || 'BOB');
     setEditObservacion(j.observacion || '');
   };
 
@@ -430,7 +470,7 @@ export const MachineryView: React.FC<Props> = ({
         total: totalNum,
         observacion: editObservacion.trim(),
       });
-      setSuccessMsg('Trabajo actualizado exitosamente.');
+      setSuccessMsg('Trabajo de maquinaria actualizado exitosamente.');
       setEditingJob(null);
       onRefreshData();
     } catch (err: unknown) {
@@ -717,15 +757,15 @@ export const MachineryView: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={() => setCurrentScreen('gasto')}
-                className="w-full min-h-[70px] sm:min-h-[74px] p-3 rounded-2xl bg-[#FCE8E8] hover:bg-[#f8d7d7] active:bg-[#f4c6c6] text-[#B42323] shadow-xs border border-[#f3c2c2] flex flex-col items-center justify-center gap-0.5 transition active:scale-[0.98] cursor-pointer select-none"
+                className="w-full min-h-[70px] sm:min-h-[74px] p-3 rounded-2xl bg-[#C1272D] hover:bg-[#a82025] active:bg-[#8f1f24] text-white shadow-xs border border-[#C1272D]/20 flex flex-col items-center justify-center gap-0.5 transition active:scale-[0.98] cursor-pointer select-none"
               >
                 <div className="flex items-center justify-center gap-1.5">
-                  <CircleMinus className="h-4 w-4 text-[#B42323] shrink-0" />
-                  <span className="text-sm sm:text-base font-bold tracking-tight text-[#B42323]">
+                  <TrendingDown className="h-4 w-4 text-white shrink-0" />
+                  <span className="text-sm sm:text-base font-bold tracking-tight text-white">
                     Gasto
                   </span>
                 </div>
-                <span className="text-[11px] sm:text-xs text-[#B42323]/80 font-medium text-center truncate max-w-full px-1">
+                <span className="text-[11px] sm:text-xs text-white/90 font-medium text-center truncate max-w-full px-1">
                   Combustible y repuestos
                 </span>
               </button>
@@ -2048,62 +2088,58 @@ export const MachineryView: React.FC<Props> = ({
                 />
               </div>
 
-              {/* Maquinaria */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Maquinaria
-                </label>
-                <select
-                  required
-                  value={editMachineId}
-                  onChange={(e) => setEditMachineId(e.target.value)}
-                  className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[46px]"
-                >
-                  <option value="">-- Seleccionar Maquinaria --</option>
-                  {machines.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {getMachineOptionLabel(m, false)}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {/* Maquinaria con selector visual e icono */}
+              <VisualMachinePicker
+                label="Maquinaria / Equipo *"
+                machines={machines}
+                selectedMachineId={editMachineId}
+                onSelectMachine={(m) => {
+                  setEditMachineId(m.id);
+                  const availableJobs = getAvailableJobsForMachine(m.id);
+                  if (availableJobs.length > 0 && !editJobTypeId) {
+                    const firstJob = availableJobs[0];
+                    setEditJobTypeId(firstJob.id);
+                    setEditJobNombre(firstJob.nombre);
+                    setEditTarifa(firstJob.tarifa);
+                    setEditUnidad(firstJob.unidad === 'ha' || firstJob.unidad === 'hectarea' ? 'hectarea' : 'hora');
+                    setEditMoneda(firstJob.moneda);
+                  }
+                }}
+                required
+              />
 
-              {/* Tipo de Trabajo / Labor */}
+              {/* Tipo de Trabajo / Labor con selector visual */}
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Tipo de Trabajo / Labor
-                </label>
-                {getAvailableJobsForMachine(editMachineId).length > 0 && (
-                  <select
-                    value={editJobTypeId}
-                    onChange={(e) => {
-                      const jId = e.target.value;
-                      setEditJobTypeId(jId);
-                      const jDef = getAvailableJobsForMachine(editMachineId).find((x) => x.id === jId);
-                      if (jDef) {
+                {getAvailableJobsForMachine(editMachineId).length > 0 ? (
+                  <div className="space-y-1.5">
+                    <VisualJobTypePicker
+                      label="Tipo de Trabajo / Labor *"
+                      jobTypes={getAvailableJobsForMachine(editMachineId)}
+                      selectedJobTypeId={editJobTypeId}
+                      onSelectJobType={(jDef) => {
+                        setEditJobTypeId(jDef.id);
                         setEditJobNombre(jDef.nombre);
                         setEditTarifa(jDef.tarifa);
                         setEditUnidad(jDef.unidad === 'ha' || jDef.unidad === 'hectarea' ? 'hectarea' : 'hora');
                         setEditMoneda(jDef.moneda);
-                      }
-                    }}
-                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[46px] mb-1.5"
-                  >
-                    <option value="">-- Seleccionar de la lista o escribir abajo --</option>
-                    {getAvailableJobsForMachine(editMachineId).map((jDef) => (
-                      <option key={jDef.id} value={jDef.id}>
-                        {jDef.nombre} ({jDef.moneda} {jDef.tarifa}/{jDef.unidad})
-                      </option>
-                    ))}
-                  </select>
+                      }}
+                      required
+                    />
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Tipo de Trabajo / Labor <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ej. Siembra, Arada, Rastra..."
+                      value={editJobNombre}
+                      onChange={(e) => setEditJobNombre(e.target.value)}
+                      className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[46px]"
+                    />
+                  </div>
                 )}
-                <input
-                  type="text"
-                  placeholder="Nombre del trabajo o labor..."
-                  value={editJobNombre}
-                  onChange={(e) => setEditJobNombre(e.target.value)}
-                  className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                />
               </div>
 
               {/* Destino Segmented Toggle */}
@@ -2197,7 +2233,7 @@ export const MachineryView: React.FC<Props> = ({
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Tarifa por {editUnidad}
+                    Precio Unitario / Tarifa por {editUnidad === 'hectarea' ? 'ha' : 'h'}
                   </label>
                   <input
                     type="number"
@@ -2222,6 +2258,25 @@ export const MachineryView: React.FC<Props> = ({
                     <option value="USD">USD ($)</option>
                   </select>
                 </div>
+              </div>
+
+              {/* Recuadro de Importe Total Calculado */}
+              <div className="bg-emerald-50/80 p-3.5 rounded-xl border border-emerald-200/70 flex items-center justify-between">
+                <div>
+                  <span className="text-[11px] text-emerald-800 block uppercase font-bold">
+                    Total del Trabajo
+                  </span>
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    {editCantidad || 0} {editUnidad === 'hectarea' ? 'ha' : 'h'} &times; {editMoneda === 'USD' ? 'USD' : 'Bs'} {editTarifa || 0}
+                  </span>
+                </div>
+                <span className="text-base sm:text-lg font-black text-emerald-950 font-mono">
+                  {formatMoney(
+                    (typeof editCantidad === 'number' ? editCantidad : 0) *
+                      (typeof editTarifa === 'number' ? editTarifa : 0),
+                    editMoneda
+                  )}
+                </span>
               </div>
 
               {/* Observación */}

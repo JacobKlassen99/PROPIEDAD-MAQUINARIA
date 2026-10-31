@@ -231,7 +231,6 @@ export default function App() {
         activeCampaign={activeCampaign}
         currency={currency}
         onCurrencyToggle={toggleCurrency}
-        showCurrencyToggle={currentView === 'administracion' && !isInFinanzas}
         exchangeRate={exchangeRate}
         onRefresh={() => loadData(false)}
         isRefreshing={isRefreshing}

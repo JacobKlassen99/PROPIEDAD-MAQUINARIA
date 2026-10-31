@@ -1753,7 +1753,7 @@ export const AdminView: React.FC<Props> = ({
             <ChevronRight className="h-5 w-5 text-stone-400 group-hover:text-emerald-700 transition shrink-0 ml-2" />
           </button>
 
-          {/* Option 2: FINANZAS */}
+          {/* Option 2: Finanzas */}
           <button
             type="button"
             onClick={() => navigateTo('reports')}
@@ -1761,11 +1761,11 @@ export const AdminView: React.FC<Props> = ({
           >
             <div className="flex items-center gap-3.5 min-w-0">
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-800 group-hover:bg-emerald-700 group-hover:text-white transition">
-                <TrendingUp className="h-5 w-5" />
+                <BarChart3 className="h-5 w-5" />
               </div>
               <div className="min-w-0">
                 <h3 className="text-sm font-bold text-stone-900 group-hover:text-emerald-800 transition">
-                  FINANZAS
+                  Finanzas
                 </h3>
                 <p className="text-xs text-stone-500 truncate">
                   Balances y resultados económicos

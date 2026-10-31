@@ -52,8 +52,14 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
   }, [machines, search]);
 
   const handleChoose = (id: string, m?: Machine) => {
+    (document.activeElement as HTMLElement)?.blur();
     if (onSelect) onSelect(id);
     if (onSelectMachine) onSelectMachine(m || machines.find(x => x.id === id) || { id, nombre: '', tipo: '' });
+    setIsOpen(false);
+  };
+
+  const handleClose = () => {
+    (document.activeElement as HTMLElement)?.blur();
     setIsOpen(false);
   };
 
@@ -69,7 +75,10 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
       {/* Trigger Card Field */}
       <button
         type="button"
-        onClick={() => setIsOpen(true)}
+        onClick={() => {
+          setSearch('');
+          setIsOpen(true);
+        }}
         className={`w-full flex items-center justify-between p-2.5 sm:p-3 rounded-2xl border text-left transition cursor-pointer min-h-[50px] group ${
           selectedMachine
             ? 'border-emerald-500/80 bg-emerald-50/40 hover:bg-emerald-50/70 shadow-xs'
@@ -111,10 +120,10 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
       {/* iOS Bottom Sheet Modal */}
       {isOpen && (
         <div className="fixed inset-0 z-50 flex flex-col justify-end bg-stone-900/40 backdrop-blur-xs animate-fadeIn">
-          <div className="flex-1" onClick={() => setIsOpen(false)} />
+          <div className="flex-1" onClick={handleClose} />
           <div className="w-full max-w-xl mx-auto bg-white rounded-t-3xl shadow-2xl border-t border-stone-200/80 flex flex-col max-h-[85vh] animate-slideUp overflow-hidden">
             {/* Drag Bar */}
-            <div className="pt-3 pb-1" onClick={() => setIsOpen(false)}>
+            <div className="pt-3 pb-1 cursor-pointer" onClick={handleClose}>
               <div className="w-12 h-1.5 bg-stone-300 rounded-full mx-auto" />
             </div>
 
@@ -128,8 +137,8 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => setIsOpen(false)}
-                className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full"
+                onClick={handleClose}
+                className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full cursor-pointer"
               >
                 <X className="h-5 w-5" />
               </button>
@@ -144,7 +153,6 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Buscar por nombre, tipo o código..."
-                  autoFocus
                   className="w-full pl-9 pr-8 py-2 rounded-xl border border-stone-200 bg-stone-50 text-xs text-stone-900 focus:bg-white focus:border-emerald-600 focus:outline-none"
                 />
                 {search && (
@@ -240,8 +248,8 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
             <div className="p-3 border-t border-stone-100 bg-stone-50 text-right">
               <button
                 type="button"
-                onClick={() => setIsOpen(false)}
-                className="px-4 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-semibold text-stone-700 hover:bg-stone-100"
+                onClick={handleClose}
+                className="px-4 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-semibold text-stone-700 hover:bg-stone-100 cursor-pointer"
               >
                 Cerrar
               </button>
@@ -291,8 +299,14 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
   }, [list, search]);
 
   const handleChoose = (j: MachineJobType) => {
+    (document.activeElement as HTMLElement)?.blur();
     if (onSelect) onSelect(j);
     if (onSelectJobType) onSelectJobType(j);
+    setIsOpen(false);
+  };
+
+  const handleClose = () => {
+    (document.activeElement as HTMLElement)?.blur();
     setIsOpen(false);
   };
 
@@ -305,7 +319,10 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
       {/* Trigger Card */}
       <button
         type="button"
-        onClick={() => setIsOpen(true)}
+        onClick={() => {
+          setSearch('');
+          setIsOpen(true);
+        }}
         className={`w-full flex items-center justify-between p-2.5 sm:p-3 rounded-2xl border text-left transition cursor-pointer min-h-[50px] group ${
           selectedJob
             ? 'border-emerald-500/80 bg-emerald-50/40 hover:bg-emerald-50/70 shadow-xs'
@@ -348,9 +365,9 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
       {/* iOS Bottom Sheet Modal */}
       {isOpen && (
         <div className="fixed inset-0 z-50 flex flex-col justify-end bg-stone-900/40 backdrop-blur-xs animate-fadeIn">
-          <div className="flex-1" onClick={() => setIsOpen(false)} />
+          <div className="flex-1" onClick={handleClose} />
           <div className="w-full max-w-xl mx-auto bg-white rounded-t-3xl shadow-2xl border-t border-stone-200/80 flex flex-col max-h-[85vh] animate-slideUp overflow-hidden">
-            <div className="pt-3 pb-1" onClick={() => setIsOpen(false)}>
+            <div className="pt-3 pb-1 cursor-pointer" onClick={handleClose}>
               <div className="w-12 h-1.5 bg-stone-300 rounded-full mx-auto" />
             </div>
 
@@ -365,8 +382,8 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => setIsOpen(false)}
-                className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full"
+                onClick={handleClose}
+                className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full cursor-pointer"
               >
                 <X className="h-5 w-5" />
               </button>
@@ -380,7 +397,6 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Buscar trabajo (siembra, romplow, rastra...)"
-                  autoFocus
                   className="w-full pl-9 pr-8 py-2 rounded-xl border border-stone-200 bg-stone-50 text-xs text-stone-900 focus:bg-white focus:border-emerald-600 focus:outline-none"
                 />
               </div>
@@ -432,8 +448,8 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
             <div className="p-3 border-t border-stone-100 bg-stone-50 text-right">
               <button
                 type="button"
-                onClick={() => setIsOpen(false)}
-                className="px-4 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-semibold text-stone-700 hover:bg-stone-100"
+                onClick={handleClose}
+                className="px-4 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-semibold text-stone-700 hover:bg-stone-100 cursor-pointer"
               >
                 Cerrar
               </button>
@@ -485,8 +501,14 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
   }, [items, search]);
 
   const handleChoose = (item: ItemConfig | any) => {
+    (document.activeElement as HTMLElement)?.blur();
     if (onSelect) onSelect(item);
     if (onSelectItem) onSelectItem(item);
+    setIsOpen(false);
+  };
+
+  const handleClose = () => {
+    (document.activeElement as HTMLElement)?.blur();
     setIsOpen(false);
   };
 
@@ -499,7 +521,10 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
       {/* Trigger Card */}
       <button
         type="button"
-        onClick={() => setIsOpen(true)}
+        onClick={() => {
+          setSearch('');
+          setIsOpen(true);
+        }}
         className="w-full flex items-center justify-between p-2.5 sm:p-3 rounded-2xl border border-stone-300 bg-white hover:border-emerald-500 shadow-2xs text-left transition cursor-pointer min-h-[50px] group"
       >
         <div className="flex items-center gap-3 min-w-0">
@@ -532,9 +557,9 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
       {/* iOS Bottom Sheet Modal */}
       {isOpen && (
         <div className="fixed inset-0 z-50 flex flex-col justify-end bg-stone-900/40 backdrop-blur-xs animate-fadeIn">
-          <div className="flex-1" onClick={() => setIsOpen(false)} />
+          <div className="flex-1" onClick={handleClose} />
           <div className="w-full max-w-xl mx-auto bg-white rounded-t-3xl shadow-2xl border-t border-stone-200/80 flex flex-col max-h-[85vh] animate-slideUp overflow-hidden">
-            <div className="pt-3 pb-1" onClick={() => setIsOpen(false)}>
+            <div className="pt-3 pb-1 cursor-pointer" onClick={handleClose}>
               <div className="w-12 h-1.5 bg-stone-300 rounded-full mx-auto" />
             </div>
 
@@ -549,8 +574,8 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => setIsOpen(false)}
-                className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full"
+                onClick={handleClose}
+                className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full cursor-pointer"
               >
                 <X className="h-5 w-5" />
               </button>
@@ -564,7 +589,6 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Buscar diésel, aceite, filtro, semillas..."
-                  autoFocus
                   className="w-full pl-9 pr-8 py-2 rounded-xl border border-stone-200 bg-stone-50 text-xs text-stone-900 focus:bg-white focus:border-emerald-600 focus:outline-none"
                 />
               </div>
@@ -614,8 +638,8 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
             <div className="p-3 border-t border-stone-100 bg-stone-50 text-right">
               <button
                 type="button"
-                onClick={() => setIsOpen(false)}
-                className="px-4 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-semibold text-stone-700 hover:bg-stone-100"
+                onClick={handleClose}
+                className="px-4 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-semibold text-stone-700 hover:bg-stone-100 cursor-pointer"
               >
                 Cerrar
               </button>
@@ -682,8 +706,14 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
   }, [effectiveItems, search]);
 
   const handleChoose = (item: ItemConfig | any) => {
+    (document.activeElement as HTMLElement)?.blur();
     if (onSelect) onSelect(item);
     if (onSelectItem) onSelectItem(item);
+    setIsOpen(false);
+  };
+
+  const handleClose = () => {
+    (document.activeElement as HTMLElement)?.blur();
     setIsOpen(false);
   };
 
@@ -696,7 +726,10 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
       {/* Trigger Card */}
       <button
         type="button"
-        onClick={() => setIsOpen(true)}
+        onClick={() => {
+          setSearch('');
+          setIsOpen(true);
+        }}
         className="w-full flex items-center justify-between p-2.5 sm:p-3 rounded-2xl border border-stone-300 bg-white hover:border-emerald-500 shadow-2xs text-left transition cursor-pointer min-h-[50px] group"
       >
         <div className="flex items-center gap-3 min-w-0">
@@ -729,9 +762,9 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
       {/* iOS Bottom Sheet Modal */}
       {isOpen && (
         <div className="fixed inset-0 z-50 flex flex-col justify-end bg-stone-900/40 backdrop-blur-xs animate-fadeIn">
-          <div className="flex-1" onClick={() => setIsOpen(false)} />
+          <div className="flex-1" onClick={handleClose} />
           <div className="w-full max-w-xl mx-auto bg-white rounded-t-3xl shadow-2xl border-t border-stone-200/80 flex flex-col max-h-[85vh] animate-slideUp overflow-hidden">
-            <div className="pt-3 pb-1" onClick={() => setIsOpen(false)}>
+            <div className="pt-3 pb-1 cursor-pointer" onClick={handleClose}>
               <div className="w-12 h-1.5 bg-stone-300 rounded-full mx-auto" />
             </div>
 
@@ -746,7 +779,7 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => setIsOpen(false)}
+                onClick={handleClose}
                 className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full cursor-pointer"
               >
                 <X className="h-5 w-5" />
@@ -761,7 +794,6 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Buscar soya, maíz, trigo, sorgo, girasol..."
-                  autoFocus
                   className="w-full pl-9 pr-8 py-2 rounded-xl border border-stone-200 bg-stone-50 text-xs text-stone-900 focus:bg-white focus:border-emerald-600 focus:outline-none"
                 />
                 {search && (
@@ -820,7 +852,7 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
             <div className="p-3 border-t border-stone-100 bg-stone-50 text-right">
               <button
                 type="button"
-                onClick={() => setIsOpen(false)}
+                onClick={handleClose}
                 className="px-4 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-semibold text-stone-700 hover:bg-stone-100 cursor-pointer"
               >
                 Cerrar
@@ -873,8 +905,14 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
   }, [lots, search]);
 
   const handleChoose = (l: Lot) => {
+    (document.activeElement as HTMLElement)?.blur();
     if (onSelect) onSelect(l.id);
     if (onSelectLot) onSelectLot(l);
+    setIsOpen(false);
+  };
+
+  const handleClose = () => {
+    (document.activeElement as HTMLElement)?.blur();
     setIsOpen(false);
   };
 
@@ -887,7 +925,10 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
       {/* Trigger Card */}
       <button
         type="button"
-        onClick={() => setIsOpen(true)}
+        onClick={() => {
+          setSearch('');
+          setIsOpen(true);
+        }}
         className="w-full flex items-center justify-between p-2.5 sm:p-3 rounded-2xl border border-stone-300 bg-white hover:border-emerald-500 shadow-2xs text-left transition cursor-pointer min-h-[50px] group"
       >
         <div className="flex items-center gap-3 min-w-0">
@@ -919,9 +960,9 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
       {/* iOS Bottom Sheet Modal */}
       {isOpen && (
         <div className="fixed inset-0 z-50 flex flex-col justify-end bg-stone-900/40 backdrop-blur-xs animate-fadeIn">
-          <div className="flex-1" onClick={() => setIsOpen(false)} />
+          <div className="flex-1" onClick={handleClose} />
           <div className="w-full max-w-xl mx-auto bg-white rounded-t-3xl shadow-2xl border-t border-stone-200/80 flex flex-col max-h-[85vh] animate-slideUp overflow-hidden">
-            <div className="pt-3 pb-1" onClick={() => setIsOpen(false)}>
+            <div className="pt-3 pb-1 cursor-pointer" onClick={handleClose}>
               <div className="w-12 h-1.5 bg-stone-300 rounded-full mx-auto" />
             </div>
 
@@ -934,7 +975,7 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => setIsOpen(false)}
+                onClick={handleClose}
                 className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full cursor-pointer"
               >
                 <X className="h-5 w-5" />
@@ -949,7 +990,6 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Buscar lote por nombre o cultivo..."
-                  autoFocus
                   className="w-full pl-9 pr-8 py-2 rounded-xl border border-stone-200 bg-stone-50 text-xs text-stone-900 focus:bg-white focus:border-emerald-600 focus:outline-none"
                 />
                 {search && (
@@ -1003,7 +1043,7 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
             <div className="p-3 border-t border-stone-100 bg-stone-50 text-right">
               <button
                 type="button"
-                onClick={() => setIsOpen(false)}
+                onClick={handleClose}
                 className="px-4 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-semibold text-stone-700 hover:bg-stone-100 cursor-pointer"
               >
                 Cerrar

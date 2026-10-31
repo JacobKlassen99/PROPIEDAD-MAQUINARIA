@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import {
   TrendingUp,
+  BarChart3,
   Printer,
   Tractor,
   Trees,
@@ -2072,6 +2073,40 @@ const FinanzasViewInner: React.FC<Props> = ({
     );
   };
 
+  const renderCurrencySwitch = () => (
+    <div className="flex items-center gap-1.5 bg-stone-100 hover:bg-stone-200/60 px-2.5 py-1 rounded-full border border-stone-300 shrink-0 shadow-2xs">
+      <span
+        className={`text-[11px] font-bold transition-colors ${
+          activeCurrency === 'BOB' ? 'text-stone-900 font-extrabold' : 'text-stone-400'
+        }`}
+      >
+        Bs
+      </span>
+      <button
+        type="button"
+        onClick={() => setActiveCurrency(activeCurrency === 'BOB' ? 'USD' : 'BOB')}
+        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border border-black/10 cursor-pointer focus:outline-none focus:ring-2 focus:ring-emerald-500 ${
+          activeCurrency === 'USD' ? 'bg-[#16A34A]' : 'bg-[#2563EB]'
+        }`}
+        title={`Moneda actual: ${activeCurrency === 'USD' ? 'Dólares (USD)' : 'Bolivianos (Bs)'}. Toca para cambiar.`}
+        aria-label="Cambiar moneda entre Bolivianos y Dólares"
+      >
+        <span
+          className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+            activeCurrency === 'USD' ? 'translate-x-4.5' : 'translate-x-0.5'
+          }`}
+        />
+      </button>
+      <span
+        className={`text-[11px] font-bold transition-colors ${
+          activeCurrency === 'USD' ? 'text-emerald-700 font-extrabold' : 'text-stone-400'
+        }`}
+      >
+        USD
+      </span>
+    </div>
+  );
+
   // ==========================================================================
   // COMPACT TOP CONTROLS BAR (Campaign Selector + Currency Switcher)
   // ==========================================================================
@@ -2146,30 +2181,7 @@ const FinanzasViewInner: React.FC<Props> = ({
           </div>
 
           {/* Module-specific Currency Switcher */}
-          <div className="flex items-center gap-0.5 bg-stone-100 p-0.5 rounded-md border border-stone-300">
-            <button
-              type="button"
-              onClick={() => setActiveCurrency('BOB')}
-              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
-                activeCurrency === 'BOB'
-                  ? 'bg-white text-stone-900 shadow-2xs'
-                  : 'text-stone-500 hover:text-stone-800'
-              }`}
-            >
-              Bs
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveCurrency('USD')}
-              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
-                activeCurrency === 'USD'
-                  ? 'bg-white text-emerald-800 shadow-2xs'
-                  : 'text-stone-500 hover:text-stone-800'
-              }`}
-            >
-              USD
-            </button>
-          </div>
+          {renderCurrencySwitch()}
         </div>
       </div>
     );
@@ -2271,30 +2283,7 @@ const FinanzasViewInner: React.FC<Props> = ({
 
         {/* Top Controls (Bs/USD + Excel + Print) */}
         <div className="flex items-center justify-between gap-2 no-print">
-          <div className="flex items-center gap-0.5 bg-stone-100 p-0.5 rounded border border-stone-300">
-            <button
-              type="button"
-              onClick={() => setActiveCurrency('BOB')}
-              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
-                activeCurrency === 'BOB'
-                  ? 'bg-white text-stone-900 shadow-2xs'
-                  : 'text-stone-500 hover:text-stone-800'
-              }`}
-            >
-              Bs
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveCurrency('USD')}
-              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
-                activeCurrency === 'USD'
-                  ? 'bg-white text-emerald-800 shadow-2xs'
-                  : 'text-stone-500 hover:text-stone-800'
-              }`}
-            >
-              USD
-            </button>
-          </div>
+          {renderCurrencySwitch()}
 
           <div className="flex items-center gap-1.5">
             <button
@@ -2454,8 +2443,8 @@ const FinanzasViewInner: React.FC<Props> = ({
         {/* Header Title */}
         <div>
           <h1 className="text-base sm:text-lg font-bold text-stone-900 tracking-tight flex items-center gap-2">
-            <TrendingUp className="h-5 w-5 text-emerald-700" />
-            <span>FINANZAS</span>
+            <BarChart3 className="h-5 w-5 text-emerald-700" />
+            <span>Finanzas</span>
           </h1>
           <p className="text-xs text-stone-500">
             Balances y resultados económicos de la empresa
@@ -2849,30 +2838,7 @@ const FinanzasViewInner: React.FC<Props> = ({
             </p>
           </div>
 
-          <div className="flex items-center gap-0.5 bg-stone-100 p-0.5 rounded border border-stone-300 self-start sm:self-auto">
-            <button
-              type="button"
-              onClick={() => setActiveCurrency('BOB')}
-              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
-                activeCurrency === 'BOB'
-                  ? 'bg-white text-stone-900 shadow-2xs'
-                  : 'text-stone-500 hover:text-stone-800'
-              }`}
-            >
-              Bs
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveCurrency('USD')}
-              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
-                activeCurrency === 'USD'
-                  ? 'bg-white text-emerald-800 shadow-2xs'
-                  : 'text-stone-500 hover:text-stone-800'
-              }`}
-            >
-              USD
-            </button>
-          </div>
+          {renderCurrencySwitch()}
         </div>
 
         <div className="border border-stone-300 bg-white rounded-sm shadow-2xs overflow-hidden divide-y divide-stone-200">
@@ -2937,30 +2903,7 @@ const FinanzasViewInner: React.FC<Props> = ({
         {renderBackButton()}
 
         <div className="flex justify-end no-print">
-          <div className="flex items-center gap-0.5 bg-stone-100 p-0.5 rounded border border-stone-300">
-            <button
-              type="button"
-              onClick={() => setActiveCurrency('BOB')}
-              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
-                activeCurrency === 'BOB'
-                  ? 'bg-white text-stone-900 shadow-2xs'
-                  : 'text-stone-500 hover:text-stone-800'
-              }`}
-            >
-              Bs
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveCurrency('USD')}
-              className={`px-2.5 py-0.5 rounded text-xs font-bold transition cursor-pointer ${
-                activeCurrency === 'USD'
-                  ? 'bg-white text-emerald-800 shadow-2xs'
-                  : 'text-stone-500 hover:text-stone-800'
-              }`}
-            >
-              USD
-            </button>
-          </div>
+          {renderCurrencySwitch()}
         </div>
 
         {renderBalanceView(

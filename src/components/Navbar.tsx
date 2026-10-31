@@ -13,7 +13,6 @@ interface Props {
   onRefresh: () => void;
   isRefreshing: boolean;
   onOpenAppsScriptModal: () => void;
-  showCurrencyToggle?: boolean;
   session: UserSession | null;
   onLogout: () => void;
 }
@@ -28,7 +27,6 @@ export const Navbar: React.FC<Props> = ({
   onRefresh,
   isRefreshing,
   onOpenAppsScriptModal,
-  showCurrencyToggle = false,
   session,
   onLogout,
 }) => {
@@ -73,40 +71,6 @@ export const Navbar: React.FC<Props> = ({
 
         {/* Right: Acciones y sesión */}
         <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
-          {/* iOS Style Currency Toggle Switch (Bs [switch] USD) - Conservado en Administración */}
-          {showCurrencyToggle && (
-            <div className="flex items-center gap-1 sm:gap-1.5 bg-slate-100/90 hover:bg-slate-100 p-1 rounded-full border border-slate-200/80 shrink-0">
-              <span
-                className={`text-[11px] font-bold px-1 transition-colors ${
-                  currency === 'BOB' ? 'text-slate-900 font-extrabold' : 'text-slate-400'
-                }`}
-              >
-                Bs
-              </span>
-              <button
-                type="button"
-                onClick={onCurrencyToggle}
-                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border border-black/10 cursor-pointer focus:outline-none focus:ring-2 focus:ring-emerald-500 ${
-                  currency === 'USD' ? 'bg-emerald-600' : 'bg-slate-300'
-                }`}
-                title={`Moneda actual: ${currency === 'USD' ? 'Dólares (USD)' : 'Bolivianos (Bs)'}. Toca para cambiar.`}
-                aria-label="Cambiar moneda entre Bolivianos y Dólares"
-              >
-                <span
-                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
-                    currency === 'USD' ? 'translate-x-5' : 'translate-x-0.5'
-                  }`}
-                />
-              </button>
-              <span
-                className={`text-[11px] font-bold px-1 transition-colors ${
-                  currency === 'USD' ? 'text-emerald-700 font-extrabold' : 'text-slate-400'
-                }`}
-              >
-                USD
-              </span>
-            </div>
-          )}
 
           {/* Active Campaign Badge (ej. 2026) */}
           {activeCampaign && (

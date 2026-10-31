@@ -53,7 +53,13 @@ export const IconBottomSheet: React.FC<IconBottomSheetProps> = ({
 
   if (!isOpen) return null;
 
+  const handleClose = () => {
+    (document.activeElement as HTMLElement)?.blur();
+    onClose();
+  };
+
   const handleSelect = (icon: IconDefinition) => {
+    (document.activeElement as HTMLElement)?.blur();
     setTempSelectedId(icon.id);
     onSelectIcon(icon);
     onClose();
@@ -62,12 +68,12 @@ export const IconBottomSheet: React.FC<IconBottomSheetProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex flex-col justify-end bg-stone-900/40 backdrop-blur-xs animate-fadeIn">
       {/* Backdrop tap to close */}
-      <div className="flex-1" onClick={onClose} />
+      <div className="flex-1" onClick={handleClose} />
 
       {/* iOS Bottom Sheet Container */}
       <div className="w-full max-w-xl mx-auto bg-white rounded-t-3xl shadow-2xl border-t border-stone-200/80 flex flex-col max-h-[85vh] animate-slideUp overflow-hidden">
         {/* iOS Drag Handle */}
-        <div className="pt-3 pb-1 cursor-grab" onClick={onClose}>
+        <div className="pt-3 pb-1 cursor-grab" onClick={handleClose}>
           <div className="w-12 h-1.5 bg-stone-300 rounded-full mx-auto" />
         </div>
 
@@ -79,7 +85,7 @@ export const IconBottomSheet: React.FC<IconBottomSheetProps> = ({
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full hover:bg-stone-100 transition cursor-pointer"
           >
             <X className="h-5 w-5" />
@@ -211,7 +217,7 @@ export const IconBottomSheet: React.FC<IconBottomSheetProps> = ({
           </span>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             className="px-4 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-semibold text-stone-700 hover:bg-stone-100 transition cursor-pointer"
           >
             Cerrar

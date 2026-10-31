@@ -3,6 +3,7 @@ import {
   Trees,
   CirclePlus,
   CircleMinus,
+  TrendingDown,
   LandPlot,
   Tractor,
   History,
@@ -570,15 +571,15 @@ export const PropertyView: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={() => setCurrentScreen('gasto')}
-                className="w-full min-h-[70px] sm:min-h-[74px] p-3 rounded-2xl bg-[#FCE8E8] hover:bg-[#f8d7d7] active:bg-[#f4c6c6] text-[#B42323] shadow-xs border border-[#f3c2c2] flex flex-col items-center justify-center gap-0.5 transition active:scale-[0.98] cursor-pointer select-none"
+                className="w-full min-h-[70px] sm:min-h-[74px] p-3 rounded-2xl bg-[#C1272D] hover:bg-[#a82025] active:bg-[#8f1f24] text-white shadow-xs border border-[#C1272D]/20 flex flex-col items-center justify-center gap-0.5 transition active:scale-[0.98] cursor-pointer select-none"
               >
                 <div className="flex items-center justify-center gap-1.5">
-                  <CircleMinus className="h-4 w-4 text-[#B42323] shrink-0" />
-                  <span className="text-sm sm:text-base font-bold tracking-tight text-[#B42323]">
+                  <TrendingDown className="h-4 w-4 text-white shrink-0" />
+                  <span className="text-sm sm:text-base font-bold tracking-tight text-white">
                     Gasto
                   </span>
                 </div>
-                <span className="text-[11px] sm:text-xs text-[#B42323]/80 font-medium text-center truncate max-w-full px-1">
+                <span className="text-[11px] sm:text-xs text-white/90 font-medium text-center truncate max-w-full px-1">
                   Insumos del lote
                 </span>
               </button>
