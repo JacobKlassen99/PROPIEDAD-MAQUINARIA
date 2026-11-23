@@ -11,9 +11,22 @@ import {
   Asset,
   AssetImprovement,
   ExchangeRateConfig,
+  ExchangeRateStatus,
   BackendHealthResponse,
   Currency,
+  CobroEstado,
+  CobroPago,
+  CobroCuenta,
+  HarvestPriceAssignment,
+  HarvestRecord,
+  ExpenseAllocationLot,
+  ExpenseAllocationGroup,
 } from '../types';
+import {
+  getCacheSessionGeneration,
+  invalidateQueries,
+  resetAllCache,
+} from './dataCache';
 
 /**
  * Backend Communication Service for MAQUINARIAS Y PROPIEDAD
@@ -34,6 +47,41 @@ interface CacheEntry<T> {
 }
 const memoryCache = new Map<string, CacheEntry<any>>();
 const CACHE_TTL_MS = 30 * 1000; // 30 seconds
+
+// Read-only actions whose responses can safely warm the in-memory HTTP cache
+const CACHEABLE_READ_ACTIONS = new Set([
+  'catalog.list',
+  'work.list',
+  'movement.list',
+  'asset.list',
+  'fx.get',
+  'machineType.list',
+  'machineJobType.list',
+  'getItemsConfig',
+  'report.get',
+  'cobros.list',
+  'cobros.estado',
+  'harvest.list',
+  'harvest.pending',
+  'expense.allocations',
+]);
+
+function canonicalizePayload(payload: Record<string, any> = {}): string {
+  const clean: Record<string, any> = {};
+  const keys = Object.keys(payload).sort();
+  for (const k of keys) {
+    if (payload[k] !== undefined) {
+      clean[k] = payload[k];
+    }
+  }
+  return JSON.stringify(clean);
+}
+
+// Short-term in-memory cache for admin authorization verification (cleared on token/session change)
+let lastAdminVerifyToken: string | null = null;
+let lastAdminVerifyAt = 0;
+let pendingAdminVerify: Promise<boolean> | null = null;
+const ADMIN_VERIFY_TTL_MS = 60 * 1000;
 
 // Session state (Token only, never store passwords or PINs)
 let activeSession: UserSession | null = null;
@@ -73,8 +121,22 @@ export function isAdminAuthorizationVerifiedInSession(): boolean {
   return !!getAdminToken();
 }
 
+type AdminAuthChangeListener = (isAdmin: boolean) => void;
+const adminAuthListeners = new Set<AdminAuthChangeListener>();
+
+export function onAdminAuthChange(listener: AdminAuthChangeListener): () => void {
+  adminAuthListeners.add(listener);
+  return () => adminAuthListeners.delete(listener);
+}
+
 export function setAdminToken(token: string | null): void {
+  const prevToken = inMemoryAdminToken;
   inMemoryAdminToken = token;
+  if (prevToken !== token) {
+    lastAdminVerifyToken = null;
+    lastAdminVerifyAt = 0;
+    pendingAdminVerify = null;
+  }
   try {
     if (token) {
       localStorage.setItem(ADMIN_TOKEN_KEY, token);
@@ -84,6 +146,8 @@ export function setAdminToken(token: string | null): void {
   } catch {
     // Ignore storage quota or access errors
   }
+  const authorized = !!token;
+  adminAuthListeners.forEach((fn) => fn(authorized));
 }
 
 export function hasAdminAuthorization(): boolean {
@@ -127,6 +191,80 @@ export function getLocalDateString(dateInput: Date | string = new Date()): strin
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+export function getBoliviaDateString(dateInput: Date | string = new Date()): string {
+  const d = dateInput instanceof Date ? dateInput : new Date(dateInput);
+  const safeDate = isNaN(d.getTime()) ? new Date() : d;
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/La_Paz',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(safeDate);
+    const year = parts.find((p) => p.type === 'year')?.value;
+    const month = parts.find((p) => p.type === 'month')?.value;
+    const day = parts.find((p) => p.type === 'day')?.value;
+    if (year && month && day) return `${year}-${month}-${day}`;
+  } catch {
+    // Fallback below
+  }
+  return getLocalDateString(safeDate);
+}
+
+/**
+ * Format numeric exchange rates using Bolivian regional standard:
+ * dot for thousands, comma for decimals (2 decimals, e.g. 11,75).
+ * Display-only; never alters stored numeric precision.
+ */
+export function formatExchangeRateNumber(val: number | undefined | null): string {
+  if (typeof val !== 'number' || !isFinite(val) || val <= 0) return '—';
+  const formatted = val.toLocaleString('es-BO', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  // Ensure comma decimal even in environments where es-BO locale falls back to en-US
+  if (/^\d{1,3}(,\d{3})*\.\d{2}$/.test(formatted)) {
+    return formatted.replace(/,/g, '_').replace(/\./g, ',').replace(/_/g, '.');
+  }
+  return formatted;
+}
+
+/**
+ * Cleanly format any exchange rate date/timestamp into DD/MM/AAAA (or DD/MM/AAAA · HH:mm),
+ * stripping ugly GMT technical strings from Google Sheets Date serialization.
+ */
+export function formatExchangeRateDate(dateInput?: string | Date | null): string {
+  if (!dateInput) return '';
+  if (dateInput instanceof Date) {
+    if (isNaN(dateInput.getTime())) return '';
+    return formatDateDDMMAAAA(getBoliviaDateString(dateInput));
+  }
+  const str = String(dateInput).trim();
+  if (!str) return '';
+
+  // Match YYYY-MM-DD HH:mm
+  const matchYmdTime = str.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2})/);
+  if (matchYmdTime) {
+    return `${matchYmdTime[3]}/${matchYmdTime[2]}/${matchYmdTime[1]} · ${matchYmdTime[4]}`;
+  }
+  // Match YYYY-MM-DD anywhere (including ISO)
+  const matchYmd = str.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (matchYmd) {
+    return `${matchYmd[3].padStart(2, '0')}/${matchYmd[2].padStart(2, '0')}/${matchYmd[1]}`;
+  }
+  // Match DD/MM/YYYY
+  const matchDmy = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (matchDmy) {
+    return `${matchDmy[1].padStart(2, '0')}/${matchDmy[2].padStart(2, '0')}/${matchDmy[3]}`;
+  }
+  // Handle legacy JS Date strings containing GMT (e.g. "Fri Nov 20 2026 00:00:00 GMT-0400 ...")
+  const parsed = new Date(str);
+  if (!isNaN(parsed.getTime())) {
+    return formatDateDDMMAAAA(getBoliviaDateString(parsed));
+  }
+  return str;
 }
 
 /**
@@ -180,9 +318,32 @@ export function onSessionChange(listener: SessionChangeListener): () => void {
   return () => sessionListeners.delete(listener);
 }
 
+/**
+ * Hard reset of all private in-memory caches and in-flight maps.
+ * Called automatically on logout, session switch, admin revocation, or password change.
+ */
+export function resetAllPrivateMemoryData() {
+  memoryCache.clear();
+  pendingRequests.clear();
+  lastAdminVerifyToken = null;
+  lastAdminVerifyAt = 0;
+  pendingAdminVerify = null;
+  resetAllCache();
+}
+
 export function setActiveSession(session: UserSession | null) {
+  const prevToken = activeSession?.token || null;
+  const prevUser = activeSession?.usuario || null;
+  const nextToken = session?.token || null;
+  const nextUser = session?.usuario || null;
+  const sessionChanged = prevToken !== nextToken || prevUser !== nextUser;
+
   activeSession = session;
   if (session) {
+    if (sessionChanged && prevToken !== null) {
+      // Switching to a different user or token: wipe all private cached data
+      resetAllPrivateMemoryData();
+    }
     try {
       localStorage.setItem('myp_session', JSON.stringify(session));
       sessionStorage.setItem('myp_session', JSON.stringify(session));
@@ -196,7 +357,7 @@ export function setActiveSession(session: UserSession | null) {
     } catch {
       // Ignore error
     }
-    clearMemoryCache();
+    resetAllPrivateMemoryData();
   }
   sessionListeners.forEach((listener) => {
     try {
@@ -220,10 +381,23 @@ export function clearMemoryCache(pattern?: string) {
 }
 
 /**
+ * Selective invalidation after mutations:
+ * - Clears only matching raw HTTP cache entries in memoryCache.
+ * - Marks matching SWR entries in dataCache as stale WITHOUT wiping currently displayed data.
+ */
+export function invalidateBackendDomains(patterns: string[]) {
+  for (const pattern of patterns) {
+    clearMemoryCache(pattern);
+  }
+  invalidateQueries(patterns);
+}
+
+/**
  * Low-level dispatch to Google Apps Script
  */
 async function callGAS<T>(action: string, payload: Record<string, any> = {}, useCache = false): Promise<T> {
-  const cacheKey = `${action}:${JSON.stringify(payload)}`;
+  const cacheKey = `${action}:${canonicalizePayload(payload)}`;
+  const reqGen = getCacheSessionGeneration();
 
   if (useCache && memoryCache.has(cacheKey)) {
     const entry = memoryCache.get(cacheKey)!;
@@ -354,7 +528,11 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
 
     const result = data.result !== undefined ? data.result : data;
 
-    if (useCache) {
+    // Warm in-memory cache on read actions (only if session generation hasn't changed)
+    if (
+      (useCache || CACHEABLE_READ_ACTIONS.has(action)) &&
+      reqGen === getCacheSessionGeneration()
+    ) {
       memoryCache.set(cacheKey, { data: result, timestamp: Date.now() });
     }
 
@@ -366,7 +544,9 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
   try {
     return await requestPromise;
   } finally {
-    pendingRequests.delete(cacheKey);
+    if (pendingRequests.get(cacheKey) === requestPromise) {
+      pendingRequests.delete(cacheKey);
+    }
   }
 }
 
@@ -444,39 +624,61 @@ export async function authorizeAdminDevice(password: string): Promise<{ tokenAdm
   return { tokenAdmin };
 }
 
-export async function verifyAdminAuthorization(): Promise<boolean> {
+export async function verifyAdminAuthorization(force = false): Promise<boolean> {
   const currentToken = getAdminToken();
   if (!currentToken) {
     return false;
   }
-  try {
-    const res = await callGAS<{ valid?: boolean; ok?: boolean }>('auth.admin.verify', {
-      tokenAdmin: currentToken,
-      token: currentToken,
-    });
-    if (res && (res.valid === true || res.ok === true)) {
-      return true;
-    }
-    setAdminToken(null);
-    return false;
-  } catch (err: unknown) {
-    const msg = String(err instanceof Error ? err.message : '').toLowerCase();
-    if (
-      msg.includes('credencial') ||
-      msg.includes('autorización') ||
-      msg.includes('autorizacion') ||
-      msg.includes('token') ||
-      msg.includes('revocad') ||
-      msg.includes('vencid') ||
-      msg.includes('no válida') ||
-      msg.includes('no valida')
-    ) {
-      setAdminToken(null);
-      return false;
-    }
-    // Si fue un fallo transitorio de red o conexión, conservar la credencial existente
+  if (
+    !force &&
+    lastAdminVerifyToken === currentToken &&
+    Date.now() - lastAdminVerifyAt < ADMIN_VERIFY_TTL_MS
+  ) {
     return true;
   }
+  if (pendingAdminVerify && !force) {
+    return pendingAdminVerify;
+  }
+  let verifyPromise: Promise<boolean> | null = null;
+  verifyPromise = (async () => {
+    try {
+      const res = await callGAS<{ valid?: boolean; ok?: boolean }>('auth.admin.verify', {
+        tokenAdmin: currentToken,
+        token: currentToken,
+      });
+      if (res && (res.valid === true || res.ok === true)) {
+        lastAdminVerifyToken = currentToken;
+        lastAdminVerifyAt = Date.now();
+        return true;
+      }
+      setAdminToken(null);
+      return false;
+    } catch (err: unknown) {
+      const msg = String(err instanceof Error ? err.message : '').toLowerCase();
+      if (
+        msg.includes('credencial') ||
+        msg.includes('autorización') ||
+        msg.includes('autorizacion') ||
+        msg.includes('token') ||
+        msg.includes('revocad') ||
+        msg.includes('vencid') ||
+        msg.includes('no válida') ||
+        msg.includes('no valida')
+      ) {
+        setAdminToken(null);
+        return false;
+      }
+      // Si fue un fallo transitorio de red o conexión, conservar la credencial existente
+      return true;
+    } finally {
+      if (pendingAdminVerify === verifyPromise) {
+        pendingAdminVerify = null;
+      }
+    }
+  })();
+
+  pendingAdminVerify = verifyPromise;
+  return verifyPromise;
 }
 
 /**
@@ -492,7 +694,7 @@ export async function revokeAdminAuthorization(): Promise<void> {
     // Continuar con la revocación local aun si falló la red
   } finally {
     setAdminToken(null);
-    clearMemoryCache();
+    resetAllPrivateMemoryData();
   }
 }
 
@@ -583,8 +785,8 @@ export async function changeSystemPassword(
     setActiveSession(null);
   }
 
-  // Limpiar toda la caché de memoria local
-  clearMemoryCache();
+  // Limpiar toda la caché privada de memoria local
+  resetAllPrivateMemoryData();
 
   return result;
 }
@@ -603,14 +805,14 @@ export async function getCampaigns(useCache = true): Promise<Campaign[]> {
 export async function createCampaign(campaign: Omit<Campaign, 'id'>): Promise<Campaign> {
   const payload = { ...campaign, campaign };
   const res = await callGAS<Campaign>('campaign.create', payload);
-  clearMemoryCache();
+  invalidateBackendDomains(['catalog.', 'report.']);
   return res;
 }
 
 export async function setActiveCampaign(campaignId: string): Promise<void> {
   const payload = { campaignId, id: campaignId };
   await callGAS('campaign.activate', payload);
-  clearMemoryCache();
+  invalidateBackendDomains(['catalog.', 'report.']);
 }
 
 // -------------------------------------------------------------
@@ -700,9 +902,9 @@ export function normalizeItemConfig(raw: any): ItemConfig {
   const moduloVal: 'MAQUINARIAS' | 'PROPIEDAD' = rawModulo.includes('MAQ') ? 'MAQUINARIAS' : 'PROPIEDAD';
   const claseVal: 'INGRESO' | 'GASTO' = rawClase.includes('ING') ? 'INGRESO' : 'GASTO';
 
-  let tipoMapped: 'gasto_maquinaria' | 'gasto_propiedad' | 'ingreso_propiedad' = 'gasto_propiedad';
+  let tipoMapped: 'gasto_maquinaria' | 'gasto_propiedad' | 'ingreso_propiedad' | 'ingreso_maquinaria' = 'gasto_propiedad';
   if (moduloVal === 'MAQUINARIAS') {
-    tipoMapped = 'gasto_maquinaria';
+    tipoMapped = claseVal === 'INGRESO' ? 'ingreso_maquinaria' : 'gasto_maquinaria';
   } else if (claseVal === 'INGRESO') {
     tipoMapped = 'ingreso_propiedad';
   } else {
@@ -911,20 +1113,7 @@ export async function getMachines(useCache = true): Promise<Machine[]> {
 
   const normalized = rawList.map((raw) => {
     const m = normalizeMachine(raw);
-    let jobsForMachine = allJobTypes.filter((j) => String(j.maquinaId) === String(m.id));
-    const isNewHolland =
-      m.nombre.toLowerCase().includes('new holland') ||
-      m.nombre.toLowerCase().includes('ts115') ||
-      m.nombre.toLowerCase().includes('ts 115');
-
-    if (jobsForMachine.length === 0 && isNewHolland) {
-      jobsForMachine = NEW_HOLLAND_DEFAULT_JOBS.map((j, idx) => ({
-        ...j,
-        id: `nh_default_${idx + 1}`,
-        maquinaId: m.id,
-      }));
-    }
-    m.trabajos = jobsForMachine;
+    m.trabajos = allJobTypes.filter((j) => String(j.maquinaId) === String(m.id));
     return m;
   });
 
@@ -968,7 +1157,7 @@ export async function createMachine(machine: Omit<Machine, 'id'>): Promise<Machi
     throw new Error(res?.error || 'El backend de Google Sheets no confirmó la creación de la maquinaria.');
   }
 
-  clearMemoryCache();
+  invalidateBackendDomains(['catalog.', 'machineType.', 'asset.']);
   const created = normalizeMachine(res);
   if (valPat > 0 && created.id) {
     await upsertAssetForEntity(created.id, 'MAQUINARIA', created.nombre, valPat);
@@ -1017,8 +1206,8 @@ export async function updateMachine(id: string, machine: Partial<Machine>): Prom
     throw new Error(res?.error || 'El backend de Google Sheets no confirmó la actualización de la maquinaria.');
   }
 
-  // Clear memory cache so all subsequent catalog/asset reads fetch fresh from Sheets
-  clearMemoryCache();
+  // Clear affected caches so subsequent catalog/asset reads fetch fresh from Sheets
+  invalidateBackendDomains(['catalog.', 'machineType.', 'asset.']);
 
   // Synchronously await patrimonial asset update
   if (valPat !== undefined && id) {
@@ -1059,25 +1248,47 @@ export async function deleteMachine(id: string): Promise<void> {
   if (res && res.ok === false) {
     throw new Error(res.error || 'No se pudo eliminar la maquinaria en el servidor.');
   }
-  clearMemoryCache();
+  invalidateBackendDomains(['catalog.', 'machineType.', 'asset.']);
 }
 
 // -------------------------------------------------------------
 // 4.1 Machine Job Types (Tipos de Trabajo y Tarifas por Máquina)
 // -------------------------------------------------------------
 
-export const NEW_HOLLAND_DEFAULT_JOBS: Omit<MachineJobType, 'id' | 'maquinaId'>[] = [
-  { nombre: 'Tractor con sembradora', tarifa: 30, moneda: 'USD', unidad: 'ha', icono: 'sembradora', activo: true },
-  { nombre: 'Tractor con romplow', tarifa: 35, moneda: 'USD', unidad: 'ha', icono: 'romplow', activo: true },
-  { nombre: 'Tractor con ripper (subsolador)', tarifa: 50, moneda: 'USD', unidad: 'ha', icono: 'ripper', activo: true },
-  { nombre: 'Tractor con pala niveladora', tarifa: 45, moneda: 'USD', unidad: 'ha', icono: 'pala-niveladora', activo: true },
-  { nombre: 'Tractor con rastra', tarifa: 25, moneda: 'USD', unidad: 'ha', icono: 'rastra', activo: true },
-  { nombre: 'Tractor con traílla', tarifa: 35, moneda: 'USD', unidad: 'hora', icono: 'trailla', activo: true },
-  { nombre: 'Tractor con cortadora de sorgo', tarifa: 20, moneda: 'USD', unidad: 'ha', icono: 'cortadora-sorgo', activo: true },
-  { nombre: 'Tractor con rolo', tarifa: 30, moneda: 'USD', unidad: 'ha', icono: 'rolo', activo: true },
-  { nombre: 'Fumigación', tarifa: 55, moneda: 'BOB', unidad: 'ha', icono: 'fumigadora', activo: true },
-  { nombre: 'Tractor solo', tarifa: 20, moneda: 'USD', unidad: 'hora', icono: 'tractor-blue', activo: true },
-];
+/**
+ * Identifies virtual machine-only work labels ("Tractor solo", "Máquina sola")
+ * that must NOT be treated as physical implements.
+ * Historical job records referencing these labels are preserved untouched.
+ */
+export function isVirtualMachineOnlyImplement(name?: string | null): boolean {
+  const n = String(name || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  return n === 'tractor solo' || n === 'maquina sola';
+}
+
+export async function getMachineTypes(useCache = true): Promise<string[]> {
+  const res = await callGAS<any>('machineType.list', {}, useCache);
+  const rawList = extractArrayFromResponse(res, [
+    'machineTypes',
+    'tiposMaquinaria',
+    'tipos',
+    'items',
+    'result',
+  ]);
+  const set = new Set<string>();
+  for (const entry of rawList) {
+    if (typeof entry === 'string' && entry.trim()) {
+      set.add(entry.trim());
+    } else if (entry && typeof entry === 'object') {
+      const label = String(entry.nombre || entry.Nombre || entry.tipo || entry.Tipo || '').trim();
+      if (label) set.add(label);
+    }
+  }
+  return Array.from(set);
+}
 
 export function normalizeMachineJobType(raw: any): MachineJobType {
   if (!raw || typeof raw !== 'object') {
@@ -1094,9 +1305,11 @@ export function normalizeMachineJobType(raw: any): MachineJobType {
   const rawMoneda = String(raw.moneda || raw.Moneda || 'USD').toUpperCase();
   const rawUnidad = String(raw.unidad || raw.Unidad || 'ha').toLowerCase();
   const normalizedUnidad: 'hora' | 'ha' = (rawUnidad.includes('hora') || rawUnidad === 'h') ? 'hora' : 'ha';
+  const tipoMaq = String(raw.tipoMaquina || raw.tipo_maquina || raw.machineType || '').trim();
   return {
     id: String(raw.id || raw.ID || `mjt_${Math.random().toString(36).substr(2, 6)}`),
     maquinaId: String(raw.maquinaId || raw.maquinariaId || raw.maquina_id || ''),
+    ...(tipoMaq ? { tipoMaquina: tipoMaq } : {}),
     nombre: String(raw.nombre || raw.Nombre || raw.trabajo || 'Labor'),
     icono: raw.icono ? String(raw.icono).trim() : undefined,
     tarifa: parseDecimalNumber(raw.tarifa ?? raw.Tarifa ?? raw.precio ?? 0),
@@ -1109,23 +1322,30 @@ export function normalizeMachineJobType(raw: any): MachineJobType {
 export async function getMachineJobTypes(maquinaId?: string, useCache = true): Promise<MachineJobType[]> {
   let list: any[] = [];
   try {
-    const res = await callGAS<any>('catalog.list', {}, useCache);
+    const res = await callGAS<any>('machineJobType.list', maquinaId ? { maquinaId } : {}, useCache);
     list = extractArrayFromResponse(res, [
       'machineJobTypes',
       'trabajosMaquinaria',
-      'laboresMaquinaria',
-      'tarifasMaquinaria',
-      'machineJobs',
       'jobTypes',
+      'items',
+      'result',
+      'trabajos',
     ]);
   } catch {
-    // fallback
+    // Fallback to catalog.list if machineJobType.list is unavailable
   }
 
   if (list.length === 0) {
     try {
-      const res = await callGAS<any>('machineJobType.list', { maquinaId }, useCache);
-      list = extractArrayFromResponse(res, ['jobTypes', 'items', 'result', 'trabajos']);
+      const res = await callGAS<any>('catalog.list', {}, useCache);
+      list = extractArrayFromResponse(res, [
+        'machineJobTypes',
+        'trabajosMaquinaria',
+        'laboresMaquinaria',
+        'tarifasMaquinaria',
+        'machineJobs',
+        'jobTypes',
+      ]);
     } catch {
       // empty list
     }
@@ -1139,7 +1359,9 @@ export async function getMachineJobTypes(maquinaId?: string, useCache = true): P
   return normalized;
 }
 
-export async function saveMachineJobType(jobType: Partial<MachineJobType> & { nombre: string; maquinaId: string }): Promise<MachineJobType> {
+export async function saveMachineJobType(
+  jobType: Partial<MachineJobType> & { nombre: string; maquinaId: string; tipoMaquina?: string }
+): Promise<MachineJobType> {
   const rawU = String(jobType.unidad || 'ha').toLowerCase();
   const codeUnidad: 'hora' | 'ha' = (rawU.includes('hora') || rawU === 'h') ? 'hora' : 'ha';
   const tarifaNum = parseDecimalNumber(jobType.tarifa);
@@ -1150,6 +1372,7 @@ export async function saveMachineJobType(jobType: Partial<MachineJobType> & { no
     ...jobType,
     nombre: jobType.nombre.trim(),
     maquinaId: jobType.maquinaId,
+    ...(jobType.tipoMaquina ? { tipoMaquina: jobType.tipoMaquina.trim() } : {}),
     tarifa: tarifaNum,
     moneda: monedaVal,
     unidad: codeUnidad,
@@ -1163,7 +1386,7 @@ export async function saveMachineJobType(jobType: Partial<MachineJobType> & { no
   };
 
   const res = await callGAS<any>('machineJobType.save', payload);
-  clearMemoryCache();
+  invalidateBackendDomains(['catalog.', 'machineJobType.', 'asset.']);
   return normalizeMachineJobType(res?.result || res || jobTypeData);
 }
 
@@ -1174,20 +1397,7 @@ export async function deleteMachineJobType(id: string): Promise<void> {
   } catch {
     await callGAS('machineJobType.save', payload);
   }
-  clearMemoryCache();
-}
-
-export async function seedNewHollandJobs(maquinaId: string): Promise<MachineJobType[]> {
-  const saved: MachineJobType[] = [];
-  for (const jobDef of NEW_HOLLAND_DEFAULT_JOBS) {
-    const res = await saveMachineJobType({
-      ...jobDef,
-      maquinaId,
-    });
-    saved.push(res);
-  }
-  clearMemoryCache();
-  return saved;
+  invalidateBackendDomains(['catalog.', 'machineJobType.', 'asset.']);
 }
 
 // -------------------------------------------------------------
@@ -1239,7 +1449,7 @@ export async function createLot(lot: Omit<Lot, 'id'>): Promise<Lot> {
     throw new Error(res?.error || 'El backend de Google Sheets no confirmó la creación del lote.');
   }
 
-  clearMemoryCache();
+  invalidateBackendDomains(['catalog.', 'asset.']);
   const created = normalizeLot(res);
   if (valPat > 0 && created.id) {
     await upsertAssetForEntity(created.id, 'LOTE', created.nombre, valPat);
@@ -1283,7 +1493,7 @@ export async function updateLot(id: string, lot: Partial<Lot>): Promise<Lot> {
     throw new Error(res?.error || 'El backend de Google Sheets no confirmó la actualización del lote.');
   }
 
-  clearMemoryCache();
+  invalidateBackendDomains(['catalog.', 'asset.']);
 
   // Synchronously await asset sync
   if (valPat !== undefined && id) {
@@ -1311,7 +1521,7 @@ export async function updateLot(id: string, lot: Partial<Lot>): Promise<Lot> {
 export async function deleteLot(id: string): Promise<void> {
   const payload = { id, deleted: true, action: 'delete' };
   await callGAS('lot.save', payload);
-  clearMemoryCache();
+  invalidateBackendDomains(['catalog.', 'asset.']);
 }
 
 // -------------------------------------------------------------
@@ -1420,6 +1630,7 @@ export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise
     ...job,
     maquinaId: job.maquinariaId,
     maquinariaId: job.maquinariaId,
+    implementoId: job.trabajoTipoId || '',
     destino: gasDestino,
     tipoTrabajo: job.tipoTrabajo,
     fecha: job.fecha,
@@ -1437,7 +1648,7 @@ export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise
     precioUnitario: tarifaNum,
     importe: totalNum,
     total: totalNum,
-    moneda: gasMoneda,
+    moneda: job.moneda === 'USD' ? 'USD' : 'BOB',
     unidad: codeUnidad,
     unidadCobro: codeUnidad,
     tc: tcNum,
@@ -1453,7 +1664,7 @@ export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise
   };
 
   const res = await callGAS<any>('work.save', payload);
-  clearMemoryCache();
+  invalidateBackendDomains(['work.', 'movement.', 'cobros.', 'report.']);
   return {
     ...job,
     id: res?.id || res?.result?.id || `job_${Date.now()}`,
@@ -1462,18 +1673,20 @@ export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise
   };
 }
 
-export async function updateMachineryJob(id: string, job: Partial<MachineryJob>): Promise<MachineryJob> {
+export async function updateMachineryJob(
+  id: string,
+  job: Partial<MachineryJob>
+): Promise<MachineryJob & { cuenta?: CobroCuenta | null }> {
   const rawU = String(job.unidad || '').toLowerCase();
   const codeUnidad: 'hora' | 'ha' = rawU.includes('hora') || rawU === 'h' ? 'hora' : 'ha';
-  const cantNum = parseDecimalNumber(job.cantidad);
-  const tarifaNum = parseDecimalNumber(job.tarifa);
-  const gasMoneda = job.moneda ? (job.moneda === 'USD' ? 'USD' : 'BS') : undefined;
-  const tcNum =
-    job.tipoCambio !== undefined
-      ? resolveEffectiveExchangeRate(job.tipoCambio)
-      : getConfiguredExchangeRate() > 0
-      ? getConfiguredExchangeRate()
-      : undefined;
+  const hasCant = job.cantidad !== undefined;
+  const cantNum = hasCant ? parseDecimalNumber(job.cantidad) : undefined;
+  const hasTarifa = job.tarifa !== undefined;
+  const tarifaNum = hasTarifa ? parseDecimalNumber(job.tarifa) : undefined;
+  const gasMoneda = job.moneda ? (job.moneda === 'USD' ? 'USD' : 'BOB') : undefined;
+  const hasExplicitTc = job.tipoCambio !== undefined || job.tc !== undefined;
+  const tcRaw = job.tipoCambio !== undefined ? job.tipoCambio : job.tc;
+  const tcNum = hasExplicitTc ? resolveEffectiveExchangeRate(tcRaw) : undefined;
   const { id: _, ...restJob } = job as any;
 
   let finalObs = job.observacion;
@@ -1484,18 +1697,33 @@ export async function updateMachineryJob(id: string, job: Partial<MachineryJob>)
   const jobData = {
     id,
     ...restJob,
+    ...(job.campanaId !== undefined ? { campanaId: job.campanaId } : {}),
     ...(job.maquinariaId ? { maquinaId: job.maquinariaId, maquinariaId: job.maquinariaId } : {}),
     ...(job.tipoTrabajo
       ? { destino: job.tipoTrabajo === 'propiedad' ? 'PROPIEDAD' : 'TERCERO', tipoTrabajo: job.tipoTrabajo }
       : {}),
-    ...(job.trabajoTipoId !== undefined ? { trabajoTipoId: job.trabajoTipoId } : {}),
-    ...(job.trabajoNombre !== undefined ? { trabajoNombre: job.trabajoNombre, labor: job.trabajoNombre, trabajo: job.trabajoNombre } : {}),
+    ...(job.trabajoTipoId !== undefined
+      ? { implementoId: job.trabajoTipoId || '', trabajoTipoId: job.trabajoTipoId || '' }
+      : {}),
+    ...(job.trabajoNombre !== undefined
+      ? { trabajoNombre: job.trabajoNombre, labor: job.trabajoNombre, trabajo: job.trabajoNombre }
+      : {}),
+    ...(job.tipoTrabajo === 'propiedad'
+      ? { loteId: job.loteId || '', loteNombre: job.loteNombre || '', cliente: '' }
+      : job.tipoTrabajo === 'tercero'
+      ? { cliente: job.cliente || '', loteId: '', loteNombre: '' }
+      : {}),
     unidad: codeUnidad,
     unidadCobro: codeUnidad,
-    ...(cantNum ? { cantidad: cantNum } : {}),
-    ...(tarifaNum ? { tarifa: tarifaNum, precio: tarifaNum, precioUnitario: tarifaNum } : {}),
+    ...(cantNum !== undefined && cantNum > 0 ? { cantidad: cantNum } : {}),
+    ...(tarifaNum !== undefined
+      ? { tarifa: tarifaNum, precio: tarifaNum, precioUnitario: tarifaNum }
+      : {}),
+    ...(cantNum !== undefined && tarifaNum !== undefined
+      ? { importe: Number((cantNum * tarifaNum).toFixed(2)), total: Number((cantNum * tarifaNum).toFixed(2)) }
+      : {}),
     ...(gasMoneda ? { moneda: gasMoneda } : {}),
-    ...(tcNum ? { tc: tcNum, tipoCambio: tcNum } : {}),
+    ...(tcNum !== undefined && tcNum > 0 ? { tc: tcNum, tipoCambio: tcNum } : {}),
     ...(finalObs !== undefined ? { observacion: finalObs, observaciones: finalObs } : {}),
   };
 
@@ -1506,12 +1734,25 @@ export async function updateMachineryJob(id: string, job: Partial<MachineryJob>)
     trabajo: jobData,
   };
 
-  const res = await callGAS<any>('work.save', payload);
-  clearMemoryCache();
+  let res: any;
+  try {
+    res = await callGAS<any>('work.update', payload);
+  } catch (err: any) {
+    const msg = String(err?.message || '').toLowerCase();
+    if (msg.includes('acción no reconocida') || msg.includes('accion no reconocida') || msg.includes('unknown action')) {
+      res = await callGAS<any>('work.save', payload);
+    } else {
+      throw err;
+    }
+  }
+
+  invalidateBackendDomains(['work.', 'movement.', 'cobros.', 'report.']);
+  const cuentaRaw = res?.cuenta || res?.result?.cuenta;
   return {
     ...(job as any),
     id: res?.id || res?.result?.id || id,
     observacion: finalObs !== undefined ? finalObs : (job as any).observacion,
+    cuenta: cuentaRaw ? normalizeCobroCuenta({ ...cuentaRaw, trabajoId: cuentaRaw.trabajoId || id }) : null,
   };
 }
 
@@ -1523,7 +1764,7 @@ export async function deleteMachineryJob(id: string): Promise<void> {
     console.warn('[deleteMachineryJob] work.delete failed, trying deleteMachineryJob fallback:', err?.message);
     await callGAS('deleteMachineryJob', payload);
   }
-  clearMemoryCache();
+  invalidateBackendDomains(['work.', 'movement.', 'cobros.', 'report.']);
 }
 
 // -------------------------------------------------------------
@@ -1621,7 +1862,7 @@ export async function createExpense(expense: Omit<Expense, 'id'>): Promise<Expen
   };
 
   const res = await callGAS<any>('movement.save', payload);
-  clearMemoryCache();
+  invalidateBackendDomains(['movement.', 'report.']);
   return {
     ...expense,
     id: res?.id || res?.result?.id || `exp_${Date.now()}`,
@@ -1678,7 +1919,7 @@ export async function updateExpense(id: string, expense: Partial<Expense>): Prom
     throw new Error(res.error || 'No se pudo actualizar el gasto en Google Sheets.');
   }
 
-  clearMemoryCache();
+  invalidateBackendDomains(['movement.', 'report.']);
   return {
     ...(expense as any),
     id,
@@ -1694,7 +1935,7 @@ export async function deleteExpense(id: string): Promise<void> {
     console.warn('[deleteExpense] movement.delete failed, trying deleteExpense fallback:', err?.message);
     await callGAS('deleteExpense', payload);
   }
-  clearMemoryCache();
+  invalidateBackendDomains(['movement.', 'report.']);
 }
 
 // -------------------------------------------------------------
@@ -1792,7 +2033,7 @@ export async function createIncome(income: Omit<Income, 'id'>): Promise<Income> 
   };
 
   const res = await callGAS<any>('movement.save', payload);
-  clearMemoryCache();
+  invalidateBackendDomains(['movement.', 'report.']);
   return {
     ...income,
     id: res?.id || res?.result?.id || `inc_${Date.now()}`,
@@ -1844,7 +2085,7 @@ export async function updateIncome(id: string, income: Partial<Income>): Promise
     throw new Error(res.error || 'No se pudo actualizar el ingreso en Google Sheets.');
   }
 
-  clearMemoryCache();
+  invalidateBackendDomains(['movement.', 'report.']);
   return {
     ...income as any,
     id,
@@ -1860,7 +2101,7 @@ export async function deleteIncome(id: string): Promise<void> {
     console.warn('[deleteIncome] movement.delete failed, trying deleteIncome fallback:', err?.message);
     await callGAS('deleteIncome', payload);
   }
-  clearMemoryCache();
+  invalidateBackendDomains(['movement.', 'report.']);
 }
 
 // -------------------------------------------------------------
@@ -1909,13 +2150,20 @@ export async function saveItemConfig(item: Partial<ItemConfig> & { nombre: strin
   }
 
   const res = await callGAS<any>('item.save', payload);
-  clearMemoryCache();
+  invalidateBackendDomains(['catalog.', 'getItemsConfig']);
   return {
     id: res?.id || res?.result?.id || item.id || `itm_${Date.now()}`,
     nombre: item.nombre,
     modulo: gasModulo as any,
     clase: gasClase as any,
-    tipo: (gasModulo === 'MAQUINARIAS' ? 'gasto_maquinaria' : (gasClase === 'INGRESO' ? 'ingreso_propiedad' : 'gasto_propiedad')),
+    tipo:
+      gasModulo === 'MAQUINARIAS'
+        ? gasClase === 'INGRESO'
+          ? 'ingreso_maquinaria'
+          : 'gasto_maquinaria'
+        : gasClase === 'INGRESO'
+        ? 'ingreso_propiedad'
+        : 'gasto_propiedad',
     icono: item.icono || 'Tag',
     unidad: item.unidad || '',
     precioPredeterminado: precioNum,
@@ -2021,7 +2269,7 @@ export async function createAsset(asset: Omit<Asset, 'id' | 'valorAcumulado' | '
   };
 
   const res = await callGAS<any>('asset.save', payload);
-  clearMemoryCache();
+  invalidateBackendDomains(['asset.', 'catalog.']);
   return {
     ...asset,
     id: res?.id || res?.result?.id || `ast_${Date.now()}`,
@@ -2052,7 +2300,7 @@ export async function updateAsset(id: string, asset: Partial<Asset>): Promise<an
       res = await callGAS<any>('asset.save', payload);
     }
   }
-  clearMemoryCache();
+  invalidateBackendDomains(['asset.', 'catalog.']);
   return res;
 }
 
@@ -2078,7 +2326,7 @@ export async function addAssetImprovement(
       res = await callGAS<any>('asset.save', payload);
     }
   }
-  clearMemoryCache();
+  invalidateBackendDomains(['asset.', 'catalog.']);
   return res;
 }
 
@@ -2113,7 +2361,7 @@ export async function updateAssetImprovement(
       res = await callGAS<any>('asset.save', payload);
     }
   }
-  clearMemoryCache();
+  invalidateBackendDomains(['asset.', 'catalog.']);
   return res;
 }
 
@@ -2136,7 +2384,7 @@ export async function deleteAssetImprovement(mejoraId: string, assetId?: string)
       res = await callGAS<any>('asset.save', payload);
     }
   }
-  clearMemoryCache();
+  invalidateBackendDomains(['asset.', 'catalog.']);
   return res;
 }
 
@@ -2192,21 +2440,100 @@ export async function upsertAssetForImplement(
 }
 
 // -------------------------------------------------------------
-// 11. Exchange Rate (Tipo de Cambio BOB/USD)
+// 11. Exchange Rate (Tipo de Cambio Oficial BCB + Ajuste Manual)
 // -------------------------------------------------------------
+
+const FX_AUTO_SYNC_STORAGE_KEY = 'myp_fx_auto_sync_meta';
+let inFlightAutoSync: Promise<ExchangeRateConfig | null> | null = null;
+
+function normalizeDateToYmd(raw?: string | Date | null): string {
+  if (!raw) return '';
+  if (raw instanceof Date) {
+    return isNaN(raw.getTime()) ? '' : getBoliviaDateString(raw);
+  }
+  const s = String(raw).trim();
+  if (!s) return '';
+  const ymd = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (ymd) return ymd[1];
+  const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (dmy) return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) return getBoliviaDateString(parsed);
+  return s;
+}
+
+function normalizeExchangeRateResponse(res: any): ExchangeRateConfig | null {
+  if (!res || typeof res !== 'object') return null;
+  const src = res.exchangeRate && typeof res.exchangeRate === 'object' ? res.exchangeRate : res;
+  const tasa = parseDecimalNumber(src.tasaBobPerUsd ?? src.tasa ?? src.tc ?? src.rate);
+  if (tasa <= 0) return null;
+
+  const todayBo = getBoliviaDateString();
+  const rawModo = String(src.modo ?? src.fuente ?? '').trim().toLowerCase();
+  const isManual = rawModo === 'manual';
+  const fuente: 'manual' | 'bcb' = isManual ? 'manual' : 'bcb';
+
+  const fechaActualizacion = normalizeDateToYmd(src.fechaActualizacion ?? src.fecha) || todayBo;
+  const ultimaConsultaDia = normalizeDateToYmd(src.ultimaConsultaDia);
+  const ultimaConsulta = String(src.ultimaConsulta || '').trim();
+  const rawEstado = String(src.estado || '').trim().toLowerCase();
+  const rawFuenteDetalle = String(src.fuenteDetalle || '').trim();
+
+  // Official BCB is ONLY confirmed when an official BCB query has actually succeeded.
+  // Never present an unverified stored value from prior configuration as "BCB (Oficial)".
+  const isBcbConfirmed =
+    fuente === 'bcb' &&
+    Boolean(ultimaConsulta || ultimaConsultaDia) &&
+    (rawEstado === 'actualizado' || rawFuenteDetalle.toLowerCase().includes('bcb'));
+
+  const fechaCotizacion = normalizeDateToYmd(src.fechaCotizacion) || (isBcbConfirmed ? fechaActualizacion : '');
+  const fechaCorte = normalizeDateToYmd(src.fechaCorte);
+
+  let estado: ExchangeRateStatus;
+  if (fuente === 'manual') {
+    estado = 'manual';
+  } else if (
+    isBcbConfirmed &&
+    (!ultimaConsultaDia || ultimaConsultaDia === todayBo) &&
+    rawEstado !== 'sin_conexion' &&
+    rawEstado !== 'pendiente'
+  ) {
+    estado = 'actualizado';
+  } else if (rawEstado === 'sin_conexion') {
+    estado = 'sin_conexion';
+  } else {
+    estado = 'pendiente';
+  }
+
+  const fuenteDetalle =
+    fuente === 'manual'
+      ? 'Ajuste manual'
+      : isBcbConfirmed
+      ? 'BCB (Oficial)'
+      : 'Valor guardado';
+
+  return {
+    tasaBobPerUsd: tasa,
+    fuente,
+    fechaActualizacion,
+    fechaCotizacion: fechaCotizacion || undefined,
+    fechaCorte: fechaCorte || undefined,
+    ultimaConsulta: ultimaConsulta || undefined,
+    ultimaConsultaDia: ultimaConsultaDia || undefined,
+    estado,
+    fuenteDetalle,
+    errorMensaje: src.errorMensaje ? String(src.errorMensaje).trim() : undefined,
+    nota: src.nota ? String(src.nota).trim() : '',
+  };
+}
 
 export async function getExchangeRateConfig(useCache = true): Promise<ExchangeRateConfig> {
   try {
     const res = await callGAS<any>('fx.get', {}, useCache);
-    const tasa = parseDecimalNumber(res?.tasaBobPerUsd ?? res?.tasa ?? res?.tc ?? res?.rate);
-    if (tasa > 0) {
-      setConfiguredExchangeRate(tasa);
-      return {
-        tasaBobPerUsd: tasa,
-        fuente: res?.fuente || 'manual',
-        fechaActualizacion: res?.fechaActualizacion || res?.fecha || getLocalDateString(),
-        nota: res?.nota || '',
-      };
+    const normalized = normalizeExchangeRateResponse(res);
+    if (normalized) {
+      setConfiguredExchangeRate(normalized.tasaBobPerUsd);
+      return normalized;
     }
   } catch {
     // fallback to catalog.list
@@ -2214,20 +2541,10 @@ export async function getExchangeRateConfig(useCache = true): Promise<ExchangeRa
 
   try {
     const res = await callGAS<any>('catalog.list', {}, useCache);
-    if (res && res.exchangeRate) {
-      const parsedRate = parseDecimalNumber(res.exchangeRate.tasaBobPerUsd ?? res.exchangeRate.tasa);
-      if (parsedRate > 0) setConfiguredExchangeRate(parsedRate);
-      return res.exchangeRate;
-    }
-    const tasa = parseDecimalNumber(res?.tasaBobPerUsd ?? res?.exchangeRate?.tasaBobPerUsd ?? res?.tasa);
-    if (tasa > 0) {
-      setConfiguredExchangeRate(tasa);
-      return {
-        tasaBobPerUsd: tasa,
-        fuente: res?.fuente || 'manual',
-        fechaActualizacion: res?.fechaActualizacion || res?.exchangeRate?.fechaActualizacion || getLocalDateString(),
-        nota: res?.nota || '',
-      };
+    const normalized = normalizeExchangeRateResponse(res);
+    if (normalized) {
+      setConfiguredExchangeRate(normalized.tasaBobPerUsd);
+      return normalized;
     }
   } catch {
     // fallback
@@ -2236,29 +2553,200 @@ export async function getExchangeRateConfig(useCache = true): Promise<ExchangeRa
   const existingRate = getConfiguredExchangeRate();
   return {
     tasaBobPerUsd: existingRate > 0 ? existingRate : 0,
-    fuente: 'manual' as const,
-    fechaActualizacion: getLocalDateString(),
+    fuente: 'bcb',
+    fuenteDetalle: 'Valor guardado',
+    fechaActualizacion: getBoliviaDateString(),
+    estado: typeof navigator !== 'undefined' && navigator.onLine === false ? 'sin_conexion' : 'pendiente',
   };
 }
 
-export async function saveExchangeRateConfig(config: { tasaBobPerUsd: number; nota?: string; fecha?: string }): Promise<ExchangeRateConfig> {
+/**
+ * Non-blocking daily automatic sync against official BCB through Google Apps Script.
+ * - Never overwrites a manual override (fuente === 'manual').
+ * - Runs at most once per Bolivia calendar day (America/La_Paz), with short failure cooldown.
+ * - Never throws or replaces a valid stored rate with zero.
+ */
+export async function syncExchangeRateDailyAuto(
+  currentRate?: ExchangeRateConfig | null
+): Promise<ExchangeRateConfig | null> {
+  if (!getActiveSession()) return null;
+
+  const todayBo = getBoliviaDateString();
+
+  // Never silently override manual adjustment
+  if (currentRate?.fuente === 'manual') {
+    return null;
+  }
+
+  // Already successfully checked today in Bolivia timezone
+  if (currentRate?.ultimaConsultaDia === todayBo && (currentRate?.tasaBobPerUsd || 0) > 0) {
+    return null;
+  }
+
+  // Offline check
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return currentRate
+      ? { ...currentRate, estado: 'sin_conexion' }
+      : null;
+  }
+
+  // Client-side cooldown to prevent repeated redundant calls on reloads/tabs
+  try {
+    const rawMeta = localStorage.getItem(FX_AUTO_SYNC_STORAGE_KEY);
+    if (rawMeta) {
+      const meta = JSON.parse(rawMeta) as { day?: string; status?: string; ts?: number };
+      if (meta.day === todayBo && meta.status === 'ok') {
+        return null;
+      }
+      if (meta.day === todayBo && meta.status === 'err' && meta.ts && Date.now() - meta.ts < 10 * 60 * 1000) {
+        return null;
+      }
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+
+  if (inFlightAutoSync) {
+    return inFlightAutoSync;
+  }
+
+  inFlightAutoSync = (async () => {
+    try {
+      const res = await callGAS<any>('fx.syncAuto', {}, false);
+      const normalized = normalizeExchangeRateResponse(res);
+      if (normalized && normalized.tasaBobPerUsd > 0) {
+        setConfiguredExchangeRate(normalized.tasaBobPerUsd);
+        clearMemoryCache('fx.get');
+        clearMemoryCache('catalog.list');
+
+        const syncedOk = !res?.syncFailed && normalized.estado === 'actualizado';
+        try {
+          localStorage.setItem(
+            FX_AUTO_SYNC_STORAGE_KEY,
+            JSON.stringify({ day: todayBo, status: syncedOk ? 'ok' : 'err', ts: Date.now() })
+          );
+        } catch {
+          // Ignore storage error
+        }
+        return normalized;
+      }
+      return null;
+    } catch (err: any) {
+      const msg = String(err?.message || '');
+      const isOffline =
+        (typeof navigator !== 'undefined' && navigator.onLine === false) ||
+        /failed to fetch|network|offline|timeout/i.test(msg);
+
+      try {
+        localStorage.setItem(
+          FX_AUTO_SYNC_STORAGE_KEY,
+          JSON.stringify({ day: todayBo, status: 'err', ts: Date.now() })
+        );
+      } catch {
+        // Ignore storage error
+      }
+
+      if (currentRate && currentRate.tasaBobPerUsd > 0) {
+        return {
+          ...currentRate,
+          estado: isOffline ? 'sin_conexion' : 'pendiente',
+        };
+      }
+      return null;
+    } finally {
+      inFlightAutoSync = null;
+    }
+  })();
+
+  return inFlightAutoSync;
+}
+
+export interface BcbRefreshResult {
+  config: ExchangeRateConfig;
+  updated: boolean;
+  alreadyLatest?: boolean;
+  manualPreserved?: boolean;
+  bcbPreviewRate?: number;
+  bcbPreviewFecha?: string;
+}
+
+/**
+ * Explicit admin refresh against official BCB via Google Apps Script (fx.refresh).
+ * Requires existing administrative authorization.
+ */
+export async function refreshExchangeRateFromBcb(options?: {
+  switchToOfficial?: boolean;
+}): Promise<BcbRefreshResult> {
+  const switchToOfficial = Boolean(options?.switchToOfficial);
+  let res: any;
+  try {
+    res = await callGAS<any>('fx.refresh', { switchToOfficial }, false);
+  } catch (err: any) {
+    const rawMsg = String(err?.message || 'Error de comunicación con el backend');
+    if (/acci[oó]n no reconocida/i.test(rawMsg)) {
+      throw new Error(
+        'El backend de Google Apps Script aún no tiene instalada la consulta automática al BCB (fx.refresh). Actualice Código.gs y despliegue una nueva versión del Web App.'
+      );
+    }
+    throw new Error(rawMsg);
+  }
+
+  const normalized = normalizeExchangeRateResponse(res);
+  if (!normalized || normalized.tasaBobPerUsd <= 0) {
+    throw new Error('No se recibió una cotización oficial válida desde el backend.');
+  }
+
+  setConfiguredExchangeRate(normalized.tasaBobPerUsd);
+  clearMemoryCache('fx.get');
+  clearMemoryCache('catalog.list');
+
+  try {
+    const todayBo = getBoliviaDateString();
+    if (normalized.estado === 'actualizado') {
+      localStorage.setItem(
+        FX_AUTO_SYNC_STORAGE_KEY,
+        JSON.stringify({ day: todayBo, status: 'ok', ts: Date.now() })
+      );
+    }
+  } catch {
+    // Ignore storage error
+  }
+
+  const previewRate = parseDecimalNumber(res?.bcbPreviewRate);
+  return {
+    config: normalized,
+    updated: Boolean(res?.updated),
+    alreadyLatest: Boolean(res?.alreadyLatest),
+    manualPreserved: Boolean(res?.manualPreserved),
+    bcbPreviewRate: previewRate > 0 ? previewRate : undefined,
+    bcbPreviewFecha: res?.bcbPreviewFecha ? normalizeDateToYmd(res.bcbPreviewFecha) : undefined,
+  };
+}
+
+export async function saveExchangeRateConfig(config: {
+  tasaBobPerUsd: number;
+  nota?: string;
+  fecha?: string;
+}): Promise<ExchangeRateConfig> {
   const tcNum = parseDecimalNumber(config.tasaBobPerUsd);
   if (tcNum <= 0) {
     throw new Error('El tipo de cambio debe ser un número positivo mayor a 0.');
   }
 
-  const localDateStr = config.fecha ? getLocalDateString(config.fecha) : getLocalDateString();
+  const boliviaDateStr = config.fecha ? normalizeDateToYmd(config.fecha) : getBoliviaDateString();
 
   const payload = {
     tasa: tcNum,
     tasaBobPerUsd: tcNum,
     tc: tcNum,
     rate: tcNum,
-    fecha: localDateStr,
-    fechaActualizacion: localDateStr,
-    fecha_actualizacion: localDateStr,
-    date: localDateStr,
-    nota: config.nota || 'Configurado manualmente por el administrador',
+    modo: 'manual',
+    fuente: 'manual',
+    fecha: boliviaDateStr,
+    fechaActualizacion: boliviaDateStr,
+    fecha_actualizacion: boliviaDateStr,
+    date: boliviaDateStr,
+    nota: config.nota || 'Ajuste manual registrado por el administrador',
   };
 
   let res: any;
@@ -2268,20 +2756,33 @@ export async function saveExchangeRateConfig(config: { tasaBobPerUsd: number; no
     throw new Error(`Error en el backend al guardar el tipo de cambio vía fx.set: ${err?.message || 'Error de comunicación'}`);
   }
 
-  clearMemoryCache();
+  invalidateBackendDomains(['fx.', 'catalog.']);
+  try {
+    localStorage.removeItem(FX_AUTO_SYNC_STORAGE_KEY);
+  } catch {
+    // Ignore storage error
+  }
 
-  const returnedTasa = parseDecimalNumber(
-    res?.tasaBobPerUsd ?? res?.tasa ?? res?.tc ?? res?.rate ?? tcNum
-  );
+  const normalized = normalizeExchangeRateResponse(res);
+  if (normalized) {
+    const finalConfig: ExchangeRateConfig = {
+      ...normalized,
+      fuente: 'manual',
+      estado: 'manual',
+      fuenteDetalle: 'Ajuste manual',
+    };
+    setConfiguredExchangeRate(finalConfig.tasaBobPerUsd);
+    return finalConfig;
+  }
 
-  const finalTasa = returnedTasa || tcNum;
-  setConfiguredExchangeRate(finalTasa);
-
+  setConfiguredExchangeRate(tcNum);
   return {
-    tasaBobPerUsd: finalTasa,
-    fuente: res?.fuente || 'manual',
-    fechaActualizacion: res?.fechaActualizacion || res?.fecha || localDateStr,
-    nota: res?.nota || config.nota || '',
+    tasaBobPerUsd: tcNum,
+    fuente: 'manual',
+    fechaActualizacion: boliviaDateStr,
+    estado: 'manual',
+    fuenteDetalle: 'Ajuste manual',
+    nota: config.nota || '',
   };
 }
 
@@ -2291,4 +2792,527 @@ export async function saveExchangeRateConfig(config: { tasaBobPerUsd: number; no
 
 export async function getFinancialReports(campanaId?: string, useCache = true): Promise<any> {
   return callGAS<any>('report.get', { campanaId }, useCache);
+}
+
+// -------------------------------------------------------------
+// 13. Cobros (Cuentas por cobrar de servicios a clientes externos)
+// -------------------------------------------------------------
+
+function normalizeCurrencyCode(raw: any, fallback: Currency = 'BOB'): Currency {
+  const s = String(raw || '').trim().toUpperCase();
+  if (s === 'USD' || s === 'U$D' || s === 'US$' || s === '$') return 'USD';
+  if (s === 'BOB' || s === 'BS' || s === 'BS.') return 'BOB';
+  return fallback;
+}
+
+function normalizeCobroEstado(raw: any, importe: number, cobrado: number, saldo: number): CobroEstado {
+  const s = String(raw || '').trim().toUpperCase();
+  if (s === 'PAGADO' || s === 'COBRADO') return 'PAGADO';
+  if (s === 'PARCIAL') return 'PARCIAL';
+  if (s === 'PENDIENTE') return 'PENDIENTE';
+  if (importe > 0 && saldo <= 0.005) return 'PAGADO';
+  if (cobrado > 0 && saldo > 0.005) return 'PARCIAL';
+  return 'PENDIENTE';
+}
+
+export function normalizeCobroPago(raw: any, fallbackTrabajoId = ''): CobroPago {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      id: '',
+      trabajoId: fallbackTrabajoId,
+      fecha: '',
+      importe: 0,
+    };
+  }
+  const importeUsdRaw =
+    raw.importeUsd !== undefined && raw.importeUsd !== null && raw.importeUsd !== ''
+      ? parseDecimalNumber(raw.importeUsd)
+      : parseDecimalNumber(raw.importe ?? raw.monto ?? raw.total ?? 0);
+  const monedaCobro = raw.monedaCobro
+    ? normalizeCurrencyCode(raw.monedaCobro, 'USD')
+    : raw.moneda
+    ? normalizeCurrencyCode(raw.moneda, 'USD')
+    : 'USD';
+  const tcVal = parseDecimalNumber(raw.tc ?? raw.tipoCambio ?? 0);
+  const importeOriginalRaw =
+    raw.importeOriginal !== undefined && raw.importeOriginal !== null && raw.importeOriginal !== ''
+      ? parseDecimalNumber(raw.importeOriginal)
+      : monedaCobro === 'BOB' && tcVal > 0
+      ? Number((importeUsdRaw * tcVal).toFixed(2))
+      : importeUsdRaw;
+
+  return {
+    id: String(raw.id || raw.pagoId || raw.ID || `pag_${Math.random().toString(36).slice(2, 8)}`),
+    trabajoId: String(raw.trabajoId || raw.trabajo_id || fallbackTrabajoId || ''),
+    fecha: normalizeDateToYmd(raw.fecha) || String(raw.fecha || ''),
+    importe: importeUsdRaw,
+    moneda: raw.moneda ? normalizeCurrencyCode(raw.moneda, 'USD') : 'USD',
+    importeOriginal: importeOriginalRaw,
+    monedaCobro,
+    tc: tcVal > 0 ? tcVal : undefined,
+    importeUsd: importeUsdRaw,
+    observacion: String(raw.observacion ?? raw.observaciones ?? raw.nota ?? '').trim(),
+    creadoPor: raw.creadoPor ? String(raw.creadoPor) : undefined,
+    creadoEn: raw.creadoEn ? String(raw.creadoEn) : undefined,
+  };
+}
+
+export function normalizeCobroCuenta(raw: any): CobroCuenta {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const trabajoId = String(src.trabajoId || src.trabajo_id || src.id || src.ID || '');
+  const importe = parseDecimalNumber(src.importe ?? src.total ?? src.importeOriginal ?? 0);
+  const cobrado = parseDecimalNumber(src.cobrado ?? src.importeCobrado ?? src.pagado ?? 0);
+  const saldoRaw = src.saldo !== undefined && src.saldo !== null && src.saldo !== ''
+    ? parseDecimalNumber(src.saldo)
+    : Math.max(0, Number((importe - cobrado).toFixed(2)));
+  const saldo = Math.max(0, Number(saldoRaw.toFixed(2)));
+  const moneda = normalizeCurrencyCode(src.moneda, 'USD');
+  const estado = normalizeCobroEstado(src.estado, importe, cobrado, saldo);
+  const rawPagos = Array.isArray(src.pagos) ? src.pagos : [];
+  const pagos = rawPagos.map((p: any) => normalizeCobroPago(p, trabajoId));
+
+  const importeOriginalServicio =
+    src.importeOriginalServicio !== undefined && src.importeOriginalServicio !== null && src.importeOriginalServicio !== ''
+      ? parseDecimalNumber(src.importeOriginalServicio)
+      : undefined;
+  const monedaOriginalServicio = src.monedaOriginalServicio
+    ? normalizeCurrencyCode(src.monedaOriginalServicio, moneda)
+    : undefined;
+  const tcServicio = parseDecimalNumber(src.tcServicio ?? src.tc ?? src.tipoCambio ?? 0) || undefined;
+  const precioUnitario =
+    src.precioUnitario !== undefined && src.precioUnitario !== null && src.precioUnitario !== ''
+      ? parseDecimalNumber(src.precioUnitario)
+      : src.tarifa !== undefined && src.tarifa !== null && src.tarifa !== ''
+      ? parseDecimalNumber(src.tarifa)
+      : undefined;
+
+  return {
+    id: String(src.id || trabajoId),
+    trabajoId,
+    fecha: normalizeDateToYmd(src.fecha) || String(src.fecha || ''),
+    campanaId: src.campanaId ? String(src.campanaId) : undefined,
+    campanaNombre: src.campanaNombre || src.campana ? String(src.campanaNombre || src.campana) : undefined,
+    cliente: String(src.cliente || src.clienteNombre || 'Cliente externo').trim(),
+    maquinariaId: src.maquinariaId || src.maquinaId ? String(src.maquinariaId || src.maquinaId) : undefined,
+    maquinariaNombre: src.maquinariaNombre || src.maquina ? String(src.maquinariaNombre || src.maquina) : undefined,
+    implementoId: src.implementoId || src.trabajoTipoId ? String(src.implementoId || src.trabajoTipoId) : undefined,
+    trabajoNombre: src.trabajoNombre || src.trabajo || src.labor || src.descripcion
+      ? String(src.trabajoNombre || src.trabajo || src.labor || src.descripcion)
+      : undefined,
+    cantidad: src.cantidad !== undefined ? parseDecimalNumber(src.cantidad) : undefined,
+    unidad: src.unidad ? String(src.unidad) : undefined,
+    tarifa: precioUnitario,
+    precioUnitario,
+    importe,
+    moneda,
+    tipoCambio: tcServicio,
+    importeOriginalServicio,
+    monedaOriginalServicio,
+    tcServicio,
+    cobrado,
+    saldo,
+    estado,
+    observacion: String(src.observacion ?? src.observaciones ?? '').trim(),
+    pagos,
+  };
+}
+
+export async function getCobros(
+  options?: { campanaId?: string; soloPendientes?: boolean },
+  useCache = false
+): Promise<CobroCuenta[]> {
+  const payload: Record<string, any> = {};
+  if (options?.campanaId) payload.campanaId = options.campanaId;
+  if (options?.soloPendientes !== undefined) payload.soloPendientes = options.soloPendientes;
+
+  const res = await callGAS<any>('cobros.list', payload, useCache);
+  const rawList = extractArrayFromResponse(res, ['cobros', 'cuentas', 'result', 'items']);
+  return rawList.map(normalizeCobroCuenta);
+}
+
+export async function getCobroEstado(trabajoId: string, useCache = false): Promise<CobroCuenta> {
+  if (!trabajoId || !trabajoId.trim()) {
+    throw new Error('Se requiere el identificador del servicio (trabajoId) para consultar su estado de cobro.');
+  }
+  const res = await callGAS<any>('cobros.estado', { trabajoId: trabajoId.trim() }, useCache);
+  const cuentaRaw = res?.cuenta || (res?.result && !Array.isArray(res.result) ? res.result : res);
+  if (!cuentaRaw || typeof cuentaRaw !== 'object') {
+    throw new Error('El backend no devolvió un estado de cobro válido.');
+  }
+  return normalizeCobroCuenta({ ...cuentaRaw, trabajoId: cuentaRaw.trabajoId || trabajoId });
+}
+
+export async function registrarCobro(params: {
+  trabajoId: string;
+  importe?: number;
+  importeOriginal?: number;
+  monedaCobro?: Currency;
+  tc?: number;
+  fecha: string;
+  observacion?: string;
+}): Promise<{ pago: CobroPago | null; cuenta: CobroCuenta | null }> {
+  const importeOriginalNum = parseDecimalNumber(params.importeOriginal ?? params.importe);
+  if (!params.trabajoId || !params.trabajoId.trim()) {
+    throw new Error('Falta el identificador del servicio a cobrar.');
+  }
+  if (importeOriginalNum <= 0) {
+    throw new Error('El importe del cobro debe ser mayor a 0.');
+  }
+  if (!params.fecha) {
+    throw new Error('La fecha del cobro es obligatoria.');
+  }
+
+  const monedaNorm: Currency = params.monedaCobro === 'BOB' ? 'BOB' : 'USD';
+  const tcNum = resolveEffectiveExchangeRate(params.tc);
+
+  const payload = {
+    trabajoId: params.trabajoId.trim(),
+    importe: importeOriginalNum,
+    importeOriginal: importeOriginalNum,
+    monedaCobro: monedaNorm,
+    moneda: monedaNorm,
+    tc: tcNum,
+    tipoCambio: tcNum,
+    fecha: params.fecha,
+    observacion: (params.observacion || '').trim(),
+  };
+
+  const res = await callGAS<any>('cobros.registrar', payload, false);
+  invalidateBackendDomains(['cobros.']);
+
+  const pagoRaw = res?.pago || res?.result?.pago;
+  const cuentaRaw = res?.cuenta || res?.result?.cuenta;
+
+  return {
+    pago: pagoRaw ? normalizeCobroPago(pagoRaw, params.trabajoId) : null,
+    cuenta: cuentaRaw ? normalizeCobroCuenta({ ...cuentaRaw, trabajoId: cuentaRaw.trabajoId || params.trabajoId }) : null,
+  };
+}
+
+// -------------------------------------------------------------
+// 14. Cosechas sin precio y fijación parcial/total de precios
+// -------------------------------------------------------------
+
+export function normalizeHarvestAssignment(raw: any, fallbackCosechaId = ''): HarvestPriceAssignment {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const toneladas = parseDecimalNumber(src.toneladas ?? src.cantidad ?? 0);
+  const precioUsdTon = parseDecimalNumber(src.precioUsdTon ?? src.precio ?? src.precioUnitario ?? 0);
+  const tc = parseDecimalNumber(src.tc ?? src.tipoCambio ?? 0);
+  const totalUsd = parseDecimalNumber(src.totalUsd ?? src.importeUsd ?? src.importe ?? toneladas * precioUsdTon);
+  const totalBob = parseDecimalNumber(src.totalBob ?? src.importeBob ?? (tc > 0 ? totalUsd * tc : 0));
+
+  return {
+    id: String(src.id || src.asignacionId || src.ID || `asig_${Math.random().toString(36).slice(2, 8)}`),
+    cosechaId: String(src.cosechaId || src.cosecha_id || fallbackCosechaId || ''),
+    fecha: normalizeDateToYmd(src.fecha) || String(src.fecha || ''),
+    campanaId: src.campanaId ? String(src.campanaId) : undefined,
+    toneladas,
+    precioUsdTon,
+    tc,
+    totalUsd,
+    totalBob: totalBob > 0 ? totalBob : undefined,
+    movimientoId: src.movimientoId ? String(src.movimientoId) : undefined,
+    observacion: String(src.observacion ?? src.observaciones ?? '').trim() || undefined,
+    creadoEn: src.creadoEn ? String(src.creadoEn) : undefined,
+  };
+}
+
+export function normalizeHarvestRecord(raw: any): HarvestRecord {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const id = String(src.id || src.cosechaId || src.ID || '');
+  const toneladas = parseDecimalNumber(src.toneladas ?? src.toneladasTotales ?? src.cantidad ?? 0);
+  const rawAsigs = Array.isArray(src.asignaciones)
+    ? src.asignaciones
+    : Array.isArray(src.precios)
+    ? src.precios
+    : [];
+  const asignaciones: HarvestPriceAssignment[] = rawAsigs.map((a: any) =>
+    normalizeHarvestAssignment(a, id)
+  );
+  const sumAsig = asignaciones.reduce((acc: number, a: HarvestPriceAssignment) => acc + a.toneladas, 0);
+  const asignadas =
+    src.asignadas !== undefined && src.asignadas !== null && src.asignadas !== ''
+      ? parseDecimalNumber(src.asignadas)
+      : src.toneladasAsignadas !== undefined && src.toneladasAsignadas !== null && src.toneladasAsignadas !== ''
+      ? parseDecimalNumber(src.toneladasAsignadas)
+      : sumAsig;
+  const pendienteRaw =
+    src.pendiente !== undefined && src.pendiente !== null && src.pendiente !== ''
+      ? parseDecimalNumber(src.pendiente)
+      : src.toneladasPendientes !== undefined && src.toneladasPendientes !== null && src.toneladasPendientes !== ''
+      ? parseDecimalNumber(src.toneladasPendientes)
+      : Math.max(0, Number((toneladas - asignadas).toFixed(4)));
+  const pendiente = Math.max(0, Number(pendienteRaw.toFixed(4)));
+
+  return {
+    id,
+    fecha: normalizeDateToYmd(src.fecha) || String(src.fecha || ''),
+    campanaId: String(src.campanaId || src.campana_id || ''),
+    campanaNombre: src.campanaNombre || src.campana ? String(src.campanaNombre || src.campana) : undefined,
+    loteId: String(src.loteId || src.lote_id || ''),
+    loteNombre: src.loteNombre || src.lote ? String(src.loteNombre || src.lote) : undefined,
+    producto: String(src.producto || src.cultivo || src.concepto || 'Cosecha').trim(),
+    toneladas,
+    asignadas,
+    pendiente,
+    estado: src.estado ? String(src.estado) : undefined,
+    observacion: String(src.observacion ?? src.observaciones ?? '').trim(),
+    asignaciones,
+    creadoEn: src.creadoEn ? String(src.creadoEn) : undefined,
+  };
+}
+
+export async function getHarvests(
+  options?: { campanaId?: string; soloPendientes?: boolean },
+  useCache = false
+): Promise<HarvestRecord[]> {
+  const payload: Record<string, any> = {};
+  if (options?.campanaId) payload.campanaId = options.campanaId;
+  if (options?.soloPendientes !== undefined) payload.soloPendientes = options.soloPendientes;
+
+  const res = await callGAS<any>('harvest.list', payload, useCache);
+  const rawList = extractArrayFromResponse(res, ['cosechas', 'harvests', 'result', 'items']);
+  return rawList.map(normalizeHarvestRecord);
+}
+
+export async function getPendingHarvests(useCache = false): Promise<HarvestRecord[]> {
+  const res = await callGAS<any>('harvest.pending', {}, useCache);
+  const rawList = extractArrayFromResponse(res, ['cosechas', 'pendientes', 'harvests', 'result', 'items']);
+  return rawList.map(normalizeHarvestRecord);
+}
+
+export async function createHarvest(params: {
+  fecha: string;
+  campanaId: string;
+  loteId: string;
+  producto: string;
+  toneladas: number;
+  observacion?: string;
+}): Promise<HarvestRecord> {
+  const tons = parseDecimalNumber(params.toneladas);
+  if (!params.campanaId) throw new Error('Selecciona la campaña de la cosecha.');
+  if (!params.loteId) throw new Error('Selecciona el lote de la cosecha.');
+  if (!params.producto || !params.producto.trim()) throw new Error('Indica el producto cosechado.');
+  if (tons <= 0) throw new Error('Las toneladas cosechadas deben ser mayores a 0.');
+
+  const payload = {
+    fecha: params.fecha,
+    campanaId: params.campanaId,
+    loteId: params.loteId,
+    producto: params.producto.trim(),
+    toneladas: tons,
+    observacion: (params.observacion || '').trim(),
+  };
+
+  const res = await callGAS<any>('harvest.create', payload, false);
+  invalidateBackendDomains(['harvest.']);
+  const rawRecord = res?.cosecha || (res?.result && !Array.isArray(res.result) ? res.result : res);
+  return normalizeHarvestRecord({
+    ...payload,
+    ...(rawRecord && typeof rawRecord === 'object' ? rawRecord : {}),
+  });
+}
+
+export async function updateHarvest(
+  id: string,
+  params: {
+    fecha?: string;
+    campanaId?: string;
+    loteId?: string;
+    producto?: string;
+    toneladas?: number;
+    observacion?: string;
+  }
+): Promise<HarvestRecord> {
+  if (!id || !id.trim()) {
+    throw new Error('Falta el identificador de la cosecha a actualizar.');
+  }
+  const payload: Record<string, any> = { id: id.trim() };
+  if (params.fecha !== undefined) payload.fecha = params.fecha;
+  if (params.campanaId !== undefined) payload.campanaId = params.campanaId;
+  if (params.loteId !== undefined) payload.loteId = params.loteId;
+  if (params.producto !== undefined) {
+    const prod = params.producto.trim();
+    if (!prod) throw new Error('Indica el producto cosechado.');
+    payload.producto = prod;
+  }
+  if (params.toneladas !== undefined) {
+    const tons = parseDecimalNumber(params.toneladas);
+    if (tons <= 0) throw new Error('Las toneladas cosechadas deben ser mayores a 0.');
+    payload.toneladas = tons;
+  }
+  if (params.observacion !== undefined) {
+    payload.observacion = params.observacion.trim();
+  }
+
+  const res = await callGAS<any>('harvest.update', payload, false);
+  invalidateBackendDomains(['harvest.']);
+  const rawRecord = res?.cosecha || (res?.result && !Array.isArray(res.result) ? res.result : res);
+  return normalizeHarvestRecord({
+    ...payload,
+    ...(rawRecord && typeof rawRecord === 'object' ? rawRecord : {}),
+  });
+}
+
+export async function assignHarvestPrice(params: {
+  cosechaId: string;
+  fecha: string;
+  campanaId: string;
+  toneladas: number;
+  precioUsdTon: number;
+  tc: number;
+}): Promise<{ asignacion: HarvestPriceAssignment | null; cosecha: HarvestRecord | null }> {
+  const tons = parseDecimalNumber(params.toneladas);
+  const precio = parseDecimalNumber(params.precioUsdTon);
+  const tcNum = resolveEffectiveExchangeRate(params.tc);
+
+  if (!params.cosechaId) throw new Error('Selecciona la cosecha a la que deseas asignar precio.');
+  if (!params.campanaId) throw new Error('Selecciona la campaña para registrar el ingreso.');
+  if (tons <= 0) throw new Error('Las toneladas a asignar deben ser mayores a 0.');
+  if (precio <= 0) throw new Error('El precio USD/tonelada debe ser mayor a 0.');
+
+  const payload = {
+    cosechaId: params.cosechaId,
+    fecha: params.fecha,
+    campanaId: params.campanaId,
+    toneladas: tons,
+    precioUsdTon: precio,
+    tc: tcNum,
+  };
+
+  const res = await callGAS<any>('harvest.price', payload, false);
+  // Backend creates the Property income automatically; invalidate harvest, movement & report caches
+  invalidateBackendDomains(['harvest.', 'movement.', 'report.']);
+
+  const asigRaw = res?.asignacion || res?.result?.asignacion || res?.precio || res?.result?.precio;
+  const cosechaRaw = res?.cosecha || res?.result?.cosecha;
+  return {
+    asignacion: asigRaw ? normalizeHarvestAssignment(asigRaw, params.cosechaId) : null,
+    cosecha: cosechaRaw ? normalizeHarvestRecord(cosechaRaw) : null,
+  };
+}
+
+// -------------------------------------------------------------
+// 15. Gastos distribuidos entre lotes (expense.allocate / expense.allocations)
+// -------------------------------------------------------------
+
+export function normalizeExpenseAllocationGroup(raw: any): ExpenseAllocationGroup {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const grupoId = String(src.grupoId || src.grupo_id || src.id || src.ID || '');
+  const rawLotes = Array.isArray(src.lotes)
+    ? src.lotes
+    : Array.isArray(src.detalle)
+    ? src.detalle
+    : Array.isArray(src.distribucion)
+    ? src.distribucion
+    : [];
+
+  const lotes: ExpenseAllocationLot[] = rawLotes.map((l: any) => ({
+    loteId: String(l.loteId || l.lote_id || l.id || ''),
+    loteNombre: l.loteNombre || l.nombre || l.lote ? String(l.loteNombre || l.nombre || l.lote) : undefined,
+    hectareas: parseDecimalNumber(l.hectareas ?? l.ha ?? 0),
+    porcentaje: l.porcentaje !== undefined ? parseDecimalNumber(l.porcentaje) : undefined,
+    importe: l.importe !== undefined || l.monto !== undefined ? parseDecimalNumber(l.importe ?? l.monto) : undefined,
+    movimientoId: l.movimientoId ? String(l.movimientoId) : undefined,
+  }));
+
+  const haTot =
+    src.hectareasTotales !== undefined
+      ? parseDecimalNumber(src.hectareasTotales)
+      : lotes.reduce((sum, l) => sum + l.hectareas, 0);
+
+  return {
+    id: String(src.id || grupoId || `alloc_${Math.random().toString(36).slice(2, 8)}`),
+    grupoId,
+    fecha: normalizeDateToYmd(src.fecha) || String(src.fecha || ''),
+    campanaId: String(src.campanaId || src.campana_id || ''),
+    campanaNombre: src.campanaNombre || src.campana ? String(src.campanaNombre || src.campana) : undefined,
+    descripcion: String(src.descripcion || src.itemGasto || src.item || 'Gasto distribuido').trim(),
+    itemId: src.itemId ? String(src.itemId) : undefined,
+    importe: parseDecimalNumber(src.importe ?? src.importeTotal ?? src.total ?? 0),
+    moneda: normalizeCurrencyCode(src.moneda, 'BOB'),
+    tc: parseDecimalNumber(src.tc ?? src.tipoCambio ?? 0),
+    hectareasTotales: haTot > 0 ? haTot : undefined,
+    observacion: String(src.observacion ?? src.observaciones ?? '').trim(),
+    lotes,
+    creadoEn: src.creadoEn ? String(src.creadoEn) : undefined,
+  };
+}
+
+export async function allocateExpense(params: {
+  fecha: string;
+  campanaId: string;
+  descripcion: string;
+  importe: number;
+  moneda: Currency;
+  tc: number;
+  lotes: Array<{ loteId: string; hectareas: number }>;
+  itemId?: string;
+  observacion?: string;
+}): Promise<{ grupo: ExpenseAllocationGroup | null; raw: any }> {
+  const importeNum = parseDecimalNumber(params.importe);
+  const tcNum = resolveEffectiveExchangeRate(params.tc);
+
+  if (!params.campanaId) {
+    throw new Error('Debes tener una campaña activa para registrar un gasto distribuido.');
+  }
+  if (!params.descripcion || !params.descripcion.trim()) {
+    throw new Error('La descripción del gasto es obligatoria.');
+  }
+  if (importeNum <= 0) {
+    throw new Error('El importe total del gasto debe ser mayor a 0.');
+  }
+  if (!Array.isArray(params.lotes) || params.lotes.length < 2) {
+    throw new Error('Un gasto distribuido requiere al menos dos lotes.');
+  }
+
+  const normalizedLotes = params.lotes.map((l) => ({
+    loteId: String(l.loteId),
+    hectareas: parseDecimalNumber(l.hectareas),
+  }));
+  if (normalizedLotes.some((l) => !l.loteId || l.hectareas <= 0)) {
+    throw new Error('Todos los lotes seleccionados deben tener hectáreas válidas mayores a 0.');
+  }
+
+  const gasMoneda = params.moneda === 'USD' ? 'USD' : 'BOB';
+  const payload = {
+    fecha: params.fecha,
+    campanaId: params.campanaId,
+    descripcion: params.descripcion.trim(),
+    importe: importeNum,
+    moneda: gasMoneda,
+    tc: tcNum,
+    lotes: normalizedLotes,
+    itemId: params.itemId || '',
+    observacion: (params.observacion || '').trim(),
+  };
+
+  // Single backend request: GAS generates the per-lot movements and allocation group
+  const res = await callGAS<any>('expense.allocate', payload, false);
+  invalidateBackendDomains(['expense.allocations', 'movement.', 'report.']);
+
+  const grupoRaw = res?.grupo || (res?.result && !Array.isArray(res.result) ? res.result : res);
+  return {
+    grupo: grupoRaw && typeof grupoRaw === 'object' ? normalizeExpenseAllocationGroup({ ...payload, ...grupoRaw }) : null,
+    raw: res,
+  };
+}
+
+export async function getExpenseAllocations(
+  options?: { campanaId?: string; grupoId?: string },
+  useCache = false
+): Promise<ExpenseAllocationGroup[]> {
+  const payload: Record<string, any> = {};
+  if (options?.campanaId) payload.campanaId = options.campanaId;
+  if (options?.grupoId) payload.grupoId = options.grupoId;
+
+  const res = await callGAS<any>('expense.allocations', payload, useCache);
+  const rawList = extractArrayFromResponse(res, [
+    'allocations',
+    'distribuciones',
+    'grupos',
+    'result',
+    'items',
+  ]);
+  return rawList.map(normalizeExpenseAllocationGroup);
 }

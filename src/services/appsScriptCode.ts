@@ -161,6 +161,8 @@ function dispatch_(p) {
     'item.delete',
     'saveExchangeRateConfig',
     'fx.set',
+    'fx.refresh',
+    'refreshExchangeRateBcb',
     'getAssets',
     'asset.list',
     'createAsset',
@@ -338,10 +340,16 @@ function handleAction_(action, payload, userSession, adminSession) {
     case 'item.save':
       return handleSaveItemConfig(payload.item || payload, userSession);
 
-    // --- Tipo de Cambio (Hoja Configuracion) ---
+    // --- Tipo de Cambio (Hoja Configuracion + BCB Oficial) ---
     case 'getExchangeRateConfig':
     case 'fx.get':
       return handleGetExchangeRate();
+    case 'fx.syncAuto':
+    case 'syncExchangeRateAuto':
+      return handleSyncExchangeRateAuto(userSession);
+    case 'fx.refresh':
+    case 'refreshExchangeRateBcb':
+      return handleRefreshExchangeRateBcb(payload || {}, userSession);
     case 'saveExchangeRateConfig':
     case 'fx.set':
       return handleSaveExchangeRate(payload.config || payload, userSession);
@@ -2753,35 +2761,439 @@ function handleSaveItemConfig(item, userSession) {
 }
 
 // -------------------------------------------------------------
-// TIPO DE CAMBIO (HOJA CONFIGURACION ORIGINAL)
-// Claves: TIPO_CAMBIO, FECHA_TIPO_CAMBIO, NOTA_TIPO_CAMBIO
+// TIPO DE CAMBIO OFICIAL BCB Y AJUSTE MANUAL (HOJA CONFIGURACION)
+// Claves base: TIPO_CAMBIO, FECHA_TIPO_CAMBIO, NOTA_TIPO_CAMBIO
+// Claves BCB automáticas (se crean solas al usar setConfigValue):
+//   TIPO_CAMBIO_MODO ('bcb' | 'manual')
+//   TIPO_CAMBIO_FUENTE ('BCB (Oficial)' | 'Ajuste manual')
+//   TIPO_CAMBIO_FECHA_COTIZACION (YYYY-MM-DD vigencia oficial BCB)
+//   TIPO_CAMBIO_FECHA_CORTE (YYYY-MM-DD corte oficial BCB)
+//   TIPO_CAMBIO_ULTIMA_CONSULTA (YYYY-MM-DD HH:mm America/La_Paz)
+//   TIPO_CAMBIO_ULTIMA_CONSULTA_DIA (YYYY-MM-DD America/La_Paz)
+//   TIPO_CAMBIO_ESTADO ('actualizado' | 'pendiente' | 'sin_conexion' | 'manual')
+//   TIPO_CAMBIO_ERROR (mensaje discreto si falló última consulta)
 // -------------------------------------------------------------
 
-function handleGetExchangeRate() {
+const BCB_TCO_URL_ = 'https://www.bcb.gob.bo/bcb_tco_publico_ultima_cotizacion.php';
+const BOLIVIA_TZ_ = 'America/La_Paz';
+
+function getBoliviaTodayStr_() {
+  return Utilities.formatDate(new Date(), BOLIVIA_TZ_, 'yyyy-MM-dd');
+}
+
+function getBoliviaTimestampStr_() {
+  return Utilities.formatDate(new Date(), BOLIVIA_TZ_, 'yyyy-MM-dd HH:mm');
+}
+
+function normalizeConfigDateStr_(val) {
+  if (!val) return '';
+  if (val instanceof Date) {
+    if (isNaN(val.getTime())) return '';
+    return Utilities.formatDate(val, BOLIVIA_TZ_, 'yyyy-MM-dd');
+  }
+  const s = String(val).trim();
+  const ymd = s.match(/^(\\d{4}-\\d{2}-\\d{2})/);
+  if (ymd) return ymd[1];
+  const dmy = s.match(/^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})$/);
+  if (dmy) {
+    return dmy[3] + '-' + ('0' + dmy[2]).slice(-2) + '-' + ('0' + dmy[1]).slice(-2);
+  }
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) {
+    return Utilities.formatDate(parsed, BOLIVIA_TZ_, 'yyyy-MM-dd');
+  }
+  return s;
+}
+
+function normalizeConfigTimestampStr_(val) {
+  if (!val) return '';
+  if (val instanceof Date) {
+    if (isNaN(val.getTime())) return '';
+    return Utilities.formatDate(val, BOLIVIA_TZ_, 'yyyy-MM-dd HH:mm');
+  }
+  const s = String(val).trim();
+  if (!s) return '';
+  const ymdHm = s.match(/^(\\d{4}-\\d{2}-\\d{2})[T\\s](\\d{2}:\\d{2})/);
+  if (ymdHm) return ymdHm[1] + ' ' + ymdHm[2];
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) {
+    return Utilities.formatDate(parsed, BOLIVIA_TZ_, 'yyyy-MM-dd HH:mm');
+  }
+  return s;
+}
+
+function parseSpanishBcbDate_(text) {
+  if (!text) return '';
+  const months = {
+    enero: '01',
+    febrero: '02',
+    marzo: '03',
+    abril: '04',
+    mayo: '05',
+    junio: '06',
+    julio: '07',
+    agosto: '08',
+    septiembre: '09',
+    setiembre: '09',
+    octubre: '10',
+    noviembre: '11',
+    diciembre: '12'
+  };
+  const clean = String(text)
+    .toLowerCase()
+    .replace(/[áàä]/g, 'a')
+    .replace(/[éèë]/g, 'e')
+    .replace(/[íìï]/g, 'i')
+    .replace(/[óòö]/g, 'o')
+    .replace(/[úùü]/g, 'u');
+  const m = clean.match(/(\\d{1,2})\\s+de\\s+([a-z]+)\\s+de\\s+(\\d{4})/);
+  if (!m) return '';
+  const mo = months[m[2]];
+  if (!mo) return '';
+  return m[3] + '-' + mo + '-' + ('0' + m[1]).slice(-2);
+}
+
+function parseBcbTcoHtml_(html) {
+  if (!html || typeof html !== 'string' || html.length < 100) {
+    throw new Error('Respuesta vacía o incompleta del Banco Central de Bolivia.');
+  }
+  if (!/TIPO\\s+DE\\s+CAMBIO\\s+OFICIAL/i.test(html)) {
+    throw new Error('La respuesta del BCB no contiene el indicador de Tipo de Cambio Oficial.');
+  }
+
+  let tasa = NaN;
+  let fechaCotizacion = '';
+  let fechaCorte = '';
+
+  const valMatch = html.match(/<div[^>]*class=["'][^"']*tco-public-value[^"']*["'][^>]*>([\\s\\S]*?)<\\/div>/i);
+  if (valMatch && valMatch[1]) {
+    const numMatch = valMatch[1].match(/(\\d{1,3}(?:[.,]\\d{1,4})?)/);
+    if (numMatch) {
+      tasa = parseFloat(numMatch[1].replace(',', '.'));
+    }
+  }
+
+  const vigMatch = html.match(/<span[^>]*class=["'][^"']*tco-public-vigencia[^"']*["'][^>]*>([\\s\\S]*?)<\\/span>/i);
+  if (vigMatch && vigMatch[1]) {
+    fechaCotizacion = parseSpanishBcbDate_(vigMatch[1]);
+  }
+
+  const corteMatch = html.match(/<span[^>]*class=["'][^"']*tco-public-date[^"']*["'][^>]*>([\\s\\S]*?)<\\/span>/i);
+  if (corteMatch && corteMatch[1]) {
+    fechaCorte = parseSpanishBcbDate_(corteMatch[1]);
+  }
+
+  // Respaldo dentro del mismo HTML oficial (última fila de la tabla diaria TCO)
+  if ((isNaN(tasa) || tasa <= 0 || !fechaCotizacion) && html.indexOf('tco-daily-table') !== -1) {
+    const tablePart = html.split('tco-daily-table')[1] || '';
+    const rowRegex = /<tr>\\s*<td>([^<]+)<\\/td>\\s*<td>([^<]+)<\\/td>\\s*<\\/tr>/gi;
+    let lastRow = null;
+    let match;
+    while ((match = rowRegex.exec(tablePart)) !== null) {
+      lastRow = match;
+    }
+    if (lastRow) {
+      if (!fechaCotizacion) {
+        fechaCotizacion = parseSpanishBcbDate_(lastRow[1]);
+      }
+      if (isNaN(tasa) || tasa <= 0) {
+        const fallbackNum = String(lastRow[2] || '').trim().replace(',', '.');
+        tasa = parseFloat(fallbackNum);
+      }
+    }
+  }
+
+  if (isNaN(tasa) || !isFinite(tasa) || tasa <= 1 || tasa >= 1000) {
+    throw new Error('La cotización oficial recibida del BCB no tiene un valor numérico válido.');
+  }
+  if (!fechaCotizacion || !/^\\d{4}-\\d{2}-\\d{2}$/.test(fechaCotizacion)) {
+    throw new Error('No se pudo identificar la fecha de vigencia oficial del BCB.');
+  }
+
+  return {
+    tasaBobPerUsd: tasa,
+    fechaCotizacion: fechaCotizacion,
+    fechaCorte: fechaCorte || '',
+    fuenteDetalle: 'BCB (Oficial)'
+  };
+}
+
+function fetchOfficialBcbRate_() {
+  const response = UrlFetchApp.fetch(BCB_TCO_URL_, {
+    method: 'get',
+    muteHttpExceptions: true,
+    followRedirects: true,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; MaquinariasYPropiedad/1.0)',
+      'Accept': 'text/html,application/xhtml+xml'
+    }
+  });
+
+  const status = response.getResponseCode();
+  if (status !== 200) {
+    throw new Error('El sitio oficial del BCB respondió con estado HTTP ' + status + '.');
+  }
+
+  const html = response.getContentText('UTF-8');
+  return parseBcbTcoHtml_(html);
+}
+
+function buildExchangeRatePayload_(extra) {
   const rawTasa = getConfigValue('TIPO_CAMBIO', '');
   const tasaNum = parseFloat(String(rawTasa || '').replace(',', '.'));
+  const todayBo = getBoliviaTodayStr_();
 
-  if (isNaN(tasaNum) || tasaNum <= 0) {
+  const rawModo = String(getConfigValue('TIPO_CAMBIO_MODO', '') || '').trim().toLowerCase();
+  const modo = rawModo === 'manual' ? 'manual' : 'bcb';
+
+  const fechaAct = normalizeConfigDateStr_(getConfigValue('FECHA_TIPO_CAMBIO', ''));
+  const fechaCot = normalizeConfigDateStr_(getConfigValue('TIPO_CAMBIO_FECHA_COTIZACION', ''));
+  const fechaCorte = normalizeConfigDateStr_(getConfigValue('TIPO_CAMBIO_FECHA_CORTE', ''));
+  const ultimaConsulta = normalizeConfigTimestampStr_(getConfigValue('TIPO_CAMBIO_ULTIMA_CONSULTA', ''));
+  const ultimaConsultaDia = normalizeConfigDateStr_(getConfigValue('TIPO_CAMBIO_ULTIMA_CONSULTA_DIA', ''));
+  const storedFuente = String(getConfigValue('TIPO_CAMBIO_FUENTE', '') || '').trim();
+  const storedEstado = String(getConfigValue('TIPO_CAMBIO_ESTADO', '') || '').trim().toLowerCase();
+  const storedError = String(getConfigValue('TIPO_CAMBIO_ERROR', '') || '').trim();
+  const notaAct = String(getConfigValue('NOTA_TIPO_CAMBIO', '') || '').trim();
+
+  const bcbConfirmado =
+    modo === 'bcb' &&
+    Boolean(ultimaConsulta || ultimaConsultaDia) &&
+    storedFuente.toLowerCase().indexOf('bcb') !== -1;
+
+  let fuenteDetalle = 'Valor guardado';
+  if (modo === 'manual') {
+    fuenteDetalle = 'Ajuste manual';
+  } else if (bcbConfirmado) {
+    fuenteDetalle = 'BCB (Oficial)';
+  }
+
+  let estado = 'pendiente';
+  if (modo === 'manual') {
+    estado = 'manual';
+  } else if (bcbConfirmado && ultimaConsultaDia === todayBo && storedEstado !== 'sin_conexion' && storedEstado !== 'pendiente') {
+    estado = 'actualizado';
+  } else if (storedEstado === 'sin_conexion') {
+    estado = 'sin_conexion';
+  } else {
+    estado = 'pendiente';
+  }
+
+  const base = {
+    tasaBobPerUsd: !isNaN(tasaNum) && tasaNum > 0 ? tasaNum : 0,
+    tasa: !isNaN(tasaNum) && tasaNum > 0 ? tasaNum : 0,
+    tc: !isNaN(tasaNum) && tasaNum > 0 ? tasaNum : 0,
+    fuente: modo,
+    modo: modo,
+    fuenteDetalle: fuenteDetalle,
+    fechaActualizacion: fechaAct || fechaCot || todayBo,
+    fechaCotizacion: fechaCot || (bcbConfirmado ? fechaAct : ''),
+    fechaCorte: fechaCorte || '',
+    ultimaConsulta: ultimaConsulta || '',
+    ultimaConsultaDia: ultimaConsultaDia || '',
+    estado: estado,
+    errorMensaje: storedError || '',
+    nota:
+      notaAct ||
+      (modo === 'manual'
+        ? 'Ajuste manual vigente'
+        : bcbConfirmado
+        ? 'Cotización oficial del Banco Central de Bolivia'
+        : '')
+  };
+
+  if (extra && typeof extra === 'object') {
+    Object.keys(extra).forEach(function (k) {
+      base[k] = extra[k];
+    });
+  }
+  return base;
+}
+
+function handleGetExchangeRate() {
+  const payload = buildExchangeRatePayload_(null);
+  if (!payload.tasaBobPerUsd || payload.tasaBobPerUsd <= 0) {
     return {
       ok: false,
       error: 'Tipo de cambio no configurado en Google Sheets (hoja Configuracion, clave TIPO_CAMBIO). Ingrese a Administración -> Configuración -> Tipo de cambio para definirlo.'
     };
   }
+  return { ok: true, result: payload };
+}
 
-  const fechaAct = getConfigValue('FECHA_TIPO_CAMBIO', '');
-  const notaAct = getConfigValue('NOTA_TIPO_CAMBIO', '');
+function handleSyncExchangeRateAuto(userSession) {
+  const todayBo = getBoliviaTodayStr_();
+  const cache = CacheService.getScriptCache();
 
-  return {
-    ok: true,
-    result: {
-      tasaBobPerUsd: tasaNum,
-      tasa: tasaNum,
-      tc: tasaNum,
-      fuente: 'Configuracion',
-      fechaActualizacion: fechaAct || new Date().toISOString().slice(0, 10),
-      nota: notaAct || 'Configuración oficial en hoja Configuracion'
+  // Lectura rápida antes de lock para no bloquear inicios concurrentes
+  const current = buildExchangeRatePayload_(null);
+  if (current.fuente === 'manual') {
+    return { ok: true, result: current };
+  }
+  if (current.ultimaConsultaDia === todayBo && current.tasaBobPerUsd > 0) {
+    return { ok: true, result: current };
+  }
+  if (cache.get('FX_BCB_ERR_COOLDOWN_' + todayBo)) {
+    return {
+      ok: true,
+      result: buildExchangeRatePayload_({ estado: 'pendiente', syncSkippedCooldown: true })
+    };
+  }
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(8000)) {
+    return { ok: true, result: current };
+  }
+
+  try {
+    // Doble verificación dentro del lock para evitar consultas duplicadas
+    const inside = buildExchangeRatePayload_(null);
+    if (inside.fuente === 'manual') {
+      return { ok: true, result: inside };
     }
-  };
+    if (inside.ultimaConsultaDia === todayBo && inside.tasaBobPerUsd > 0) {
+      return { ok: true, result: inside };
+    }
+
+    const nowTs = getBoliviaTimestampStr_();
+    try {
+      const bcb = fetchOfficialBcbRate_();
+      const rateChanged = Math.abs((inside.tasaBobPerUsd || 0) - bcb.tasaBobPerUsd) > 0.00001;
+      const dateChanged = inside.fechaCotizacion !== bcb.fechaCotizacion;
+      const rawModo = String(getConfigValue('TIPO_CAMBIO_MODO', '') || '').trim().toLowerCase();
+      const modeUninitialized = rawModo !== 'bcb';
+
+      if (rateChanged || dateChanged || modeUninitialized) {
+        setConfigValue('TIPO_CAMBIO', bcb.tasaBobPerUsd);
+        setConfigValue('FECHA_TIPO_CAMBIO', bcb.fechaCotizacion);
+        setConfigValue('TIPO_CAMBIO_MODO', 'bcb');
+        setConfigValue('TIPO_CAMBIO_FUENTE', 'BCB (Oficial)');
+        setConfigValue('TIPO_CAMBIO_FECHA_COTIZACION', bcb.fechaCotizacion);
+        if (bcb.fechaCorte) {
+          setConfigValue('TIPO_CAMBIO_FECHA_CORTE', bcb.fechaCorte);
+        }
+        setConfigValue('NOTA_TIPO_CAMBIO', 'Tipo de Cambio Oficial BCB (vigencia ' + bcb.fechaCotizacion + ')');
+        logAudit_(
+          userSession && userSession.usuarioId ? userSession.usuarioId : 'sistema',
+          'SYNC_FX_BCB_AUTO',
+          'Configuracion',
+          'TIPO_CAMBIO',
+          'TC oficial BCB actualizado automáticamente a ' + bcb.tasaBobPerUsd + ' (vigencia ' + bcb.fechaCotizacion + ')'
+        );
+      }
+
+      setConfigValue('TIPO_CAMBIO_ULTIMA_CONSULTA', nowTs);
+      setConfigValue('TIPO_CAMBIO_ULTIMA_CONSULTA_DIA', todayBo);
+      setConfigValue('TIPO_CAMBIO_ESTADO', 'actualizado');
+      setConfigValue('TIPO_CAMBIO_ERROR', '');
+      cache.remove('FX_BCB_ERR_COOLDOWN_' + todayBo);
+
+      return {
+        ok: true,
+        result: buildExchangeRatePayload_({
+          updated: rateChanged || dateChanged || modeUninitialized,
+          alreadyLatest: !(rateChanged || dateChanged || modeUninitialized)
+        })
+      };
+    } catch (fetchErr) {
+      // Nunca sobrescribir el último TC válido si falla el BCB
+      const errMsg = fetchErr && fetchErr.message ? fetchErr.message : 'No se pudo consultar el BCB.';
+      setConfigValue('TIPO_CAMBIO_ESTADO', 'pendiente');
+      setConfigValue('TIPO_CAMBIO_ERROR', errMsg);
+      cache.put('FX_BCB_ERR_COOLDOWN_' + todayBo, '1', 600);
+
+      return {
+        ok: true,
+        result: buildExchangeRatePayload_({
+          estado: 'pendiente',
+          syncFailed: true,
+          errorMensaje: errMsg
+        })
+      };
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function handleRefreshExchangeRateBcb(payload, userSession) {
+  const switchToOfficial = Boolean(payload && payload.switchToOfficial);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const todayBo = getBoliviaTodayStr_();
+    const nowTs = getBoliviaTimestampStr_();
+    const current = buildExchangeRatePayload_(null);
+
+    let bcb;
+    try {
+      bcb = fetchOfficialBcbRate_();
+    } catch (fetchErr) {
+      const errMsg = fetchErr && fetchErr.message ? fetchErr.message : 'No se pudo consultar el BCB.';
+      if (current.fuente !== 'manual') {
+        setConfigValue('TIPO_CAMBIO_ESTADO', 'pendiente');
+        setConfigValue('TIPO_CAMBIO_ERROR', errMsg);
+      }
+      return {
+        ok: false,
+        error: 'No se pudo obtener la cotización oficial del BCB: ' + errMsg,
+        result: buildExchangeRatePayload_({ estado: current.fuente === 'manual' ? 'manual' : 'pendiente', errorMensaje: errMsg })
+      };
+    }
+
+    // No sobrescribir silenciosamente un ajuste manual salvo solicitud explícita de volver al TC oficial
+    if (current.fuente === 'manual' && !switchToOfficial) {
+      setConfigValue('TIPO_CAMBIO_ULTIMA_CONSULTA', nowTs);
+      return {
+        ok: true,
+        result: buildExchangeRatePayload_({
+          updated: false,
+          manualPreserved: true,
+          bcbPreviewRate: bcb.tasaBobPerUsd,
+          bcbPreviewFecha: bcb.fechaCotizacion
+        })
+      };
+    }
+
+    const rateChanged = Math.abs((current.tasaBobPerUsd || 0) - bcb.tasaBobPerUsd) > 0.00001;
+    const dateChanged = current.fechaCotizacion !== bcb.fechaCotizacion;
+    const modeChanged = current.fuente !== 'bcb';
+
+    if (rateChanged || dateChanged || modeChanged) {
+      setConfigValue('TIPO_CAMBIO', bcb.tasaBobPerUsd);
+      setConfigValue('FECHA_TIPO_CAMBIO', bcb.fechaCotizacion);
+      setConfigValue('TIPO_CAMBIO_MODO', 'bcb');
+      setConfigValue('TIPO_CAMBIO_FUENTE', 'BCB (Oficial)');
+      setConfigValue('TIPO_CAMBIO_FECHA_COTIZACION', bcb.fechaCotizacion);
+      if (bcb.fechaCorte) {
+        setConfigValue('TIPO_CAMBIO_FECHA_CORTE', bcb.fechaCorte);
+      }
+      setConfigValue('NOTA_TIPO_CAMBIO', 'Tipo de Cambio Oficial BCB (vigencia ' + bcb.fechaCotizacion + ')');
+      logAudit_(
+        userSession && userSession.usuarioId ? userSession.usuarioId : 'admin',
+        switchToOfficial ? 'RESTORE_FX_BCB' : 'SYNC_FX_BCB',
+        'Configuracion',
+        'TIPO_CAMBIO',
+        'TC oficial BCB establecido en ' + bcb.tasaBobPerUsd + ' (vigencia ' + bcb.fechaCotizacion + ')'
+      );
+    }
+
+    setConfigValue('TIPO_CAMBIO_ULTIMA_CONSULTA', nowTs);
+    setConfigValue('TIPO_CAMBIO_ULTIMA_CONSULTA_DIA', todayBo);
+    setConfigValue('TIPO_CAMBIO_ESTADO', 'actualizado');
+    setConfigValue('TIPO_CAMBIO_ERROR', '');
+    CacheService.getScriptCache().remove('FX_BCB_ERR_COOLDOWN_' + todayBo);
+
+    return {
+      ok: true,
+      result: buildExchangeRatePayload_({
+        updated: rateChanged || dateChanged || modeChanged,
+        alreadyLatest: !(rateChanged || dateChanged || modeChanged)
+      })
+    };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function handleSaveExchangeRate(cfg, userSession) {
@@ -2789,29 +3201,33 @@ function handleSaveExchangeRate(cfg, userSession) {
   lock.waitLock(10000);
   try {
     const tasaNum = parseFloat(String(cfg.tasaBobPerUsd || cfg.tasa || cfg.tc || '').replace(',', '.'));
-    if (isNaN(tasaNum) || tasaNum <= 0) {
+    if (isNaN(tasaNum) || !isFinite(tasaNum) || tasaNum <= 0) {
       return { ok: false, error: 'El tipo de cambio debe ser un número válido mayor a 0.' };
     }
 
-    const fechaStr = cfg.fecha || cfg.fechaActualizacion || new Date().toISOString().slice(0, 10);
-    const notaStr = cfg.nota || 'Configurado manualmente por el administrador';
+    const todayBo = getBoliviaTodayStr_();
+    const fechaStr = normalizeConfigDateStr_(cfg.fecha || cfg.fechaActualizacion || todayBo) || todayBo;
+    const notaStr = String(cfg.nota || '').trim() || 'Ajuste manual registrado por el administrador';
 
     setConfigValue('TIPO_CAMBIO', tasaNum);
     setConfigValue('FECHA_TIPO_CAMBIO', fechaStr);
     setConfigValue('NOTA_TIPO_CAMBIO', notaStr);
+    setConfigValue('TIPO_CAMBIO_MODO', 'manual');
+    setConfigValue('TIPO_CAMBIO_FUENTE', 'Ajuste manual');
+    setConfigValue('TIPO_CAMBIO_ESTADO', 'manual');
+    setConfigValue('TIPO_CAMBIO_ERROR', '');
 
-    logAudit_(userSession?.usuarioId, 'SET_FX', 'Configuracion', 'TIPO_CAMBIO', 'Tipo de cambio establecido en ' + tasaNum);
+    logAudit_(
+      userSession && userSession.usuarioId ? userSession.usuarioId : 'admin',
+      'SET_FX_MANUAL',
+      'Configuracion',
+      'TIPO_CAMBIO',
+      'Ajuste manual de tipo de cambio establecido en ' + tasaNum + ' (' + notaStr + ')'
+    );
 
     return {
       ok: true,
-      result: {
-        tasaBobPerUsd: tasaNum,
-        tasa: tasaNum,
-        tc: tasaNum,
-        fuente: 'Configuracion',
-        fechaActualizacion: fechaStr,
-        nota: notaStr
-      }
+      result: buildExchangeRatePayload_(null)
     };
   } finally {
     lock.releaseLock();

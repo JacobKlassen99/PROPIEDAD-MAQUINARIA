@@ -20,6 +20,7 @@ export interface Campaign {
 export interface MachineJobType {
   id: string;
   maquinaId: string;
+  tipoMaquina?: string;
   nombre: string;
   icono?: string;
   tarifa: number;
@@ -136,7 +137,7 @@ export interface Income {
 
 export interface ItemConfig {
   id: string;
-  tipo: 'gasto_maquinaria' | 'gasto_propiedad' | 'ingreso_propiedad';
+  tipo: 'gasto_maquinaria' | 'gasto_propiedad' | 'ingreso_propiedad' | 'ingreso_maquinaria';
   modulo?: 'MAQUINARIAS' | 'PROPIEDAD' | 'maquinarias' | 'propiedad';
   clase?: 'GASTO' | 'INGRESO';
   nombre: string;
@@ -186,10 +187,19 @@ export interface ImplementItem {
 }
 
 
+export type ExchangeRateStatus = 'actualizado' | 'pendiente' | 'sin_conexion' | 'manual';
+
 export interface ExchangeRateConfig {
   tasaBobPerUsd: number;
   fuente: 'manual' | 'bcb';
   fechaActualizacion: string;
+  fechaCotizacion?: string;
+  fechaCorte?: string;
+  ultimaConsulta?: string;
+  ultimaConsultaDia?: string;
+  estado?: ExchangeRateStatus;
+  fuenteDetalle?: string;
+  errorMensaje?: string;
   nota?: string;
 }
 
@@ -198,6 +208,109 @@ export interface BackendHealthResponse {
   service?: string;
   version?: string;
   timestamp?: string;
+}
+
+export type CobroEstado = 'PENDIENTE' | 'PARCIAL' | 'PAGADO';
+
+export interface CobroPago {
+  id: string;
+  trabajoId: string;
+  fecha: string;
+  importe: number;
+  moneda?: Currency;
+  importeOriginal?: number;
+  monedaCobro?: Currency;
+  tc?: number;
+  importeUsd?: number;
+  observacion?: string;
+  creadoPor?: string;
+  creadoEn?: string;
+}
+
+export interface CobroCuenta {
+  id?: string;
+  trabajoId: string;
+  fecha: string;
+  campanaId?: string;
+  campanaNombre?: string;
+  cliente: string;
+  maquinariaId?: string;
+  maquinariaNombre?: string;
+  implementoId?: string;
+  trabajoNombre?: string;
+  cantidad?: number;
+  unidad?: string;
+  tarifa?: number;
+  precioUnitario?: number;
+  importe: number;
+  moneda: Currency;
+  tipoCambio?: number;
+  importeOriginalServicio?: number;
+  monedaOriginalServicio?: Currency;
+  tcServicio?: number;
+  cobrado: number;
+  saldo: number;
+  estado: CobroEstado;
+  observacion?: string;
+  pagos: CobroPago[];
+}
+
+export interface HarvestPriceAssignment {
+  id: string;
+  cosechaId: string;
+  fecha: string;
+  campanaId?: string;
+  toneladas: number;
+  precioUsdTon: number;
+  tc: number;
+  totalUsd?: number;
+  totalBob?: number;
+  movimientoId?: string;
+  observacion?: string;
+  creadoEn?: string;
+}
+
+export interface HarvestRecord {
+  id: string;
+  fecha: string;
+  campanaId: string;
+  campanaNombre?: string;
+  loteId: string;
+  loteNombre?: string;
+  producto: string;
+  toneladas: number;
+  asignadas: number;
+  pendiente: number;
+  estado?: string;
+  observacion?: string;
+  asignaciones: HarvestPriceAssignment[];
+  creadoEn?: string;
+}
+
+export interface ExpenseAllocationLot {
+  loteId: string;
+  loteNombre?: string;
+  hectareas: number;
+  porcentaje?: number;
+  importe?: number;
+  movimientoId?: string;
+}
+
+export interface ExpenseAllocationGroup {
+  id: string;
+  grupoId: string;
+  fecha: string;
+  campanaId: string;
+  campanaNombre?: string;
+  descripcion: string;
+  itemId?: string;
+  importe: number;
+  moneda: Currency;
+  tc: number;
+  hectareasTotales?: number;
+  observacion?: string;
+  lotes: ExpenseAllocationLot[];
+  creadoEn?: string;
 }
 
 export type MainView = 'inicio' | 'maquinarias' | 'propiedad' | 'administracion';

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   Tractor,
   CirclePlus,
@@ -25,6 +25,14 @@ import {
   Filter,
   Edit3,
   Wrench,
+  History,
+  BarChart3,
+  Wallet,
+  Info,
+  Save,
+  Lock,
+  RefreshCw,
+  Coins,
 } from 'lucide-react';
 import {
   Campaign,
@@ -36,6 +44,8 @@ import {
   Currency,
   ExchangeRateConfig,
   ItemConfig,
+  Asset,
+  CobroCuenta,
 } from '../types';
 import {
   createMachineryJob,
@@ -45,9 +55,19 @@ import {
   updateExpense,
   deleteExpense,
   formatDateDDMMAAAA,
+  hasAdminAuthorization,
   isTechnicalId,
-  NEW_HOLLAND_DEFAULT_JOBS,
+  isVirtualMachineOnlyImplement,
+  parseDecimalNumber,
+  getCobros,
+  getCobroEstado,
+  registrarCobro,
 } from '../services/backend';
+import {
+  convertHistoricalAmount,
+  formatCurrencyAmount,
+  matchesCampaignRecord,
+} from '../services/financialSummary';
 import { VisualIcon } from '../components/VisualIcon';
 import {
   VisualMachinePicker,
@@ -55,8 +75,33 @@ import {
   VisualExpenseItemPicker,
   VisualLotPicker,
 } from '../components/VisualEntityPicker';
+import {
+  AppSelect,
+  CurrencySelect,
+  FORM_INPUT_CLASS,
+  FORM_LABEL_CLASS,
+  FORM_TEXTAREA_CLASS,
+} from '../components/AppSelect';
+import { ReportsView } from './ReportsView';
+import {
+  CompactList,
+  CompactListRow,
+  CompactFilter,
+  ListToolbar,
+} from '../components/CompactListUI';
+import {
+  cacheKeys,
+  getQuerySnapshot,
+  invalidateQueries,
+  patchQueriesByPrefix,
+  revalidateQuery,
+  setQueryData,
+} from '../services/dataCache';
+import { usePersistedMemoryState, useSwrQuery } from '../hooks/useSwrQuery';
+import type { RefreshScope } from '../App';
 
 interface Props {
+  campaigns?: Campaign[];
   activeCampaign: Campaign | null;
   machines: Machine[];
   machineJobTypes?: MachineJobType[];
@@ -64,19 +109,26 @@ interface Props {
   jobs: MachineryJob[];
   expenses: Expense[];
   itemsConfig: ItemConfig[];
+  assets?: Asset[];
   currency: Currency;
   exchangeRate: ExchangeRateConfig;
-  onRefreshData: () => void;
+  isAdmin?: boolean;
+  isSyncingGlobal?: boolean;
+  hasLoadedGlobal?: boolean;
+  onRefreshData: (scope?: RefreshScope) => void;
 }
 
 type MachineryScreen =
   | 'main'
+  | 'servicio'
   | 'ingreso_opciones'
   | 'servicio_otros'
   | 'trabajo_propiedad'
   | 'gasto'
   | 'historial'
-  | 'resumen';
+  | 'resumen'
+  | 'resultados'
+  | 'por_cobrar';
 
 const toYYYYMMDD = (dStr: string | undefined): string => {
   if (!dStr) return new Date().toISOString().slice(0, 10);
@@ -96,6 +148,7 @@ const toYYYYMMDD = (dStr: string | undefined): string => {
 };
 
 export const MachineryView: React.FC<Props> = ({
+  campaigns = [],
   activeCampaign,
   machines,
   machineJobTypes = [],
@@ -103,24 +156,259 @@ export const MachineryView: React.FC<Props> = ({
   jobs,
   expenses,
   itemsConfig = [],
+  assets = [],
   currency,
   exchangeRate,
+  isAdmin,
   onRefreshData,
 }) => {
+  const effectiveIsAdmin = isAdmin ?? hasAdminAuthorization();
   const [currentScreen, setCurrentScreen] = useState<MachineryScreen>('main');
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // Search & type filter for Movimientos (Ingresos y Gastos)
-  const [searchTerm, setSearchTerm] = useState('');
-  const [historialFilter, setHistorialFilter] = useState<'todos' | 'ingresos' | 'gastos'>('todos');
-  const [serviciosSubFilter, setServiciosSubFilter] = useState<'todos' | 'terceros' | 'propiedad'>('todos');
+  // Exclude inactive machines from new service creation while preserving historical records
+  const activeMachines = useMemo(
+    () => machines.filter((m) => m.estado !== 'inactivo' && m.activo !== false),
+    [machines]
+  );
+
+  // Search & type filter for Movimientos (persisted in memory across navigation)
+  const [searchTerm, setSearchTerm] = usePersistedMemoryState<string>('machinery.historial.search', '');
+  const [historialFilter, setHistorialFilter] = usePersistedMemoryState<'todos' | 'ingresos' | 'gastos'>('machinery.historial.filter', 'todos');
+  const [serviciosSubFilter, setServiciosSubFilter] = usePersistedMemoryState<'todos' | 'terceros' | 'propiedad'>('machinery.historial.serviciosSub', 'todos');
   const [expandedMovementId, setExpandedMovementId] = useState<string | null>(null);
   const [expenseToDelete, setExpenseToDelete] = useState<Expense | null>(null);
   const [deletingExpense, setDeletingExpense] = useState(false);
 
-  // Form State for Machinery Job
+  // State for Por cobrar (shared SWR memory cache: cobros.list, cobros.estado, cobros.registrar)
+  const [porCobrarSearch, setPorCobrarSearch] = usePersistedMemoryState<string>('machinery.porCobrar.search', '');
+  const [porCobrarCampaignId, setPorCobrarCampaignId] = usePersistedMemoryState<string>('machinery.porCobrar.campaignId', 'all');
+  const [porCobrarEstadoFilter, setPorCobrarEstadoFilter] = usePersistedMemoryState<'pendientes' | 'todos' | 'PAGADO'>('machinery.porCobrar.estado', 'pendientes');
+  const [expandedPorCobrarId, setExpandedPorCobrarId] = useState<string | null>(null);
+  const [loadingCobroEstadoId, setLoadingCobroEstadoId] = useState<string | null>(null);
+  const [cobroEstadoErrors, setCobroEstadoErrors] = useState<Record<string, string>>({});
+
+  // Modal state for registering partial/full payment via cobros.registrar (USD or BOB with editable TC)
+  const [cobroModalCuenta, setCobroModalCuenta] = useState<CobroCuenta | null>(null);
+  const [cobroFecha, setCobroFecha] = useState(new Date().toISOString().slice(0, 10));
+  const [cobroMoneda, setCobroMoneda] = useState<Currency>('USD');
+  const [cobroImporte, setCobroImporte] = useState('');
+  const [cobroTc, setCobroTc] = useState(
+    exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0 ? String(exchangeRate.tasaBobPerUsd) : ''
+  );
+  const [cobroObs, setCobroObs] = useState('');
+  const [savingCobro, setSavingCobro] = useState(false);
+  const [cobroModalError, setCobroModalError] = useState<string | null>(null);
+
+  // Shared SWR query for global pending cobros badge (shares exact key with default Por cobrar view!)
+  const pendingCobrosKey = cacheKeys.cobrosList(undefined, true);
+  const pendingCobrosQuery = useSwrQuery<CobroCuenta[]>(
+    pendingCobrosKey,
+    () => getCobros({ soloPendientes: true }, false),
+    { enabled: true, minIntervalMs: 3000 }
+  );
+
+  // Shared SWR query for active Por cobrar filter combination
+  const activeCobrosTargetCamp = porCobrarCampaignId === 'all' ? undefined : porCobrarCampaignId;
+  const activeCobrosSoloPend = porCobrarEstadoFilter === 'pendientes';
+  const activeCobrosKey = cacheKeys.cobrosList(activeCobrosTargetCamp, activeCobrosSoloPend);
+
+  const activeCobrosQuery = useSwrQuery<CobroCuenta[]>(
+    activeCobrosKey,
+    () =>
+      getCobros(
+        {
+          ...(activeCobrosTargetCamp ? { campanaId: activeCobrosTargetCamp } : {}),
+          soloPendientes: activeCobrosSoloPend,
+        },
+        false
+      ),
+    { enabled: currentScreen === 'por_cobrar', minIntervalMs: 2500 }
+  );
+
+  const cobros = activeCobrosQuery.data ?? [];
+  const cobrosHasLoaded = activeCobrosQuery.hasLoaded;
+  const cobrosLoading = activeCobrosQuery.isFetching;
+  const cobrosInitialLoading = activeCobrosQuery.isInitialLoading;
+  const cobrosRevalidating = activeCobrosQuery.isRevalidating;
+  const cobrosError = activeCobrosQuery.error;
+
+  const pendingCobrosCount = useMemo(() => {
+    if (!pendingCobrosQuery.hasLoaded) return null;
+    return (pendingCobrosQuery.data || []).filter((c) => c.estado !== 'PAGADO' && c.saldo > 0.005).length;
+  }, [pendingCobrosQuery.hasLoaded, pendingCobrosQuery.data]);
+
+  const loadCobros = useCallback(async () => {
+    await activeCobrosQuery.refresh();
+    if (activeCobrosKey !== pendingCobrosKey) {
+      pendingCobrosQuery.refresh().catch(() => {});
+    }
+  }, [activeCobrosQuery, pendingCobrosQuery, activeCobrosKey, pendingCobrosKey]);
+
+  const mergeDetailedCuenta = useCallback((item: CobroCuenta, detailed: CobroCuenta): CobroCuenta => ({
+    ...item,
+    ...detailed,
+    cliente:
+      detailed.cliente && detailed.cliente !== 'Cliente externo'
+        ? detailed.cliente
+        : item.cliente,
+    fecha: detailed.fecha || item.fecha,
+    campanaId: detailed.campanaId || item.campanaId,
+    campanaNombre: detailed.campanaNombre || item.campanaNombre,
+    maquinariaId: detailed.maquinariaId || item.maquinariaId,
+    maquinariaNombre: detailed.maquinariaNombre || item.maquinariaNombre,
+    trabajoNombre: detailed.trabajoNombre || item.trabajoNombre,
+  }), []);
+
+  const patchCuentaAcrossCaches = useCallback(
+    (trabajoId: string, updated: CobroCuenta) => {
+      const estadoKey = cacheKeys.cobroEstado(trabajoId);
+      setQueryData<CobroCuenta>(estadoKey, (prev) =>
+        prev ? mergeDetailedCuenta(prev, updated) : updated
+      );
+      patchQueriesByPrefix<CobroCuenta[]>('cobros.list:', (list) =>
+        list.map((item) =>
+          String(item.trabajoId) === String(trabajoId) ? mergeDetailedCuenta(item, updated) : item
+        )
+      );
+    },
+    [mergeDetailedCuenta]
+  );
+
+  const handleToggleCobroRow = async (cuenta: CobroCuenta) => {
+    const key = cuenta.trabajoId || cuenta.id || '';
+    if (!key) return;
+    if (expandedPorCobrarId === key) {
+      setExpandedPorCobrarId(null);
+      return;
+    }
+    setExpandedPorCobrarId(key);
+    setCobroEstadoErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+
+    const estadoKey = cacheKeys.cobroEstado(cuenta.trabajoId);
+    const cachedDetail = getQuerySnapshot<CobroCuenta>(estadoKey);
+    if (cachedDetail.hasLoaded && cachedDetail.data) {
+      // Immediately ensure row displays cached payments without waiting for network
+      patchCuentaAcrossCaches(cuenta.trabajoId, cachedDetail.data);
+    }
+
+    setLoadingCobroEstadoId(key);
+    try {
+      const detailed = await revalidateQuery<CobroCuenta>(
+        estadoKey,
+        () => getCobroEstado(cuenta.trabajoId, false),
+        { minIntervalMs: 3000 }
+      );
+      patchCuentaAcrossCaches(cuenta.trabajoId, detailed);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'No se pudo consultar el detalle de pagos (cobros.estado).';
+      setCobroEstadoErrors((prev) => ({ ...prev, [key]: msg }));
+    } finally {
+      setLoadingCobroEstadoId((curr) => (curr === key ? null : curr));
+    }
+  };
+
+  const handleOpenCobroModal = (cuenta: CobroCuenta) => {
+    setCobroModalCuenta(cuenta);
+    setCobroFecha(new Date().toISOString().slice(0, 10));
+    setCobroMoneda('USD');
+    const defaultTc =
+      exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
+        ? String(exchangeRate.tasaBobPerUsd)
+        : '';
+    setCobroTc(defaultTc);
+    setCobroImporte(cuenta.saldo > 0 ? String(Number(cuenta.saldo.toFixed(2))) : '');
+    setCobroObs('');
+    setCobroModalError(null);
+  };
+
+  const handleSubmitCobro = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!cobroModalCuenta || savingCobro) return;
+    setCobroModalError(null);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+
+    const importeOriginalNum = parseDecimalNumber(cobroImporte);
+    const tcNum = parseDecimalNumber(cobroTc);
+    if (importeOriginalNum <= 0) {
+      setCobroModalError('Ingresa un importe válido mayor a 0.');
+      return;
+    }
+    if (tcNum <= 0) {
+      setCobroModalError('Ingresa un tipo de cambio válido mayor a 0.');
+      return;
+    }
+
+    const importeUsdCalc =
+      cobroMoneda === 'BOB'
+        ? Number((importeOriginalNum / tcNum).toFixed(2))
+        : Number(importeOriginalNum.toFixed(2));
+
+    if (importeUsdCalc <= 0) {
+      setCobroModalError('El equivalente en USD del cobro debe ser mayor a 0.');
+      return;
+    }
+    if (importeUsdCalc > cobroModalCuenta.saldo + 0.005) {
+      const maxEnMoneda =
+        cobroMoneda === 'BOB'
+          ? `Bs ${Number((cobroModalCuenta.saldo * tcNum).toFixed(2)).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (USD ${cobroModalCuenta.saldo.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`
+          : `USD ${cobroModalCuenta.saldo.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      setCobroModalError(`El importe ingresado supera el saldo pendiente (${maxEnMoneda}).`);
+      return;
+    }
+    if (!cobroFecha) {
+      setCobroModalError('Selecciona la fecha del cobro.');
+      return;
+    }
+
+    setSavingCobro(true);
+    try {
+      const res = await registrarCobro({
+        trabajoId: cobroModalCuenta.trabajoId,
+        importeOriginal: importeOriginalNum,
+        monedaCobro: cobroMoneda,
+        tc: tcNum,
+        fecha: cobroFecha,
+        observacion: cobroObs.trim(),
+      });
+
+      const updatedCuenta = res.cuenta;
+      if (updatedCuenta) {
+        patchCuentaAcrossCaches(cobroModalCuenta.trabajoId, updatedCuenta);
+      }
+
+      setCobroModalCuenta(null);
+      setCobroObs('');
+      setCobroImporte('');
+      const pagoLabel =
+        cobroMoneda === 'BOB'
+          ? `Bs ${importeOriginalNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (USD ${importeUsdCalc.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · TC ${tcNum})`
+          : `USD ${importeOriginalNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      const saldoText = updatedCuenta
+        ? ` Saldo restante: USD ${updatedCuenta.saldo.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${updatedCuenta.estado}).`
+        : '';
+      setSuccessMsg(`Cobro registrado: ${pagoLabel}.${saldoText}`);
+
+      // Selective invalidation & background refresh of cobros (no duplicate income created)
+      invalidateQueries(['cobros.']);
+      await loadCobros();
+    } catch (err: unknown) {
+      setCobroModalError(err instanceof Error ? err.message : 'Error al registrar el cobro en el backend.');
+    } finally {
+      setSavingCobro(false);
+    }
+  };
+
+  // Form State for Machinery Job (Unified Registrar servicio)
+  const [serviceDestino, setServiceDestino] = useState<'propiedad' | 'tercero'>('propiedad');
   const [selectedMachineId, setSelectedMachineId] = useState('');
   const [selectedJobTypeId, setSelectedJobTypeId] = useState<string>('');
   const [selectedJobNombre, setSelectedJobNombre] = useState<string>('');
@@ -130,24 +418,83 @@ export const MachineryView: React.FC<Props> = ({
   const [fecha, setFecha] = useState(new Date().toISOString().slice(0, 10));
   const [tarifa, setTarifa] = useState<number | ''>('');
   const [unidad, setUnidad] = useState<'hora' | 'hectarea'>('hora');
-  const [jobMoneda, setJobMoneda] = useState<Currency>('BOB');
+  const [jobMoneda, setJobMoneda] = useState<Currency>('USD');
+  const [jobTc, setJobTc] = useState(
+    exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0 ? String(exchangeRate.tasaBobPerUsd) : ''
+  );
   const [observacion, setObservacion] = useState('');
 
-  // Accordion state for machines in resumen
+  // Accordion & filter state for Mis máquinas (persisted in memory across navigation)
   const [expandedMachineId, setExpandedMachineId] = useState<string | null>(null);
+  const [expandedImplementId, setExpandedImplementId] = useState<string | null>(null);
+  const [machinesGroupOpen, setMachinesGroupOpen] = useState(true);
+  const [implementsGroupOpen, setImplementsGroupOpen] = useState(false);
+  const [machinesSearch, setMachinesSearch] = usePersistedMemoryState<string>('machinery.machines.search', '');
+  const [machinesStatusFilter, setMachinesStatusFilter] = usePersistedMemoryState<'activos' | 'desactivados' | 'todos'>('machinery.machines.status', 'activos');
 
-  // Form State for Machinery Expense
+  // Form State for Machinery Expense (sin valores preseleccionados de catálogo)
   const [expMachineId, setExpMachineId] = useState('');
-  const [expItemGasto, setExpItemGasto] = useState('Combustible');
+  const [expItemGasto, setExpItemGasto] = useState('');
   const [expCantidad, setExpCantidad] = useState<number | ''>(1);
-  const [expUnidad, setExpUnidad] = useState('litros');
+  const [expUnidad, setExpUnidad] = useState('');
   const [expPrecio, setExpPrecio] = useState<number | ''>('');
   const [expFecha, setExpFecha] = useState(new Date().toISOString().slice(0, 10));
   const [expMoneda, setExpMoneda] = useState<Currency>('BOB');
+  const [expTc, setExpTc] = useState(
+    exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0 ? String(exchangeRate.tasaBobPerUsd) : ''
+  );
   const [expObservacion, setExpObservacion] = useState('');
+
+  // Preload configured exchange rate into operation forms when available (never overwrites user edits)
+  useEffect(() => {
+    if (exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0) {
+      const rateStr = String(exchangeRate.tasaBobPerUsd);
+      setJobTc((prev) => (prev ? prev : rateStr));
+      setExpTc((prev) => (prev ? prev : rateStr));
+      setCobroTc((prev) => (prev ? prev : rateStr));
+    }
+  }, [exchangeRate?.tasaBobPerUsd]);
+
+  const resetNewServiceForm = () => {
+    setSelectedMachineId('');
+    setSelectedJobTypeId('');
+    setSelectedJobNombre('');
+    setSelectedLotId('');
+    setCliente('');
+    setCantidad('');
+    setTarifa('');
+    setUnidad('hora');
+    setJobMoneda('USD');
+    setFecha(new Date().toISOString().slice(0, 10));
+    setJobTc(
+      exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
+        ? String(exchangeRate.tasaBobPerUsd)
+        : ''
+    );
+    setObservacion('');
+    setErrorMsg(null);
+  };
+
+  const resetNewExpenseForm = () => {
+    setExpMachineId('');
+    setExpItemGasto('');
+    setExpCantidad(1);
+    setExpUnidad('');
+    setExpPrecio('');
+    setExpFecha(new Date().toISOString().slice(0, 10));
+    setExpMoneda('BOB');
+    setExpTc(
+      exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
+        ? String(exchangeRate.tasaBobPerUsd)
+        : ''
+    );
+    setExpObservacion('');
+    setErrorMsg(null);
+  };
 
   // Editing Job State (iOS Modal)
   const [editingJob, setEditingJob] = useState<MachineryJob | null>(null);
+  const [editCampanaId, setEditCampanaId] = useState('');
   const [editFecha, setEditFecha] = useState('');
   const [editMachineId, setEditMachineId] = useState('');
   const [editJobTypeId, setEditJobTypeId] = useState<string>('');
@@ -159,7 +506,11 @@ export const MachineryView: React.FC<Props> = ({
   const [editUnidad, setEditUnidad] = useState<'hora' | 'hectarea'>('hora');
   const [editTarifa, setEditTarifa] = useState<number | ''>('');
   const [editMoneda, setEditMoneda] = useState<Currency>('BOB');
+  const [editTc, setEditTc] = useState('');
   const [editObservacion, setEditObservacion] = useState('');
+  const [editJobError, setEditJobError] = useState<string | null>(null);
+  const [editJobCobroCuenta, setEditJobCobroCuenta] = useState<CobroCuenta | null>(null);
+  const [loadingEditJobCobro, setLoadingEditJobCobro] = useState(false);
 
   // Deleting Job State (iOS Confirmation Modal)
   const [jobToDelete, setJobToDelete] = useState<MachineryJob | null>(null);
@@ -174,30 +525,91 @@ export const MachineryView: React.FC<Props> = ({
   const [editExpUnidad, setEditExpUnidad] = useState('');
   const [editExpPrecio, setEditExpPrecio] = useState<number | ''>('');
   const [editExpMoneda, setEditExpMoneda] = useState<Currency>('BOB');
+  const [editExpTc, setEditExpTc] = useState('');
   const [editExpObservacion, setEditExpObservacion] = useState('');
+  const [editExpError, setEditExpError] = useState<string | null>(null);
 
-  const getAvailableJobsForMachine = (mId: string): MachineJobType[] => {
+
+
+  const getMachineTypeLabel = (m: Machine | undefined): string => {
+    const raw = (m?.tipo || '').trim();
+    return raw || 'Tractor';
+  };
+
+  const getImplementCompatibleType = (jt: MachineJobType): string => {
+    const linked = machines.find((m) => String(m.id) === String(jt.maquinaId));
+    return getMachineTypeLabel(linked);
+  };
+
+  const findMachineAssetValue = (m: Machine): { valor: number; moneda: Currency } | null => {
+    const matched = (assets || []).find(
+      (a) =>
+        a.activo !== false &&
+        a.tipo === 'MAQUINARIA' &&
+        (a.referenciaId === m.id ||
+          a.nombre.trim().toLowerCase() === m.nombre.trim().toLowerCase())
+    );
+    if (matched && Number(matched.valorInicial) > 0) {
+      return { valor: Number(matched.valorInicial), moneda: (matched.moneda as Currency) || 'USD' };
+    }
+    if (m.valorPatrimonial && Number(m.valorPatrimonial) > 0) {
+      return { valor: Number(m.valorPatrimonial), moneda: (m.moneda as Currency) || 'USD' };
+    }
+    return null;
+  };
+
+  const findImplementAssetValue = (jt: MachineJobType): { valor: number; moneda: Currency } | null => {
+    const matched = (assets || []).find(
+      (a) =>
+        a.activo !== false &&
+        a.tipo === 'IMPLEMENTO' &&
+        (a.referenciaId === jt.id ||
+          a.nombre.trim().toLowerCase() === jt.nombre.trim().toLowerCase())
+    );
+    if (matched && Number(matched.valorInicial) > 0) {
+      return { valor: Number(matched.valorInicial), moneda: (matched.moneda as Currency) || 'USD' };
+    }
+    return null;
+  };
+
+  // Returns active agricultural implements compatible with the selected machine's TYPE (tipo)
+  const getCompatibleImplementsForMachine = (mId: string): MachineJobType[] => {
     if (!mId) return [];
     const m = machines.find((item) => item.id === mId);
-    let list = (machineJobTypes || []).filter((j) => String(j.maquinaId) === String(mId) && j.activo !== false);
-    if (list.length === 0 && m?.trabajos && m.trabajos.length > 0) {
-      list = m.trabajos.filter((j) => j.activo !== false);
+    const targetType = (m?.tipo || '').trim().toLowerCase();
+    const sameTypeMachineIds = new Set(
+      machines
+        .filter((x) => {
+          if (String(x.id) === String(mId)) return true;
+          if (!targetType) return false;
+          return (x.tipo || '').trim().toLowerCase() === targetType;
+        })
+        .map((x) => String(x.id))
+    );
+
+    let candidates = (machineJobTypes || []).filter(
+      (j) =>
+        j.activo !== false &&
+        !isVirtualMachineOnlyImplement(j.nombre) &&
+        sameTypeMachineIds.has(String(j.maquinaId))
+    );
+
+    if (candidates.length === 0 && m?.trabajos && m.trabajos.length > 0) {
+      candidates = m.trabajos.filter(
+        (j) => j.activo !== false && !isVirtualMachineOnlyImplement(j.nombre)
+      );
     }
-    if (
-      list.length === 0 &&
-      m &&
-      (m.nombre.toLowerCase().includes('new holland') ||
-        m.nombre.toLowerCase().includes('ts115') ||
-        m.nombre.toLowerCase().includes('ts 115'))
-    ) {
-      list = NEW_HOLLAND_DEFAULT_JOBS.map((j, idx) => ({
-        ...j,
-        id: `nh_default_${idx + 1}`,
-        maquinaId: m.id,
-        activo: true,
-      }));
+
+    // Deduplicate by normalized implement name, preferring direct machine match
+    const byName = new Map<string, MachineJobType>();
+    for (const item of candidates) {
+      const key = item.nombre.trim().toLowerCase();
+      const existing = byName.get(key);
+      if (!existing || String(item.maquinaId) === String(mId)) {
+        byName.set(key, item);
+      }
     }
-    return list;
+    return Array.from(byName.values());
   };
 
   const formatMoney = (val: number | undefined | null, origMoneda: Currency = 'BOB') => {
@@ -215,53 +627,36 @@ export const MachineryView: React.FC<Props> = ({
     })}`;
   };
 
-  const getMachineSubtitle = (m: Machine) => {
-    if (m.identificacion && !isTechnicalId(m.identificacion) && m.identificacion !== m.id && m.identificacion !== m.nombre) {
-      return `${m.identificacion} • ${m.tipo || 'Equipo'}`;
-    }
-    return m.tipo || 'Equipo';
+  const applyMachineBaseTariff = (m: Machine | undefined) => {
+    if (!m) return;
+    setTarifa(m.tarifa || 0);
+    setUnidad(m.unidad === 'ha' || m.unidad === 'hectarea' ? 'hectarea' : 'hora');
+    setJobMoneda((m.moneda as Currency) || 'USD');
   };
 
-  const getMachineOptionLabel = (m: Machine, includeRate = false) => {
-    const alias = (!isTechnicalId(m.identificacion) && m.identificacion !== m.id && m.identificacion !== m.nombre)
-      ? ` (${m.identificacion})`
-      : (m.tipo ? ` (${m.tipo})` : '');
-    const rateStr = includeRate ? ` — ${m.moneda === 'USD' ? 'USD' : 'Bs'} ${m.tarifa}/${m.unidad}` : '';
-    return `${m.nombre}${alias}${rateStr}`;
-  };
-
+  // Tariff rule: selecting a machine without implement applies ONLY the machine's own tariff
   const handleMachineChange = (mId: string) => {
     setSelectedMachineId(mId);
-    const availableJobs = getAvailableJobsForMachine(mId);
-    if (availableJobs.length > 0) {
-      const firstJob = availableJobs[0];
-      setSelectedJobTypeId(firstJob.id);
-      setSelectedJobNombre(firstJob.nombre);
-      setTarifa(firstJob.tarifa);
-      setUnidad(firstJob.unidad === 'ha' || firstJob.unidad === 'hectarea' ? 'hectarea' : 'hora');
-      setJobMoneda(firstJob.moneda);
-    } else {
-      setSelectedJobTypeId('');
-      setSelectedJobNombre('');
-      const m = machines.find((item) => item.id === mId);
-      if (m) {
-        setTarifa(m.tarifa || 0);
-        setUnidad((m.unidad === 'ha' || m.unidad === 'hectarea') ? 'hectarea' : 'hora');
-        setJobMoneda(m.moneda || 'BOB');
-      }
-    }
+    setSelectedJobTypeId('');
+    setSelectedJobNombre('');
+    const m = machines.find((item) => item.id === mId);
+    applyMachineBaseTariff(m);
   };
 
-  const handleJobTypeChange = (jobId: string) => {
-    setSelectedJobTypeId(jobId);
-    const availableJobs = getAvailableJobsForMachine(selectedMachineId);
-    const jobDef = availableJobs.find((j) => j.id === jobId);
-    if (jobDef) {
-      setSelectedJobNombre(jobDef.nombre);
-      setTarifa(jobDef.tarifa);
-      setUnidad(jobDef.unidad === 'ha' || jobDef.unidad === 'hectarea' ? 'hectarea' : 'hora');
-      setJobMoneda(jobDef.moneda);
+  // Tariff rule: selecting an implement applies ONLY the implement's tariff; clearing reverts to machine tariff
+  const handleImplementSelect = (jobDef: MachineJobType | null) => {
+    if (!jobDef) {
+      setSelectedJobTypeId('');
+      setSelectedJobNombre('');
+      const m = machines.find((item) => item.id === selectedMachineId);
+      applyMachineBaseTariff(m);
+      return;
     }
+    setSelectedJobTypeId(jobDef.id);
+    setSelectedJobNombre(jobDef.nombre);
+    setTarifa(jobDef.tarifa);
+    setUnidad(jobDef.unidad === 'ha' || jobDef.unidad === 'hectarea' ? 'hectarea' : 'hora');
+    setJobMoneda((jobDef.moneda as Currency) || 'USD');
   };
 
   const calculatedTotal =
@@ -297,6 +692,12 @@ export const MachineryView: React.FC<Props> = ({
       return;
     }
 
+    const tcNum = parseDecimalNumber(jobTc);
+    if (tcNum <= 0) {
+      setErrorMsg('Ingresa un tipo de cambio válido mayor a 0.');
+      return;
+    }
+
     const machineObj = machines.find((m) => m.id === selectedMachineId);
     const lotObj = lots.find((l) => l.id === selectedLotId);
 
@@ -318,7 +719,7 @@ export const MachineryView: React.FC<Props> = ({
         unidad,
         tarifa: Number(tarifa) || 0,
         moneda: jobMoneda,
-        tipoCambio: exchangeRate.tasaBobPerUsd,
+        tipoCambio: tcNum,
         total: calculatedTotal,
         observacion: observacion.trim(),
       });
@@ -329,11 +730,25 @@ export const MachineryView: React.FC<Props> = ({
           : 'Trabajo en propiedad guardado (+ Ingreso Maquinarias y − Gasto en Lote).'
       );
 
+      setSelectedMachineId('');
+      setSelectedJobTypeId('');
+      setSelectedJobNombre('');
+      setSelectedLotId('');
       setCantidad('');
+      setTarifa('');
       setCliente('');
       setObservacion('');
+      setJobTc(
+        exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
+          ? String(exchangeRate.tasaBobPerUsd)
+          : ''
+      );
       setCurrentScreen('main');
-      onRefreshData();
+      onRefreshData('jobs');
+      if (tipoTrabajo === 'tercero') {
+        invalidateQueries(['cobros.']);
+        pendingCobrosQuery.refresh().catch(() => {});
+      }
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Error al guardar el trabajo');
     } finally {
@@ -351,8 +766,19 @@ export const MachineryView: React.FC<Props> = ({
       return;
     }
 
+    if (!expItemGasto.trim()) {
+      setErrorMsg('Por favor selecciona un concepto de gasto.');
+      return;
+    }
+
     if (!expPrecio || expPrecio <= 0) {
       setErrorMsg('Ingresa un precio unitario válido.');
+      return;
+    }
+
+    const tcNum = parseDecimalNumber(expTc);
+    if (tcNum <= 0) {
+      setErrorMsg('Ingresa un tipo de cambio válido mayor a 0.');
       return;
     }
 
@@ -371,16 +797,25 @@ export const MachineryView: React.FC<Props> = ({
         unidad: expUnidad,
         precio: Number(expPrecio),
         moneda: expMoneda,
-        tipoCambio: exchangeRate.tasaBobPerUsd,
+        tipoCambio: tcNum,
         total: expCalculatedTotal,
         observacion: expObservacion.trim(),
       });
 
       setSuccessMsg('Gasto de maquinaria registrado exitosamente.');
+      setExpMachineId('');
+      setExpItemGasto('');
+      setExpCantidad(1);
+      setExpUnidad('');
       setExpPrecio('');
       setExpObservacion('');
+      setExpTc(
+        exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
+          ? String(exchangeRate.tasaBobPerUsd)
+          : ''
+      );
       setCurrentScreen('main');
-      onRefreshData();
+      onRefreshData('movements');
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Error al registrar el gasto');
     } finally {
@@ -388,21 +823,31 @@ export const MachineryView: React.FC<Props> = ({
     }
   };
 
-  const handleOpenEditJob = (j: MachineryJob) => {
+  const handleOpenEditJob = (j: MachineryJob, preloadedCuenta?: CobroCuenta | null) => {
+    if (!effectiveIsAdmin) {
+      setErrorMsg('Solo el Administrador puede editar servicios guardados.');
+      return;
+    }
     setEditingJob(j);
+    setEditJobError(null);
+    setEditCampanaId(j.campanaId || activeCampaign?.id || '');
     setEditFecha(toYYYYMMDD(j.fecha));
 
     const mId = j.maquinariaId || (j as any).maquinaId || (j as any).id_maquina || '';
     setEditMachineId(mId);
 
     const jobName = j.trabajoNombre || (j as any).trabajo || (j as any).labor || '';
-    setEditJobNombre(jobName);
+    const cleanedJobName = isVirtualMachineOnlyImplement(jobName) ? '' : jobName;
+    setEditJobNombre(cleanedJobName);
 
-    const availableJobs = getAvailableJobsForMachine(mId);
+    const availableJobs = getCompatibleImplementsForMachine(mId);
     let matchedTypeId = j.trabajoTipoId || '';
-    if (!matchedTypeId && jobName) {
+    if (matchedTypeId && !availableJobs.some((x) => x.id === matchedTypeId)) {
+      matchedTypeId = '';
+    }
+    if (!matchedTypeId && cleanedJobName) {
       const match = availableJobs.find(
-        (x) => x.nombre.toLowerCase().trim() === jobName.toLowerCase().trim()
+        (x) => x.nombre.toLowerCase().trim() === cleanedJobName.toLowerCase().trim()
       );
       if (match) matchedTypeId = match.id;
     }
@@ -422,26 +867,111 @@ export const MachineryView: React.FC<Props> = ({
     const tarifaVal = typeof j.tarifa === 'number' ? j.tarifa : parseFloat(String(j.tarifa || 0));
     setEditTarifa(isNaN(tarifaVal) ? '' : tarifaVal);
 
-    setEditMoneda((j.moneda as Currency) || 'BOB');
+    setEditMoneda((j.moneda as Currency) || 'USD');
+    const histTc =
+      (j.tipoCambio && j.tipoCambio > 0 ? j.tipoCambio : 0) ||
+      (j.tc && j.tc > 0 ? j.tc : 0) ||
+      (preloadedCuenta?.tcServicio && preloadedCuenta.tcServicio > 0 ? preloadedCuenta.tcServicio : 0) ||
+      (exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0 ? exchangeRate.tasaBobPerUsd : 0);
+    setEditTc(histTc > 0 ? String(histTc) : '');
     setEditObservacion(j.observacion || '');
+
+    // Load linked cobro account if external service (instant from SWR cache, then revalidate in background)
+    const cachedEstado = j.id ? getQuerySnapshot<CobroCuenta>(cacheKeys.cobroEstado(j.id)).data : undefined;
+    const cachedCuenta =
+      cachedEstado || preloadedCuenta || cobros.find((c) => String(c.trabajoId) === String(j.id)) || null;
+    setEditJobCobroCuenta(dest === 'tercero' ? cachedCuenta : null);
+    if (dest === 'tercero' && j.id) {
+      setLoadingEditJobCobro(!cachedCuenta);
+      revalidateQuery<CobroCuenta>(
+        cacheKeys.cobroEstado(j.id),
+        () => getCobroEstado(j.id, false),
+        { minIntervalMs: 3000 }
+      )
+        .then((fresh) => {
+          setEditJobCobroCuenta(fresh);
+          patchCuentaAcrossCaches(j.id, fresh);
+        })
+        .catch(() => {
+          // Keep cachedCuenta if cobros.estado fails
+        })
+        .finally(() => {
+          setLoadingEditJobCobro(false);
+        });
+    } else {
+      setLoadingEditJobCobro(false);
+    }
+  };
+
+  const handleOpenEditJobFromCobro = (c: CobroCuenta) => {
+    const existingJob = jobs.find((j) => String(j.id) === String(c.trabajoId));
+    if (existingJob) {
+      handleOpenEditJob(existingJob, c);
+      return;
+    }
+    const rawU = String(c.unidad || 'hora').toLowerCase();
+    const synthJob: MachineryJob = {
+      id: c.trabajoId,
+      fecha: c.fecha,
+      campanaId: c.campanaId || activeCampaign?.id || '',
+      campanaNombre: c.campanaNombre,
+      maquinariaId: c.maquinariaId || '',
+      maquinariaNombre: c.maquinariaNombre || '',
+      trabajoTipoId: c.implementoId || '',
+      trabajoNombre: c.trabajoNombre || '',
+      tipoTrabajo: 'tercero',
+      cliente: c.cliente,
+      cantidad: c.cantidad ?? 1,
+      unidad: rawU.includes('ha') || rawU.includes('hect') ? 'hectarea' : 'hora',
+      tarifa: c.precioUnitario ?? c.tarifa ?? 0,
+      moneda: c.monedaOriginalServicio || c.moneda || 'USD',
+      tipoCambio: c.tcServicio || c.tipoCambio || exchangeRate?.tasaBobPerUsd,
+      total: c.importeOriginalServicio ?? c.importe ?? 0,
+      observacion: c.observacion || '',
+    };
+    handleOpenEditJob(synthJob, c);
   };
 
   const handleSaveEditJob = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingJob) return;
+    if (!effectiveIsAdmin) {
+      setEditJobError('Solo el Administrador puede modificar servicios guardados.');
+      return;
+    }
+    setEditJobError(null);
     setErrorMsg(null);
     setSuccessMsg(null);
 
+    const targetCampanaId = editCampanaId || editingJob.campanaId || activeCampaign?.id || '';
+    if (!targetCampanaId) {
+      setEditJobError('Selecciona una campaña.');
+      return;
+    }
     if (!editMachineId) {
-      setErrorMsg('Selecciona una maquinaria.');
+      setEditJobError('Selecciona una maquinaria.');
+      return;
+    }
+    const hasRegisteredCobros =
+      Boolean(editJobCobroCuenta) &&
+      ((editJobCobroCuenta?.cobrado ?? 0) > 0.005 || (editJobCobroCuenta?.pagos?.length ?? 0) > 0);
+    if (hasRegisteredCobros && editTipoTrabajo !== 'tercero') {
+      setEditJobError(
+        'Este servicio ya tiene cobros registrados y no puede cambiarse a Propiedad propia.'
+      );
       return;
     }
     if (editTipoTrabajo === 'propiedad' && !editLotId) {
-      setErrorMsg('Para trabajos en propiedad, el lote es obligatorio.');
+      setEditJobError('Para trabajos en propiedad, el lote es obligatorio.');
       return;
     }
     if (!editCantidad || Number(editCantidad) <= 0) {
-      setErrorMsg('La cantidad trabajada debe ser mayor a 0.');
+      setEditJobError('La cantidad trabajada debe ser mayor a 0.');
+      return;
+    }
+    const tcNum = parseDecimalNumber(editTc);
+    if (tcNum <= 0) {
+      setEditJobError('Ingresa un tipo de cambio válido mayor a 0.');
       return;
     }
 
@@ -449,32 +979,51 @@ export const MachineryView: React.FC<Props> = ({
     const lotObj = lots.find((l) => l.id === editLotId);
     const cantNum = Number(editCantidad);
     const tarifaNum = Number(editTarifa) || 0;
-    const totalNum = cantNum * tarifaNum;
+    const totalNum = Number((cantNum * tarifaNum).toFixed(2));
+    const totalUsdNum =
+      editMoneda === 'USD' ? totalNum : Number((totalNum / tcNum).toFixed(2));
+
+    if (hasRegisteredCobros && editJobCobroCuenta && totalUsdNum + 0.005 < editJobCobroCuenta.cobrado) {
+      setEditJobError(
+        `El nuevo importe total (USD ${totalUsdNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) no puede ser menor al monto ya cobrado (USD ${editJobCobroCuenta.cobrado.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}).`
+      );
+      return;
+    }
 
     setSaving(true);
     try {
-      await updateMachineryJob(editingJob.id, {
+      const updatedRes = await updateMachineryJob(editingJob.id, {
+        campanaId: targetCampanaId,
         fecha: editFecha,
         maquinariaId: editMachineId,
         maquinariaNombre: machineObj?.nombre || editingJob.maquinariaNombre,
-        trabajoTipoId: editJobTypeId || undefined,
-        trabajoNombre: editJobNombre || undefined,
+        trabajoTipoId: editJobTypeId,
+        trabajoNombre: editJobNombre,
         tipoTrabajo: editTipoTrabajo,
-        cliente: editTipoTrabajo === 'tercero' ? editCliente.trim() : undefined,
-        loteId: editTipoTrabajo === 'propiedad' ? editLotId : undefined,
-        loteNombre: editTipoTrabajo === 'propiedad' ? lotObj?.nombre : undefined,
+        cliente: editTipoTrabajo === 'tercero' ? editCliente.trim() : '',
+        loteId: editTipoTrabajo === 'propiedad' ? editLotId : '',
+        loteNombre: editTipoTrabajo === 'propiedad' ? lotObj?.nombre : '',
         cantidad: cantNum,
         unidad: editUnidad,
         tarifa: tarifaNum,
         moneda: editMoneda,
+        tipoCambio: tcNum,
         total: totalNum,
         observacion: editObservacion.trim(),
       });
-      setSuccessMsg('Trabajo de maquinaria actualizado exitosamente.');
+      if (updatedRes.cuenta) {
+        patchCuentaAcrossCaches(editingJob.id, updatedRes.cuenta);
+      }
+      setSuccessMsg('Servicio de maquinaria actualizado exitosamente.');
       setEditingJob(null);
-      onRefreshData();
+      setEditJobCobroCuenta(null);
+      onRefreshData('jobs');
+      if (currentScreen === 'por_cobrar' || editTipoTrabajo === 'tercero' || editingJob.tipoTrabajo === 'tercero') {
+        invalidateQueries(['cobros.']);
+        await loadCobros();
+      }
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al actualizar el trabajo');
+      setEditJobError(err instanceof Error ? err.message : 'Error al actualizar el servicio');
     } finally {
       setSaving(false);
     }
@@ -482,13 +1031,23 @@ export const MachineryView: React.FC<Props> = ({
 
   const handleConfirmDeleteJob = async () => {
     if (!jobToDelete) return;
+    if (!effectiveIsAdmin) {
+      setErrorMsg('Solo el Administrador puede eliminar servicios guardados.');
+      setJobToDelete(null);
+      return;
+    }
+    const wasExternal = jobToDelete.tipoTrabajo === 'tercero';
     setDeletingJob(true);
     setErrorMsg(null);
     try {
       await deleteMachineryJob(jobToDelete.id);
       setSuccessMsg('Trabajo eliminado exitosamente.');
       setJobToDelete(null);
-      onRefreshData();
+      onRefreshData('jobs');
+      if (wasExternal) {
+        invalidateQueries(['cobros.']);
+        pendingCobrosQuery.refresh().catch(() => {});
+      }
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar el trabajo');
     } finally {
@@ -496,19 +1055,21 @@ export const MachineryView: React.FC<Props> = ({
     }
   };
 
-  const handleDeleteExp = async (id: string) => {
-    if (!window.confirm('¿Confirmas eliminar este gasto de maquinaria?')) return;
-    try {
-      await deleteExpense(id);
-      setSuccessMsg('Gasto de maquinaria eliminado.');
-      onRefreshData();
-    } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar');
+  const handleRequestDeleteExpense = (exp: Expense) => {
+    if (!effectiveIsAdmin) {
+      setErrorMsg('Solo el Administrador puede eliminar gastos guardados.');
+      return;
     }
+    setExpenseToDelete(exp);
   };
 
   const handleOpenEditExpense = (exp: Expense) => {
+    if (!effectiveIsAdmin) {
+      setErrorMsg('Solo el Administrador puede editar gastos guardados.');
+      return;
+    }
     setEditingExpense(exp);
+    setEditExpError(null);
     setEditExpFecha(exp.fecha ? exp.fecha.slice(0, 10) : new Date().toISOString().slice(0, 10));
     setEditExpMachineId(exp.maquinariaId || '');
     setEditExpItemGasto(exp.itemGasto || 'Combustible');
@@ -516,17 +1077,32 @@ export const MachineryView: React.FC<Props> = ({
     setEditExpUnidad(exp.unidad || 'litros');
     setEditExpPrecio(exp.precio ?? '');
     setEditExpMoneda((exp.moneda as Currency) || 'BOB');
+    const histTc =
+      (exp.tipoCambio && exp.tipoCambio > 0 ? exp.tipoCambio : 0) ||
+      (exp.tc && exp.tc > 0 ? exp.tc : 0) ||
+      (exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0 ? exchangeRate.tasaBobPerUsd : 0);
+    setEditExpTc(histTc > 0 ? String(histTc) : '');
     setEditExpObservacion(exp.observacion || '');
   };
 
   const handleSaveEditExpense = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingExpense) return;
+    if (!effectiveIsAdmin) {
+      setEditExpError('Solo el Administrador puede modificar gastos guardados.');
+      return;
+    }
+    setEditExpError(null);
     setErrorMsg(null);
     setSuccessMsg(null);
 
     if (!editExpPrecio || Number(editExpPrecio) <= 0) {
-      setErrorMsg('Ingresa un precio unitario válido.');
+      setEditExpError('Ingresa un precio unitario válido.');
+      return;
+    }
+    const tcNum = parseDecimalNumber(editExpTc);
+    if (tcNum <= 0) {
+      setEditExpError('Ingresa un tipo de cambio válido mayor a 0.');
       return;
     }
 
@@ -547,14 +1123,15 @@ export const MachineryView: React.FC<Props> = ({
         unidad: editExpUnidad,
         precio: precioNum,
         moneda: editExpMoneda,
+        tipoCambio: tcNum,
         total: totalNum,
         observacion: editExpObservacion.trim(),
       });
       setSuccessMsg('Gasto de maquinaria actualizado exitosamente.');
       setEditingExpense(null);
-      onRefreshData();
+      onRefreshData('movements');
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al actualizar el gasto');
+      setEditExpError(err instanceof Error ? err.message : 'Error al actualizar el gasto');
     } finally {
       setSaving(false);
     }
@@ -567,6 +1144,7 @@ export const MachineryView: React.FC<Props> = ({
   const machineryExpenseItems = (itemsConfig || []).filter(
     (item) =>
       item.activo !== false &&
+      item.clase !== 'INGRESO' &&
       ((item.modulo === 'MAQUINARIAS' && item.clase === 'GASTO') ||
         item.tipo === 'gasto_maquinaria')
   );
@@ -592,48 +1170,86 @@ export const MachineryView: React.FC<Props> = ({
     rawExpense?: Expense;
   }
 
+  const formatConcept = (raw: string | undefined): string => {
+    if (!raw) return '';
+    const trimmed = raw.trim();
+    if (!trimmed) return '';
+    return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+  };
+
+  const formatTC = (tc: number | undefined | null) => {
+    if (!tc) return '';
+    return String(tc).replace('.', ',');
+  };
+
+  const getCleanObservation = (obs: string | undefined, title: string) => {
+    if (!obs) return null;
+    const trimmed = obs.trim();
+    if (!trimmed) return null;
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith('[trabajo:') || lower.startsWith('[gasto:') || lower.includes(title.toLowerCase())) {
+      return null;
+    }
+    return trimmed;
+  };
+
   // All machinery movements: Includes ALL jobs (propiedad + tercero) and machinery expenses
   const allMachineryMovements: MachineryMovementItem[] = [
-    ...jobs.map((j) => ({
-      id: j.id,
-      kind: 'servicio' as const,
-      tipoTrabajo: j.tipoTrabajo,
-      fecha: j.fecha,
-      titulo: j.trabajoNombre || 'Labor de maquinaria',
-      maquinariaNombre: j.maquinariaNombre || 'Maquinaria',
-      destinoOCliente:
-        j.tipoTrabajo === 'propiedad'
-          ? (j.loteNombre ? `Lote: ${j.loteNombre}` : 'Lote propio')
-          : (j.cliente ? `Cliente: ${j.cliente}` : 'Cliente externo'),
-      cantidadTexto: `${j.cantidad} ${j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'h'}`,
-      total: j.total,
-      moneda: (j.moneda || 'BOB') as Currency,
-      tipoCambio: j.tipoCambio,
-      tarifaOPrecio: j.tarifa,
-      unidad: j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'hora',
-      observacion: j.observacion,
-      icono: j.icono || 'tractor',
-      creadoEn: j.creadoEn,
-      rawJob: j,
-    })),
-    ...machineryExpenses.map((e) => ({
-      id: e.id,
-      kind: 'gasto' as const,
-      fecha: e.fecha,
-      titulo: e.itemGasto || 'Gasto',
-      maquinariaNombre: e.maquinariaNombre ? `Equipo: ${e.maquinariaNombre}` : 'Gasto general',
-      destinoOCliente: e.maquinariaNombre || 'General',
-      cantidadTexto: e.cantidad ? `${e.cantidad} ${e.unidad || ''}`.trim() : undefined,
-      total: e.total,
-      moneda: ((e.moneda as Currency) || 'BOB') as Currency,
-      tipoCambio: e.tipoCambio,
-      tarifaOPrecio: e.precio,
-      unidad: e.unidad,
-      observacion: e.observacion,
-      icono: e.icono || e.itemGasto || 'repuestos',
-      creadoEn: e.creadoEn,
-      rawExpense: e,
-    })),
+    ...jobs.map((j) => {
+      const machineObj = j.maquinariaId ? machines.find((m) => m.id === j.maquinariaId || m.nombre.toLowerCase() === j.maquinariaId.toLowerCase()) : null;
+      const resolvedMachineName = j.maquinariaNombre || machineObj?.nombre || 'Maquinaria';
+
+      const lotObj = j.loteId ? lots.find((l) => l.id === j.loteId || (l.nombre && j.loteId && l.nombre.toLowerCase() === j.loteId.toLowerCase())) : null;
+      const rawLot = j.loteNombre || lotObj?.nombre || (j.loteId ? `Lote ${j.loteId}` : null);
+      const formattedLot = rawLot
+        ? (String(rawLot).toLowerCase().startsWith('lote') ? String(rawLot) : `Lote ${rawLot}`)
+        : 'Lote propio';
+
+      return {
+        id: j.id,
+        kind: 'servicio' as const,
+        tipoTrabajo: j.tipoTrabajo,
+        fecha: j.fecha,
+        titulo: formatConcept(j.trabajoNombre || 'Labor de maquinaria'),
+        maquinariaNombre: resolvedMachineName,
+        destinoOCliente:
+          j.tipoTrabajo === 'propiedad'
+            ? formattedLot
+            : (j.cliente ? `Cliente: ${j.cliente}` : 'Cliente externo'),
+        cantidadTexto: `${j.cantidad} ${j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'h'}`,
+        total: j.total,
+        moneda: (j.moneda || 'BOB') as Currency,
+        tipoCambio: j.tipoCambio,
+        tarifaOPrecio: j.tarifa,
+        unidad: j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'hora',
+        observacion: j.observacion,
+        icono: j.icono || 'tractor',
+        creadoEn: j.creadoEn,
+        rawJob: j,
+      };
+    }),
+    ...machineryExpenses.map((e) => {
+      const machineObj = e.maquinariaId ? machines.find((m) => m.id === e.maquinariaId) : null;
+      const resolvedMachineName = e.maquinariaNombre || machineObj?.nombre || 'General';
+      return {
+        id: e.id,
+        kind: 'gasto' as const,
+        fecha: e.fecha,
+        titulo: formatConcept(e.itemGasto || 'Gasto'),
+        maquinariaNombre: resolvedMachineName,
+        destinoOCliente: resolvedMachineName,
+        cantidadTexto: e.cantidad ? `${e.cantidad} ${e.unidad || ''}`.trim() : undefined,
+        total: e.total,
+        moneda: ((e.moneda as Currency) || 'BOB') as Currency,
+        tipoCambio: e.tipoCambio,
+        tarifaOPrecio: e.precio,
+        unidad: e.unidad,
+        observacion: e.observacion,
+        icono: e.icono || e.itemGasto || 'repuestos',
+        creadoEn: e.creadoEn,
+        rawExpense: e,
+      };
+    }),
   ].sort((a, b) => {
     const timeA = a.creadoEn ? new Date(a.creadoEn).getTime() : new Date(a.fecha).getTime();
     const timeB = b.creadoEn ? new Date(b.creadoEn).getTime() : new Date(b.fecha).getTime();
@@ -668,24 +1284,27 @@ export const MachineryView: React.FC<Props> = ({
 
   return (
     <div className="w-full max-w-full space-y-4 sm:space-y-6">
-      {/* iOS Subscreen Navigation Bar with Back Button */}
-      {currentScreen !== 'main' && (
-        <div className="flex items-center gap-3 pb-2 border-b border-slate-200/80">
+      {currentScreen !== 'main' && currentScreen !== 'resultados' && (
+        <div className="flex items-center gap-3 my-1">
           <button
             type="button"
             onClick={() => setCurrentScreen('main')}
-            className="min-h-[44px] px-4 py-2 rounded-2xl bg-white border border-slate-200/80 shadow-xs text-slate-800 hover:bg-slate-100 flex items-center gap-2 font-bold text-sm transition active:scale-95 cursor-pointer"
+            aria-label="Volver a Maquinarias"
+            className="min-h-[44px] min-w-[44px] px-3 rounded-xl bg-white border border-slate-200 flex items-center justify-center gap-1.5 text-slate-800 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer shrink-0"
           >
-            <ArrowLeft className="h-5 w-5 text-slate-700" />
-            <span>Volver</span>
+            <ArrowLeft className="h-4 w-4 text-slate-800 shrink-0" />
+            <span className="text-sm font-semibold text-slate-800">Volver</span>
           </button>
-          <h2 className="text-base sm:text-lg font-bold text-slate-900 truncate">
-            {currentScreen === 'historial' && 'Movimientos'}
-            {currentScreen === 'resumen' && 'Máquinas'}
-            {currentScreen === 'gasto' && 'Registrar Gasto de Maquinaria'}
-            {currentScreen === 'ingreso_opciones' && 'Tipo de Servicio'}
-            {currentScreen === 'servicio_otros' && 'Servicio para otros'}
-            {currentScreen === 'trabajo_propiedad' && 'Trabajo en propiedad'}
+          <h2 className="text-lg sm:text-xl font-bold text-slate-900 truncate">
+            {currentScreen === 'historial' && 'Historial'}
+            {currentScreen === 'resumen' && 'Mis máquinas'}
+            {currentScreen === 'por_cobrar' && 'Por cobrar'}
+            {currentScreen === 'gasto' && 'Registrar gasto'}
+            {(currentScreen === 'servicio' ||
+              currentScreen === 'ingreso_opciones' ||
+              currentScreen === 'servicio_otros' ||
+              currentScreen === 'trabajo_propiedad') &&
+              'Registrar servicio'}
           </h2>
         </div>
       )}
@@ -724,31 +1343,34 @@ export const MachineryView: React.FC<Props> = ({
       )}
 
       {/* ============================================================ */}
-      {/* VISTA PRINCIPAL (MAIN): REGISTRAR Y CONSULTAR SEPARADOS       */}
+      {/* VISTA PRINCIPAL (MAIN): ETAPA 1 — REGISTRAR Y CONSULTAR      */}
       {/* ============================================================ */}
       {currentScreen === 'main' && (
-        <div className="space-y-5">
-          {/* SECCIÓN A: REGISTRAR MOVIMIENTO */}
-          <div className="space-y-2">
-            <h2 className="text-[11px] font-bold tracking-wider text-slate-500 uppercase px-1">
-              REGISTRAR MOVIMIENTO
+        <div className="space-y-6">
+          {/* SECCIÓN A: REGISTRAR */}
+          <section className="space-y-2.5" aria-label="Registrar movimiento de maquinarias">
+            <h2 className="text-sm font-bold text-slate-600 px-0.5">
+              Registrar
             </h2>
 
-            {/* Dos botones compactos estilo iOS: SERVICIO (Verde John Deere) y GASTO (Rojo claro) */}
             <div className="grid grid-cols-2 gap-3 w-full">
               {/* Botón SERVICIO */}
               <button
                 type="button"
-                onClick={() => setCurrentScreen('ingreso_opciones')}
-                className="w-full min-h-[70px] sm:min-h-[74px] p-3 rounded-2xl bg-[#367C2B] hover:bg-[#2e6b25] active:bg-[#26581e] text-white shadow-xs border border-[#367C2B]/20 flex flex-col items-center justify-center gap-0.5 transition active:scale-[0.98] cursor-pointer select-none"
+                onClick={() => {
+                  resetNewServiceForm();
+                  setServiceDestino('propiedad');
+                  setCurrentScreen('servicio');
+                }}
+                className="w-full px-3.5 py-3 rounded-2xl bg-[#2D7D2C] hover:bg-[#256624] active:bg-[#1D541C] text-white flex flex-col items-center justify-center gap-1 transition active:scale-[0.98] cursor-pointer select-none shadow-xs"
               >
-                <div className="flex items-center justify-center gap-1.5">
-                  <CirclePlus className="h-4 w-4 text-white shrink-0" />
-                  <span className="text-sm sm:text-base font-bold tracking-tight text-white">
+                <div className="flex items-center justify-center gap-2">
+                  <Tractor className="h-5 w-5 text-white shrink-0" strokeWidth={2.2} />
+                  <span className="text-sm sm:text-base font-bold tracking-tight text-white leading-tight">
                     Servicio
                   </span>
                 </div>
-                <span className="text-[11px] sm:text-xs text-white/90 font-medium text-center truncate max-w-full px-1">
+                <span className="text-[11px] text-white/90 font-medium text-center leading-tight">
                   Servicio o labor
                 </span>
               </button>
@@ -756,593 +1378,878 @@ export const MachineryView: React.FC<Props> = ({
               {/* Botón GASTO */}
               <button
                 type="button"
-                onClick={() => setCurrentScreen('gasto')}
-                className="w-full min-h-[70px] sm:min-h-[74px] p-3 rounded-2xl bg-[#C1272D] hover:bg-[#a82025] active:bg-[#8f1f24] text-white shadow-xs border border-[#C1272D]/20 flex flex-col items-center justify-center gap-0.5 transition active:scale-[0.98] cursor-pointer select-none"
+                onClick={() => {
+                  resetNewExpenseForm();
+                  setCurrentScreen('gasto');
+                }}
+                className="w-full px-3.5 py-3 rounded-2xl bg-[#C5222B] hover:bg-[#A71D25] active:bg-[#8D181F] text-white flex flex-col items-center justify-center gap-1 transition active:scale-[0.98] cursor-pointer select-none shadow-xs"
               >
-                <div className="flex items-center justify-center gap-1.5">
-                  <TrendingDown className="h-4 w-4 text-white shrink-0" />
-                  <span className="text-sm sm:text-base font-bold tracking-tight text-white">
+                <div className="flex items-center justify-center gap-2">
+                  <CircleMinus className="h-5 w-5 text-white shrink-0" strokeWidth={2.2} />
+                  <span className="text-sm sm:text-base font-bold tracking-tight text-white leading-tight">
                     Gasto
                   </span>
                 </div>
-                <span className="text-[11px] sm:text-xs text-white/90 font-medium text-center truncate max-w-full px-1">
+                <span className="text-[11px] text-white/90 font-medium text-center leading-tight">
                   Combustible y repuestos
                 </span>
               </button>
             </div>
-          </div>
+          </section>
 
-          {/* SECCIÓN B: CONSULTAR REGISTROS (1. Movimientos, 2. Máquinas) */}
-          <div className="space-y-2">
-            <h2 className="text-[11px] font-bold tracking-wider text-slate-500 uppercase px-1">
-              CONSULTAR REGISTROS
+          {/* SECCIÓN B: CONSULTAR */}
+          <section className="space-y-2.5" aria-label="Consultar registros de maquinarias">
+            <h2 className="text-sm font-bold text-slate-600 px-0.5">
+              Consultar
             </h2>
 
-            <div className="space-y-2.5">
-              {/* Opción 1: Movimientos */}
+            <div className="rounded-2xl border border-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
+              {/* 1. Historial */}
               <button
                 type="button"
                 onClick={() => setCurrentScreen('historial')}
-                className="w-full bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl p-3.5 sm:p-4 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:scale-[0.99] transition cursor-pointer text-left min-h-[68px]"
+                className="w-full px-4 py-4 flex items-center justify-between gap-3 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[72px]"
               >
                 <div className="flex items-center gap-3.5 min-w-0">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-100/80 shrink-0">
-                    <ClipboardList className="h-5 w-5" />
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-50 border border-blue-200/80 text-blue-600 shrink-0">
+                    <History className="h-5 w-5" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-sm sm:text-base font-bold text-slate-900 leading-snug">
-                        Movimientos
-                      </h3>
-                      <span className="text-xs font-bold bg-emerald-100 text-emerald-900 px-2 py-0.5 rounded-full shrink-0">
-                        {allMachineryMovements.length}
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-500 mt-0.5 truncate">
-                      Trabajos en propiedad, servicios a terceros y gastos
+                    <h3 className="text-base font-bold text-slate-900 leading-snug">
+                      Historial
+                    </h3>
+                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
+                      {allMachineryMovements.length}{' '}
+                      {allMachineryMovements.length === 1 ? 'movimiento' : 'movimientos'}
                     </p>
                   </div>
                 </div>
                 <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
               </button>
 
-              {/* Opción 2: Máquinas */}
+              {/* 2. Mis máquinas */}
               <button
                 type="button"
                 onClick={() => setCurrentScreen('resumen')}
-                className="w-full bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl p-3.5 sm:p-4 flex items-center justify-between gap-3 shadow-xs hover:bg-slate-50 active:scale-[0.99] transition cursor-pointer text-left min-h-[68px]"
+                className="w-full px-4 py-4 flex items-center justify-between gap-3 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[72px]"
               >
                 <div className="flex items-center gap-3.5 min-w-0">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100 text-slate-700 border border-slate-200/80 shrink-0">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 border border-emerald-200/80 text-emerald-700 shrink-0">
                     <Tractor className="h-5 w-5" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-sm sm:text-base font-bold text-slate-900 leading-snug truncate">
-                        Máquinas
+                    <h3 className="text-base font-bold text-slate-900 leading-snug">
+                      Mis máquinas
+                    </h3>
+                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
+                      {machines.length} {machines.length === 1 ? 'máquina' : 'máquinas'}
+                      {machineJobTypes.filter((j) => !isVirtualMachineOnlyImplement(j.nombre)).length > 0 && (
+                        <>
+                          {' · '}
+                          {machineJobTypes.filter((j) => !isVirtualMachineOnlyImplement(j.nombre)).length}{' '}
+                          {machineJobTypes.filter((j) => !isVirtualMachineOnlyImplement(j.nombre)).length === 1
+                            ? 'implemento'
+                            : 'implementos'}
+                        </>
+                      )}
+                    </p>
+                  </div>
+                </div>
+                <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
+              </button>
+
+              {/* 3. Por cobrar */}
+              <button
+                type="button"
+                onClick={() => setCurrentScreen('por_cobrar')}
+                className="w-full px-4 py-4 flex items-center justify-between gap-3 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[72px]"
+              >
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-amber-50 border border-amber-200/80 text-amber-700 shrink-0">
+                    <Wallet className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-base font-bold text-slate-900 leading-snug">
+                        Por cobrar
                       </h3>
-                      <span className="text-xs font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full shrink-0">
-                        {machines.length}
+                      <span className="text-sm font-bold text-slate-600 tabular-nums shrink-0">
+                        {pendingCobrosCount !== null ? pendingCobrosCount : '—'}
                       </span>
                     </div>
-                    <p className="text-xs text-slate-500 mt-0.5 truncate">
-                      Horas, hectáreas y rendimiento por equipo
+                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
+                      {pendingCobrosCount !== null
+                        ? `${pendingCobrosCount} ${pendingCobrosCount === 1 ? 'cuenta pendiente de cobro' : 'cuentas pendientes de cobro'}`
+                        : 'Cuentas por cobrar de servicios externos'}
+                    </p>
+                  </div>
+                </div>
+                <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
+              </button>
+
+              {/* 4. Resultados */}
+              <button
+                type="button"
+                onClick={() => setCurrentScreen('resultados')}
+                className="w-full px-4 py-4 flex items-center justify-between gap-3 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[72px]"
+              >
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-purple-50 border border-purple-200/80 text-purple-700 shrink-0">
+                    <BarChart3 className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-base font-bold text-slate-900 leading-snug">
+                      Resultados
+                    </h3>
+                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
+                      Ingresos, gastos y balance por máquina
                     </p>
                   </div>
                 </div>
                 <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
               </button>
             </div>
-          </div>
+          </section>
         </div>
       )}
 
       {/* ============================================================ */}
-      {/* SUB-VISTA: ELECCIÓN DE TIPO DE SERVICIO                      */}
+      {/* SUB-VISTA: RESULTADOS DE MAQUINARIAS                         */}
       {/* ============================================================ */}
-      {currentScreen === 'ingreso_opciones' && (
-        <div className="space-y-4">
-          <div className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-6 shadow-xs space-y-4">
-            <div>
-              <h2 className="text-sm sm:text-base font-bold text-stone-900">
-                REGISTRAR SERVICIO DE MAQUINARIA
-              </h2>
-              <p className="text-xs text-stone-500 mt-0.5">
-                Selecciona si el trabajo se realizó en un lote propio o para un cliente externo.
-              </p>
-            </div>
-
-            {/* Dos opciones: TRABAJO PROPIEDAD primero y más resaltante */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
-              {/* PRIMERA OPCIÓN: Trabajo Propiedad (Resaltado Verde Principal) */}
-              <button
-                type="button"
-                onClick={() => setCurrentScreen('trabajo_propiedad')}
-                className="flex flex-col items-center justify-between p-4 sm:p-5 rounded-2xl border-2 border-emerald-600 bg-emerald-50/90 hover:bg-emerald-100 text-center transition cursor-pointer min-h-[150px] space-y-2 group shadow-sm ring-2 ring-emerald-500/20"
-              >
-                <div className="p-3 rounded-xl bg-emerald-700 text-white shadow-xs group-hover:scale-105 transition shrink-0">
-                  <LandPlot className="h-6 w-6" />
-                </div>
-                <div className="w-full">
-                  <span className="text-sm sm:text-base font-extrabold text-emerald-950 block leading-tight break-words">
-                    TRABAJO PROPIEDAD
-                  </span>
-                  <span className="text-xs text-emerald-800 font-semibold block mt-1 leading-snug break-words">
-                    Trabajo en lote propio
-                  </span>
-                </div>
-                <span className="text-[10px] font-bold text-emerald-900 bg-emerald-200/90 px-3 py-1 rounded-full border border-emerald-300">
-                  Opción Principal &bull; + Maq. y &minus; Lote
-                </span>
-              </button>
-
-              {/* SEGUNDA OPCIÓN: Servicio para otros (Secundario Discreto) */}
-              <button
-                type="button"
-                onClick={() => setCurrentScreen('servicio_otros')}
-                className="flex flex-col items-center justify-between p-4 sm:p-5 rounded-2xl border border-stone-300 hover:border-emerald-600 bg-white hover:bg-stone-50 text-center transition cursor-pointer min-h-[150px] space-y-2 group"
-              >
-                <div className="p-3 rounded-xl bg-stone-100 text-stone-700 group-hover:scale-105 transition shrink-0 border border-stone-200">
-                  <HandCoins className="h-6 w-6" />
-                </div>
-                <div className="w-full">
-                  <span className="text-xs sm:text-sm font-bold text-stone-800 block leading-tight break-words">
-                    Servicio para otros
-                  </span>
-                  <span className="text-[10px] text-stone-500 block mt-1 leading-snug break-words">
-                    Cliente externo &bull; Sin lote
-                  </span>
-                </div>
-                <span className="text-[10px] font-semibold text-stone-600 bg-stone-100 px-2.5 py-0.5 rounded-full border border-stone-200">
-                  + Ingreso Maquinarias
-                </span>
-              </button>
-            </div>
-          </div>
-        </div>
+      {currentScreen === 'resultados' && (
+        <ReportsView
+          campaigns={campaigns}
+          activeCampaign={activeCampaign}
+          machines={machines}
+          machineJobTypes={machineJobTypes}
+          lots={lots}
+          jobs={jobs}
+          expenses={expenses}
+          incomes={[]}
+          currency={currency}
+          exchangeRate={exchangeRate}
+          initialScreen="maquinarias"
+          onRootBackLabel="Volver a Maquinarias"
+          onBack={() => setCurrentScreen('main')}
+        />
       )}
 
       {/* ============================================================ */}
-      {/* FORMULARIO: SERVICIO PARA OTROS (TERCEROS)                   */}
+      {/* SUB-VISTA: POR COBRAR (COBROS REALES: cobros.list/estado/registrar) */}
       {/* ============================================================ */}
-      {currentScreen === 'servicio_otros' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-lg">
-              Servicio para otros
-            </span>
-          </div>
+      {currentScreen === 'por_cobrar' && (() => {
+        const selectedCamp =
+          porCobrarCampaignId === 'all'
+            ? null
+            : campaigns.find((c) => String(c.id) === String(porCobrarCampaignId)) || null;
 
-          <div className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-5 shadow-xs">
-            <div className="pb-3 border-b border-stone-100 mb-4">
-              <h2 className="text-sm font-bold text-stone-900 flex items-center gap-2">
-                <HandCoins className="h-4 w-4 text-emerald-700" />
-                <span>Registrar Servicio para otros</span>
-              </h2>
-              <p className="text-xs text-stone-500 mt-0.5">
-                Genera ingreso para Maquinarias. No se solicita lote.
-              </p>
+        const jobById = new Map(jobs.map((j) => [String(j.id), j]));
+        const qCobro = porCobrarSearch.trim().toLowerCase();
+
+        const enrichedCobros = cobros.map((c) => {
+          const linkedJob = jobById.get(String(c.trabajoId));
+          const campId = c.campanaId || linkedJob?.campanaId || '';
+          const campName =
+            c.campanaNombre ||
+            linkedJob?.campanaNombre ||
+            campaigns.find((cp) => String(cp.id) === String(campId))?.nombre ||
+            'Sin campaña';
+          const machName =
+            c.maquinariaNombre ||
+            linkedJob?.maquinariaNombre ||
+            machines.find((m) => String(m.id) === String(c.maquinariaId || linkedJob?.maquinariaId))?.nombre ||
+            'Maquinaria';
+          const workName = c.trabajoNombre || linkedJob?.trabajoNombre || machName;
+          const clientName =
+            c.cliente && c.cliente !== 'Cliente externo'
+              ? c.cliente
+              : linkedJob?.cliente || c.cliente || 'Cliente externo';
+          const fechaVal = c.fecha || linkedJob?.fecha || '';
+          const tcVal = c.tipoCambio || linkedJob?.tipoCambio || linkedJob?.tc;
+
+          return {
+            ...c,
+            cliente: clientName,
+            fecha: fechaVal,
+            campanaId: campId,
+            campanaNombre: campName,
+            maquinariaNombre: machName,
+            trabajoNombre: workName,
+            cantidad: c.cantidad ?? linkedJob?.cantidad,
+            unidad: c.unidad ?? linkedJob?.unidad,
+            tarifa: c.tarifa ?? linkedJob?.tarifa,
+            tipoCambio: tcVal,
+            icono: linkedJob?.icono || 'tractor',
+          };
+        });
+
+        const filteredCobros = enrichedCobros
+          .filter((c) => {
+            if (porCobrarEstadoFilter === 'pendientes' && (c.estado === 'PAGADO' || c.saldo <= 0.005)) {
+              return false;
+            }
+            if (porCobrarEstadoFilter === 'PAGADO' && c.estado !== 'PAGADO') {
+              return false;
+            }
+            if (selectedCamp && c.campanaId && String(c.campanaId) !== String(selectedCamp.id)) {
+              return false;
+            }
+            if (!qCobro) return true;
+            return `${c.cliente} ${c.trabajoNombre || ''} ${c.maquinariaNombre || ''} ${c.campanaNombre || ''} ${c.estado} ${formatDateDDMMAAAA(c.fecha)}`
+              .toLowerCase()
+              .includes(qCobro);
+          })
+          .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+
+        const totalSaldoPendienteView = filteredCobros.reduce(
+          (sum, c) =>
+            sum +
+            convertHistoricalAmount(
+              Number(c.saldo) || 0,
+              c.moneda || 'BOB',
+              currency,
+              c.tipoCambio,
+              exchangeRate
+            ),
+          0
+        );
+
+        const totalCobradoView = filteredCobros.reduce(
+          (sum, c) =>
+            sum +
+            convertHistoricalAmount(
+              Number(c.cobrado) || 0,
+              c.moneda || 'BOB',
+              currency,
+              c.tipoCambio,
+              exchangeRate
+            ),
+          0
+        );
+
+        const estadoBadgeClass = (estado: string) => {
+          if (estado === 'PAGADO') {
+            return 'bg-[#EAF5EE] text-[#1D5C3F] border border-[#BFE0CD]';
+          }
+          if (estado === 'PARCIAL') {
+            return 'bg-sky-50 text-sky-800 border border-sky-200';
+          }
+          return 'bg-amber-50 text-amber-800 border border-amber-200';
+        };
+
+        return (
+          <div className="space-y-3.5">
+            {/* Resumen simplificado de cuentas por cobrar */}
+            <div className="rounded-2xl border border-[#E2E7E3] bg-white p-4 space-y-2">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-xs font-semibold text-[#5E6D64]">
+                      Total pendiente · {filteredCobros.length} cuentas
+                    </p>
+                    {cobrosRevalidating && (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#24875B]">
+                        <RefreshCw className="h-3 w-3 animate-spin" />
+                        <span>Actualizando...</span>
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xl sm:text-2xl font-extrabold text-[#24875B] tabular-nums mt-0.5">
+                    {formatCurrencyAmount(totalSaldoPendienteView, currency)}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => loadCobros()}
+                  disabled={cobrosLoading}
+                  title="Actualizar cuentas por cobrar"
+                  className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EAF5EE] text-[#24875B] hover:bg-[#DCEFE4] transition cursor-pointer shrink-0 disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-4 w-4 ${cobrosLoading ? 'animate-spin' : ''}`} />
+                </button>
+              </div>
             </div>
 
-            <form onSubmit={(e) => handleJobSubmit(e, 'tercero')} className="space-y-4">
-              {/* Maquinaria con selector visual e icono */}
-              <VisualMachinePicker
-                label="Maquinaria *"
-                machines={machines}
-                selectedMachineId={selectedMachineId}
-                onSelectMachine={(m) => handleMachineChange(m.id)}
-                required
-              />
+            {/* Aviso discreto de error sin ocultar los datos previos cargados */}
+            {cobrosError && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 flex items-start justify-between gap-2.5">
+                <div className="flex items-start gap-2 min-w-0 flex-1">
+                  <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                  <div className="text-xs text-red-900 space-y-0.5 min-w-0 flex-1">
+                    <p className="font-bold">
+                      {cobrosHasLoaded
+                        ? 'No se pudo actualizar. Mostrando los últimos datos cargados.'
+                        : 'Error al consultar cobros en Google Apps Script'}
+                    </p>
+                    <p className="break-words text-red-800/90">{cobrosError}</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => loadCobros()}
+                  disabled={cobrosLoading}
+                  className="text-xs font-bold text-red-700 hover:text-red-900 underline shrink-0 cursor-pointer disabled:opacity-50"
+                >
+                  Reintentar
+                </button>
+              </div>
+            )}
 
-              {/* Tipo de Trabajo / Implemento con selector visual */}
-              {selectedMachineId && (
-                <div>
-                  {getAvailableJobsForMachine(selectedMachineId).length > 0 ? (
-                    <div className="space-y-1.5">
-                      <VisualJobTypePicker
-                        label="Tipo de Trabajo / Labor *"
-                        jobTypes={getAvailableJobsForMachine(selectedMachineId)}
-                        selectedJobTypeId={selectedJobTypeId}
-                        onSelectJobType={(j) => handleJobTypeChange(j.id)}
-                        required
-                      />
-                      <p className="text-[11px] text-emerald-800 font-medium">
-                        Tarifa, moneda y unidad asignadas automáticamente. Puedes modificar la tarifa si se pactó un precio diferente.
-                      </p>
-                    </div>
-                  ) : (
-                    <div>
-                      <label className="block text-xs font-semibold text-stone-700 mb-1">
-                        Tipo de Trabajo / Labor <span className="text-red-500">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Ej. Siembra, Arada, Rastra..."
-                        value={selectedJobNombre}
-                        onChange={(e) => setSelectedJobNombre(e.target.value)}
-                        className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                      />
-                    </div>
+            <ListToolbar
+              title="Cuentas"
+              countLabel={`${filteredCobros.length} reg.`}
+              searchValue={porCobrarSearch}
+              onSearchChange={setPorCobrarSearch}
+              searchPlaceholder="Buscar cliente, servicio o fecha..."
+              filters={
+                <div className="flex items-center gap-1.5">
+                  <CompactFilter
+                    value={porCobrarEstadoFilter}
+                    onChange={(val) =>
+                      setPorCobrarEstadoFilter(val as 'pendientes' | 'todos' | 'PAGADO')
+                    }
+                    ariaLabel="Filtrar estado de cobro"
+                    options={[
+                      { value: 'pendientes', label: 'Pendientes' },
+                      { value: 'todos', label: 'Todos' },
+                      { value: 'PAGADO', label: 'Pagados' },
+                    ]}
+                  />
+                  {campaigns.length > 0 && (
+                    <CompactFilter
+                      value={porCobrarCampaignId}
+                      onChange={(val) => setPorCobrarCampaignId(val)}
+                      ariaLabel="Filtrar por campaña"
+                      options={[
+                        { value: 'all', label: 'Todas las campañas' },
+                        ...campaigns.map((c) => ({
+                          value: String(c.id),
+                          label: c.activa ? `${c.nombre} (Activa)` : c.nombre,
+                        })),
+                      ]}
+                    />
                   )}
                 </div>
-              )}
+              }
+            />
 
-              {/* Cliente */}
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Cliente o Beneficiario <span className="text-stone-400 font-normal">(Opcional)</span>
-                </label>
-                <div className="relative">
-                  <User className="absolute left-3 top-3 h-4 w-4 text-stone-400" />
-                  <input
-                    type="text"
-                    value={cliente}
-                    onChange={(e) => setCliente(e.target.value)}
-                    placeholder="Ej. Juan Pérez, Hacienda El Palmar"
-                    className="w-full text-xs pl-9 pr-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                  />
-                </div>
+            {cobrosInitialLoading || (!cobrosHasLoaded && !cobrosError) ? (
+              <div className="rounded-2xl border border-[#E2E7E3] bg-white p-8 text-center text-xs text-[#5E6D64] flex items-center justify-center gap-2">
+                <RefreshCw className="h-4 w-4 animate-spin text-[#24875B]" />
+                <span>Consultando cuentas por cobrar...</span>
               </div>
+            ) : (
+              <CompactList
+                isEmpty={filteredCobros.length === 0}
+                emptyMessage={
+                  !cobrosHasLoaded && cobrosError
+                    ? 'No se pudieron cargar las cuentas por cobrar.'
+                    : qCobro
+                    ? 'No se encontraron cuentas con esa búsqueda.'
+                    : porCobrarEstadoFilter === 'pendientes'
+                    ? 'No hay cuentas pendientes de cobro.'
+                    : 'No hay cuentas registradas para este filtro.'
+                }
+              >
+                {filteredCobros.map((c) => {
+                  const rowKey = c.trabajoId || c.id || '';
+                  const isExpanded = expandedPorCobrarId === rowKey;
+                  const isLoadingDetail = loadingCobroEstadoId === rowKey;
+                  const detailErr = cobroEstadoErrors[rowKey];
+                  const curLabel = c.moneda === 'USD' ? 'USD' : 'Bs';
+                  const unitShort =
+                    c.unidad === 'hectarea' || (c.unidad as string) === 'ha' ? 'ha' : 'h';
+                  const canRegisterPayment = c.estado !== 'PAGADO' && c.saldo > 0.005;
 
-              {/* Fecha */}
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Fecha <span className="text-red-500">*</span>
-                </label>
-                <div className="relative">
-                  <Calendar className="absolute left-3 top-3 h-4 w-4 text-stone-400" />
-                  <input
-                    type="date"
-                    required
-                    value={fecha}
-                    onChange={(e) => setFecha(e.target.value)}
-                    className="w-full text-xs pl-9 pr-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                  />
-                </div>
-              </div>
+                  return (
+                    <CompactListRow
+                      key={rowKey}
+                      icon={
+                        <div className="w-8 h-8 rounded-lg bg-[#EAF5EE] border border-[#BFE0CD]/70 flex items-center justify-center">
+                          <VisualIcon name={c.icono || 'tractor'} size="xs" />
+                        </div>
+                      }
+                      title={
+                        <span className="flex items-center gap-1.5 flex-wrap">
+                          <span className="truncate">{c.cliente}</span>
+                          <span
+                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md uppercase tracking-wide ${estadoBadgeClass(
+                              c.estado
+                            )}`}
+                          >
+                            {c.estado}
+                          </span>
+                        </span>
+                      }
+                      subtitle={
+                        <span>
+                          {formatDateDDMMAAAA(c.fecha)} · {formatConcept(c.trabajoNombre || c.maquinariaNombre)} · {c.campanaNombre}
+                        </span>
+                      }
+                      rightPrimary={
+                        <span
+                          className={`font-mono ${
+                            c.saldo > 0.005 ? 'text-[#26352D]' : 'text-[#24875B]'
+                          }`}
+                        >
+                          {curLabel}{' '}
+                          {Number(c.saldo > 0.005 ? c.saldo : c.importe).toLocaleString('es-BO', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                        </span>
+                      }
+                      rightSecondary={
+                        c.saldo > 0.005
+                          ? `Saldo · Orig. ${curLabel} ${Number(c.importe || 0).toLocaleString('es-BO', {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}`
+                          : 'Pagado'
+                      }
+                      isExpanded={isExpanded}
+                      onClick={() => handleToggleCobroRow(c)}
+                      expandedContent={
+                        <div className="space-y-3 text-xs">
+                          {/* 3 filas compactas: Total del servicio, Cobrado, Saldo pendiente (destacado en USD) */}
+                          <div className="rounded-xl border border-[#E2E7E3] bg-white divide-y divide-[#EFF2EF] overflow-hidden">
+                            <div className="px-3 py-2 flex items-center justify-between gap-2">
+                              <div className="min-w-0">
+                                <span className="text-[#5E6D64] font-medium block">Total del servicio</span>
+                                {c.monedaOriginalServicio === 'BOB' && c.importeOriginalServicio ? (
+                                  <span className="text-[10px] text-[#7A8780] font-mono">
+                                    Orig.: Bs {c.importeOriginalServicio.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    {c.tcServicio ? ` · TC ${c.tcServicio}` : ''}
+                                  </span>
+                                ) : null}
+                              </div>
+                              <span className="font-mono font-semibold text-[#26352D] shrink-0">
+                                {curLabel} {Number(c.importe || 0).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </span>
+                            </div>
+                            <div className="px-3 py-2 flex items-center justify-between gap-2">
+                              <span className="text-[#5E6D64] font-medium">Cobrado</span>
+                              <span className="font-mono font-semibold text-[#24875B]">
+                                {curLabel} {Number(c.cobrado || 0).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </span>
+                            </div>
+                            <div className="px-3 py-2.5 flex items-center justify-between gap-2 bg-[#FAFBF8]">
+                              <span className="font-bold text-[#26352D]">Saldo pendiente</span>
+                              <span className={`font-mono font-black text-sm ${c.saldo > 0.005 ? 'text-amber-700' : 'text-[#24875B]'}`}>
+                                {curLabel} {Number(c.saldo || 0).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </span>
+                            </div>
+                          </div>
 
-              {/* Cantidad y Unidad */}
-              <div className="grid grid-cols-2 gap-2">
+                          {/* Error puntual al consultar cobros.estado */}
+                          {detailErr && (
+                            <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-800 flex items-center gap-1.5">
+                              <AlertCircle className="h-3.5 w-3.5 shrink-0 text-red-600" />
+                              <span className="break-words">{detailErr}</span>
+                            </div>
+                          )}
+
+                          {/* Acciones: Registrar cobro + Editar servicio (solo admin) */}
+                          <div className={`flex items-center gap-2 ${canRegisterPayment && effectiveIsAdmin ? 'flex-wrap sm:flex-nowrap' : ''}`}>
+                            {canRegisterPayment && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenCobroModal(c);
+                                }}
+                                className="flex-1 min-h-[42px] px-4 py-2.5 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer shadow-2xs"
+                              >
+                                <HandCoins className="h-4 w-4 shrink-0" />
+                                <span>Registrar cobro</span>
+                              </button>
+                            )}
+                            {effectiveIsAdmin && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenEditJobFromCobro(c);
+                                }}
+                                className={`${canRegisterPayment ? 'px-3.5' : 'w-full px-4'} min-h-[42px] py-2.5 rounded-xl bg-white hover:bg-[#F2F5F3] text-[#26352D] border border-[#D4DDD6] text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer`}
+                              >
+                                <Edit3 className="h-3.5 w-3.5 shrink-0" />
+                                <span>Editar servicio</span>
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Historial de pagos: muestra moneda original, TC y equivalente USD */}
+                          {c.pagos && c.pagos.length > 0 && (
+                            <div className="rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
+                              <div className="px-3 py-2 bg-[#F8FAF8] border-b border-[#EFF2EF] flex items-center justify-between">
+                                <span className="text-[11px] font-bold text-[#26352D]">
+                                  Historial de pagos ({c.pagos.length})
+                                </span>
+                                {isLoadingDetail && (
+                                  <RefreshCw className="h-3.5 w-3.5 animate-spin text-[#24875B]" />
+                                )}
+                              </div>
+                              <div className="divide-y divide-[#EFF2EF]">
+                                {c.pagos.map((p) => {
+                                  const isBobPay = p.monedaCobro === 'BOB';
+                                  const usdAmt = Number(p.importeUsd ?? p.importe ?? 0);
+                                  const origAmt = Number(p.importeOriginal ?? usdAmt);
+                                  return (
+                                    <div
+                                      key={p.id}
+                                      className="px-3 py-2.5 flex items-start justify-between gap-2"
+                                    >
+                                      <div className="min-w-0 space-y-0.5">
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                          <span className="text-xs font-semibold text-[#26352D]">
+                                            {formatDateDDMMAAAA(p.fecha)}
+                                          </span>
+                                          <span
+                                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md ${
+                                              isBobPay
+                                                ? 'bg-sky-50 text-sky-800 border border-sky-200'
+                                                : 'bg-[#EAF5EE] text-[#1D5C3F] border border-[#BFE0CD]'
+                                            }`}
+                                          >
+                                            {isBobPay ? 'Bs' : 'USD'}
+                                          </span>
+                                        </div>
+                                        {isBobPay ? (
+                                          <p className="text-[11px] text-[#5E6D64] font-mono tabular-nums">
+                                            Bs {origAmt.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            {p.tc && p.tc > 0 ? ` · TC ${p.tc}` : ''}
+                                          </p>
+                                        ) : p.tc && p.tc > 0 ? (
+                                          <p className="text-[11px] text-[#7A8780] font-mono tabular-nums">
+                                            TC ref.: {p.tc}
+                                          </p>
+                                        ) : null}
+                                        {p.observacion && (
+                                          <p className="text-[11px] text-[#5E6D64] italic break-words">
+                                            {p.observacion}
+                                          </p>
+                                        )}
+                                      </div>
+                                      <span className="font-mono font-bold text-[#24875B] shrink-0 tabular-nums">
+                                        +USD{' '}
+                                        {usdAmt.toLocaleString('es-BO', {
+                                          minimumFractionDigits: 2,
+                                          maximumFractionDigits: 2,
+                                        })}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Sección colapsable "Más detalles" */}
+                          <details className="group rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
+                            <summary className="px-3 py-2.5 bg-[#F8FAF8] text-xs font-bold text-[#26352D] cursor-pointer flex items-center justify-between select-none">
+                              <span>Más detalles</span>
+                              <ChevronDown className="h-3.5 w-3.5 text-[#7A8780] group-open:rotate-180 transition" />
+                            </summary>
+                            <div className="p-3 space-y-1.5 divide-y divide-[#EFF2EF] text-xs">
+                              <div className="pt-1.5 flex items-center justify-between gap-2">
+                                <span className="text-[#5E6D64]">Máquina / Labor</span>
+                                <span className="font-semibold text-[#26352D] text-right">
+                                  {c.maquinariaNombre}
+                                  {c.trabajoNombre && c.trabajoNombre !== c.maquinariaNombre
+                                    ? ` · ${formatConcept(c.trabajoNombre)}`
+                                    : ''}
+                                </span>
+                              </div>
+                              <div className="pt-1.5 flex items-center justify-between gap-2">
+                                <span className="text-[#5E6D64]">Campaña</span>
+                                <span className="font-semibold text-[#26352D]">{c.campanaNombre}</span>
+                              </div>
+                              {c.cantidad && (c.precioUnitario || c.tarifa) ? (
+                                <div className="pt-1.5 flex items-center justify-between gap-2">
+                                  <span className="text-[#5E6D64]">Trabajo / Tarifa</span>
+                                  <span className="font-semibold text-[#26352D] tabular-nums">
+                                    {c.cantidad} {unitShort} ×{' '}
+                                    {(c.monedaOriginalServicio || c.moneda) === 'USD' ? 'USD' : 'Bs'}{' '}
+                                    {Number(c.precioUnitario ?? c.tarifa ?? 0).toLocaleString('es-BO', {
+                                      minimumFractionDigits: 2,
+                                      maximumFractionDigits: 2,
+                                    })}
+                                  </span>
+                                </div>
+                              ) : null}
+                              {getCleanObservation(c.observacion, c.trabajoNombre || '') && (
+                                <div className="pt-1.5 flex items-center justify-between gap-2">
+                                  <span className="text-[#5E6D64]">Observación</span>
+                                  <span className="italic text-[#26352D] text-right">
+                                    {getCleanObservation(c.observacion, c.trabajoNombre || '')}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          </details>
+                        </div>
+                      }
+                    />
+                  );
+                })}
+              </CompactList>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* ============================================================ */}
+      {/* FORMULARIO UNIFICADO: REGISTRAR SERVICIO                     */}
+      {/* ============================================================ */}
+      {(currentScreen === 'servicio' ||
+        currentScreen === 'ingreso_opciones' ||
+        currentScreen === 'servicio_otros' ||
+        currentScreen === 'trabajo_propiedad') && (() => {
+        const compatibleImplements = getCompatibleImplementsForMachine(selectedMachineId);
+        const selectedMachineObj = machines.find((m) => m.id === selectedMachineId);
+        return (
+          <div className="space-y-3">
+            <div className="rounded-2xl border border-[#E2E7E3] bg-white p-4 shadow-xs">
+              <form
+                onSubmit={(e) => handleJobSubmit(e, serviceDestino)}
+                className="space-y-3"
+              >
+                {/* 1. Fecha */}
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Cantidad trabajada <span className="text-red-500">*</span>
+                  <label className={FORM_LABEL_CLASS}>
+                    Fecha <span className="text-[#C44545]">*</span>
                   </label>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="any"
-                    required
-                    min="0.1"
-                    placeholder="0.0"
-                    value={cantidad}
-                    onChange={(e) => setCantidad(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[44px]"
-                  />
+                  <div className="relative">
+                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 h-[17px] w-[17px] text-[#64746B] pointer-events-none" />
+                    <input
+                      type="date"
+                      required
+                      value={fecha}
+                      onChange={(e) => setFecha(e.target.value)}
+                      className={`${FORM_INPUT_CLASS} pl-9`}
+                    />
+                  </div>
                 </div>
+
+                {/* 2. Máquina (obligatoria) */}
+                <VisualMachinePicker
+                  label="Máquina"
+                  machines={activeMachines}
+                  selectedMachineId={selectedMachineId}
+                  onSelectMachine={(m) => handleMachineChange(m.id)}
+                  required
+                />
+
+                {/* 3. Implemento agrícola (opcional, filtrado por tipo de máquina) */}
+                {selectedMachineId && (
+                  <VisualJobTypePicker
+                    label="Implemento agrícola"
+                    optionalText="(opcional)"
+                    jobTypes={compatibleImplements}
+                    selectedJobTypeId={selectedJobTypeId}
+                    onSelectJobType={(j) => handleImplementSelect(j)}
+                    allowNone
+                    noneLabel={
+                      selectedMachineObj
+                        ? `Sin implemento (tarifa de ${selectedMachineObj.nombre})`
+                        : 'Sin implemento'
+                    }
+                  />
+                )}
+
+                {/* 4. Destino (Propiedad propia / Cliente externo) */}
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Unidad</label>
-                  <select
+                  <label className={FORM_LABEL_CLASS}>
+                    Destino <span className="text-[#C44545]">*</span>
+                  </label>
+                  <div className="flex p-1 bg-[#F2F5F3] rounded-xl gap-1 border border-[#E2E7E3]">
+                    <button
+                      type="button"
+                      onClick={() => setServiceDestino('propiedad')}
+                      className={`flex-1 h-[36px] text-xs font-semibold rounded-lg transition cursor-pointer ${
+                        serviceDestino === 'propiedad'
+                          ? 'bg-white text-[#24875B] shadow-xs border border-[#BFE0CD]'
+                          : 'text-[#5E6D64] hover:text-[#26352D]'
+                      }`}
+                    >
+                      Propiedad propia
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setServiceDestino('tercero')}
+                      className={`flex-1 h-[36px] text-xs font-semibold rounded-lg transition cursor-pointer ${
+                        serviceDestino === 'tercero'
+                          ? 'bg-white text-[#26352D] shadow-xs border border-[#D4DDD6]'
+                          : 'text-[#5E6D64] hover:text-[#26352D]'
+                      }`}
+                    >
+                      Cliente externo
+                    </button>
+                  </div>
+                </div>
+
+                {/* 5. Lote (si Propiedad) o Cliente (si Externo) */}
+                {serviceDestino === 'propiedad' ? (
+                  <VisualLotPicker
+                    lots={lots}
+                    selectedLotId={selectedLotId}
+                    onSelect={(id) => setSelectedLotId(id)}
+                    label="Lote"
+                    required
+                  />
+                ) : (
+                  <div>
+                    <label className={FORM_LABEL_CLASS}>
+                      Cliente <span className="text-[#7A8780] font-normal">(opcional)</span>
+                    </label>
+                    <div className="relative">
+                      <User className="absolute left-3 top-1/2 -translate-y-1/2 h-[17px] w-[17px] text-[#64746B] pointer-events-none" />
+                      <input
+                        type="text"
+                        value={cliente}
+                        onChange={(e) => setCliente(e.target.value)}
+                        placeholder="Nombre del cliente"
+                        className={`${FORM_INPUT_CLASS} pl-9`}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* 6. Cantidad y Unidad */}
+                <div className="grid grid-cols-2 gap-2.5 items-end">
+                  <div>
+                    <label className={FORM_LABEL_CLASS}>
+                      Cantidad <span className="text-[#C44545]">*</span>
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      required
+                      min="0.1"
+                      placeholder="0.0"
+                      value={cantidad}
+                      onChange={(e) => setCantidad(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                      className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
+                    />
+                  </div>
+                  <AppSelect
+                    label="Unidad"
+                    required
+                    icon={<Wrench className="h-[17px] w-[17px]" />}
                     value={unidad}
                     onChange={(e) => setUnidad(e.target.value as 'hora' | 'hectarea')}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
                   >
                     <option value="hora">Horas</option>
                     <option value="hectarea">Hectáreas</option>
-                  </select>
+                  </AppSelect>
                 </div>
-              </div>
 
-              {/* Tarifa y Moneda */}
-              <div className="grid grid-cols-2 gap-2">
+                {/* 7. Tarifa y Moneda */}
+                <div className="grid grid-cols-2 gap-2.5 items-end">
+                  <div>
+                    <label className={FORM_LABEL_CLASS}>
+                      Tarifa por {unidad === 'hectarea' ? 'ha' : 'hora'}{' '}
+                      <span className="text-[#C44545]">*</span>
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      required
+                      min="0"
+                      placeholder="0.00"
+                      value={tarifa}
+                      onChange={(e) => setTarifa(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                      className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
+                    />
+                  </div>
+                  <CurrencySelect
+                    label="Moneda"
+                    required
+                    value={jobMoneda}
+                    onChange={(curr) => setJobMoneda(curr)}
+                  />
+                </div>
+
+                {/* Tipo de cambio editable */}
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Tarifa por {unidad}
+                  <label className={FORM_LABEL_CLASS}>
+                    Tipo de cambio (Bs/USD) <span className="text-[#C44545]">*</span>
                   </label>
                   <input
                     type="number"
                     inputMode="decimal"
                     step="any"
                     required
-                    min="0"
-                    value={tarifa}
-                    onChange={(e) => setTarifa(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[44px]"
+                    min="0.01"
+                    placeholder="6.96"
+                    value={jobTc}
+                    onChange={(e) => setJobTc(e.target.value)}
+                    className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Moneda</label>
-                  <select
-                    value={jobMoneda}
-                    onChange={(e) => setJobMoneda(e.target.value as Currency)}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                  >
-                    <option value="BOB">BOB (Bs)</option>
-                    <option value="USD">USD ($)</option>
-                  </select>
-                </div>
-              </div>
 
-              {/* Total Calculado */}
-              <div className="bg-emerald-50/80 p-3.5 rounded-xl border border-emerald-200/70 flex items-center justify-between">
-                <div>
-                  <span className="text-[11px] text-emerald-800 block uppercase font-bold">
-                    Ingreso para Maquinarias
-                  </span>
-                  <span className="text-[10px] text-stone-500">
-                    {cantidad || 0} {unidad}s &times; {jobMoneda} {tarifa || 0}
+                {/* 8. Importe total */}
+                <div className="bg-[#EAF5EE] px-3.5 py-2.5 rounded-xl border border-[#BFE0CD] flex items-center justify-between">
+                  <span className="text-[13px] font-bold text-[#175B3D]">Importe total</span>
+                  <span className="text-base font-extrabold text-[#175B3D] font-mono tabular-nums">
+                    {jobMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                    {calculatedTotal.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </span>
                 </div>
-                <span className="text-base sm:text-lg font-black text-emerald-950 font-mono">
-                  {formatMoney(calculatedTotal, jobMoneda)}
-                </span>
-              </div>
 
-              {/* Observación */}
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Observaciones <span className="text-stone-400 font-normal">(Opcional)</span>
-                </label>
-                <textarea
-                  rows={2}
-                  value={observacion}
-                  onChange={(e) => setObservacion(e.target.value)}
-                  placeholder="Detalles del trabajo, operador..."
-                  className="w-full text-xs p-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none"
-                />
-              </div>
+                {/* 9. Observación (opcional) */}
+                <div>
+                  <label className={FORM_LABEL_CLASS}>
+                    Observación <span className="text-[#7A8780] font-normal">(opcional)</span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={observacion}
+                    onChange={(e) => setObservacion(e.target.value)}
+                    placeholder="Notas del servicio..."
+                    className={FORM_TEXTAREA_CLASS}
+                  />
+                </div>
 
-              {/* Botón Guardar */}
-              <button
-                type="submit"
-                disabled={saving}
-                className="w-full flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold py-3 text-xs shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[46px]"
-              >
-                <CirclePlus className="h-4 w-4" />
-                <span>{saving ? 'Guardando...' : 'Guardar Servicio para otros'}</span>
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ============================================================ */}
-      {/* FORMULARIO: TRABAJO PROPIEDAD                                */}
-      {/* ============================================================ */}
-      {currentScreen === 'trabajo_propiedad' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-bold text-amber-900 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
-              Trabajo Propiedad
-            </span>
-          </div>
-
-          <div className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-5 shadow-xs">
-            <div className="pb-3 border-b border-stone-100 mb-4">
-              <h2 className="text-sm font-bold text-stone-900 flex items-center gap-2">
-                <LandPlot className="h-4 w-4 text-emerald-700" />
-                <span>Registrar Trabajo en Propiedad</span>
-              </h2>
-              <p className="text-xs text-stone-500 mt-0.5">
-                Genera un único registro contable: + Ingreso para Maquinarias y − Gasto para el Lote.
-              </p>
+                {/* Botón Guardar */}
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#24875B] hover:bg-[#1D704B] active:bg-[#175B3D] text-white font-bold h-[42px] text-sm shadow-xs transition active:scale-[0.99] disabled:opacity-50 cursor-pointer"
+                >
+                  <Save className="h-4 w-4 shrink-0" />
+                  <span>{saving ? 'Guardando...' : 'Guardar servicio'}</span>
+                </button>
+              </form>
             </div>
-
-            <form onSubmit={(e) => handleJobSubmit(e, 'propiedad')} className="space-y-4">
-              {/* Lote (Obligatorio) con selector visual estilo iOS */}
-              <VisualLotPicker
-                lots={lots}
-                selectedLotId={selectedLotId}
-                onSelect={(id) => setSelectedLotId(id)}
-                label="Lote de Destino"
-                required
-              />
-
-              {/* Maquinaria con selector visual e icono */}
-              <VisualMachinePicker
-                label="Maquinaria *"
-                machines={machines}
-                selectedMachineId={selectedMachineId}
-                onSelectMachine={(m) => handleMachineChange(m.id)}
-                required
-              />
-
-              {/* Tipo de Trabajo / Implemento con selector visual */}
-              {selectedMachineId && (
-                <div>
-                  {getAvailableJobsForMachine(selectedMachineId).length > 0 ? (
-                    <div className="space-y-1.5">
-                      <VisualJobTypePicker
-                        label="Tipo de Trabajo / Labor *"
-                        jobTypes={getAvailableJobsForMachine(selectedMachineId)}
-                        selectedJobTypeId={selectedJobTypeId}
-                        onSelectJobType={(j) => handleJobTypeChange(j.id)}
-                        required
-                      />
-                      <p className="text-[11px] text-emerald-800 font-medium">
-                        Tarifa, moneda y unidad asignadas automáticamente. Puedes modificar la tarifa si se pactó un precio diferente.
-                      </p>
-                    </div>
-                  ) : (
-                    <div>
-                      <label className="block text-xs font-semibold text-stone-700 mb-1">
-                        Tipo de Trabajo / Labor <span className="text-red-500">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Ej. Siembra, Arada, Rastra..."
-                        value={selectedJobNombre}
-                        onChange={(e) => setSelectedJobNombre(e.target.value)}
-                        className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Fecha */}
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Fecha <span className="text-red-500">*</span>
-                </label>
-                <div className="relative">
-                  <Calendar className="absolute left-3 top-3 h-4 w-4 text-stone-400" />
-                  <input
-                    type="date"
-                    required
-                    value={fecha}
-                    onChange={(e) => setFecha(e.target.value)}
-                    className="w-full text-xs pl-9 pr-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                  />
-                </div>
-              </div>
-
-              {/* Cantidad y Unidad */}
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Cantidad trabajada <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="any"
-                    required
-                    min="0.1"
-                    placeholder="0.0"
-                    value={cantidad}
-                    onChange={(e) => setCantidad(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[44px]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Unidad</label>
-                  <select
-                    value={unidad}
-                    onChange={(e) => setUnidad(e.target.value as 'hora' | 'hectarea')}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                  >
-                    <option value="hora">Horas</option>
-                    <option value="hectarea">Hectáreas</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Tarifa y Moneda */}
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Tarifa por {unidad}
-                  </label>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="any"
-                    required
-                    min="0"
-                    value={tarifa}
-                    onChange={(e) => setTarifa(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-semibold min-h-[44px]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Moneda</label>
-                  <select
-                    value={jobMoneda}
-                    onChange={(e) => setJobMoneda(e.target.value as Currency)}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                  >
-                    <option value="BOB">BOB (Bs)</option>
-                    <option value="USD">USD ($)</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Explicación de Movimiento Vinculado */}
-              <div className="bg-amber-50/70 p-3.5 rounded-xl border border-amber-200/60 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-bold text-amber-900 uppercase">
-                    Impacto Contable Automático
-                  </span>
-                  <span className="text-base sm:text-lg font-black text-amber-950 font-mono">
-                    {formatMoney(calculatedTotal, jobMoneda)}
-                  </span>
-                </div>
-                <div className="text-[11px] text-stone-600 space-y-1">
-                  <div className="flex items-center gap-1.5 text-emerald-800 font-semibold">
-                    <span>&bull; + {formatMoney(calculatedTotal, jobMoneda)}</span>
-                    <span className="text-stone-500 font-normal">como ingreso para Maquinarias</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-rose-800 font-semibold">
-                    <span>&bull; &minus; {formatMoney(calculatedTotal, jobMoneda)}</span>
-                    <span className="text-stone-500 font-normal">como gasto para el Lote seleccionado</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Observación */}
-              <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Observaciones <span className="text-stone-400 font-normal">(Opcional)</span>
-                </label>
-                <textarea
-                  rows={2}
-                  value={observacion}
-                  onChange={(e) => setObservacion(e.target.value)}
-                  placeholder="Detalles de la labor (arado, siembra, fumigación)..."
-                  className="w-full text-xs p-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:outline-none"
-                />
-              </div>
-
-              {/* Botón Guardar */}
-              <button
-                type="submit"
-                disabled={saving}
-                className="w-full flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold py-3 text-xs shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[46px]"
-              >
-                <CirclePlus className="h-4 w-4" />
-                <span>{saving ? 'Guardando...' : 'Guardar Trabajo en Propiedad'}</span>
-              </button>
-            </form>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ============================================================ */}
       {/* FORMULARIO: GASTO DE MAQUINARIA                              */}
       {/* ============================================================ */}
       {currentScreen === 'gasto' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-bold text-rose-800 bg-rose-50 border border-rose-200 px-2.5 py-1 rounded-lg">
-              Gasto de Maquinaria
-            </span>
-          </div>
-
-          <div className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-5 shadow-xs">
-            <div className="pb-3 border-b border-stone-100 mb-4">
-              <h2 className="text-sm font-bold text-stone-900 flex items-center gap-2">
-                <CircleMinus className="h-4 w-4 text-rose-700" />
-                <span>Registrar Gasto de Maquinaria</span>
-              </h2>
-              <p className="text-xs text-stone-500 mt-0.5">
-                Combustible, mantenimiento, reparaciones, repuestos, sueldos u otros insumos.
-              </p>
-            </div>
-
-            <form onSubmit={handleExpenseSubmit} className="space-y-4">
-              {/* Maquinaria Asignada con selector visual */}
+          <div className="rounded-2xl border border-[#E2E7E3] bg-white p-4 shadow-xs">
+            <form onSubmit={handleExpenseSubmit} className="space-y-3">
+              {/* Maquinaria Asignada */}
               <VisualMachinePicker
-                label="Maquinaria Asignada (Opcional si es general)"
+                label="Máquina"
+                optionalText="(opcional)"
                 machines={machines}
                 selectedMachineId={expMachineId}
                 onSelectMachine={(m) => setExpMachineId(m.id)}
                 allowNone
-                noneLabel="-- Gasto General / Sin asignar a equipo --"
+                noneLabel="Gasto general (sin máquina)"
               />
 
-              {/* Rubro / Concepto de Gasto con selector visual e iconos */}
+              {/* Concepto de Gasto */}
               <VisualExpenseItemPicker
-                label="Rubro / Concepto de Gasto *"
+                label="Concepto de gasto"
                 items={machineryExpenseItems}
                 selectedItemName={expItemGasto}
                 onSelectItem={(item) => {
@@ -1356,26 +2263,26 @@ export const MachineryView: React.FC<Props> = ({
 
               {/* Fecha */}
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Fecha <span className="text-red-500">*</span>
+                <label className={FORM_LABEL_CLASS}>
+                  Fecha <span className="text-[#C44545]">*</span>
                 </label>
                 <div className="relative">
-                  <Calendar className="absolute left-3 top-3 h-4 w-4 text-stone-400" />
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 h-[17px] w-[17px] text-[#64746B] pointer-events-none" />
                   <input
                     type="date"
                     required
                     value={expFecha}
                     onChange={(e) => setExpFecha(e.target.value)}
-                    className="w-full text-xs pl-9 pr-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none min-h-[44px]"
+                    className={`${FORM_INPUT_CLASS} pl-9`}
                   />
                 </div>
               </div>
 
               {/* Cantidad y Unidad */}
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 gap-2.5 items-end">
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Cantidad <span className="text-red-500">*</span>
+                  <label className={FORM_LABEL_CLASS}>
+                    Cantidad <span className="text-[#C44545]">*</span>
                   </label>
                   <input
                     type="number"
@@ -1386,26 +2293,26 @@ export const MachineryView: React.FC<Props> = ({
                     placeholder="1"
                     value={expCantidad}
                     onChange={(e) => setExpCantidad(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none min-h-[44px]"
+                    className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Unidad</label>
+                  <label className={FORM_LABEL_CLASS}>Unidad</label>
                   <input
                     type="text"
                     value={expUnidad}
                     onChange={(e) => setExpUnidad(e.target.value)}
-                    placeholder="litros, piezas, horas..."
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none min-h-[44px]"
+                    placeholder="litros, piezas, horas"
+                    className={FORM_INPUT_CLASS}
                   />
                 </div>
               </div>
 
               {/* Precio y Moneda */}
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 gap-2.5 items-end">
                 <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Precio Unitario <span className="text-red-500">*</span>
+                  <label className={FORM_LABEL_CLASS}>
+                    Precio unitario <span className="text-[#C44545]">*</span>
                   </label>
                   <input
                     type="number"
@@ -1416,48 +2323,55 @@ export const MachineryView: React.FC<Props> = ({
                     placeholder="0.00"
                     value={expPrecio}
                     onChange={(e) => setExpPrecio(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none font-semibold min-h-[44px]"
+                    className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">Moneda</label>
-                  <select
-                    value={expMoneda}
-                    onChange={(e) => setExpMoneda(e.target.value as Currency)}
-                    className="w-full text-xs px-3 py-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none min-h-[44px]"
-                  >
-                    <option value="BOB">BOB (Bs)</option>
-                    <option value="USD">USD ($)</option>
-                  </select>
-                </div>
+                <CurrencySelect
+                  label="Moneda"
+                  required
+                  value={expMoneda}
+                  onChange={(curr) => setExpMoneda(curr)}
+                />
               </div>
 
-              {/* Total Calculado */}
-              <div className="bg-rose-50/80 p-3.5 rounded-xl border border-rose-200/70 flex items-center justify-between">
-                <div>
-                  <span className="text-[11px] text-rose-800 block uppercase font-bold">
-                    Total Gasto
-                  </span>
-                  <span className="text-[10px] text-stone-500">
-                    {expCantidad || 1} &times; {expMoneda} {expPrecio || 0}
-                  </span>
-                </div>
-                <span className="text-base sm:text-lg font-black text-rose-950 font-mono">
-                  {formatMoney(expCalculatedTotal, expMoneda)}
+              {/* Tipo de cambio editable */}
+              <div>
+                <label className={FORM_LABEL_CLASS}>
+                  Tipo de cambio (Bs/USD) <span className="text-[#C44545]">*</span>
+                </label>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="any"
+                  required
+                  min="0.01"
+                  placeholder="6.96"
+                  value={expTc}
+                  onChange={(e) => setExpTc(e.target.value)}
+                  className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
+                />
+              </div>
+
+              {/* Importe total */}
+              <div className="bg-[#FCECEC] px-3.5 py-2.5 rounded-xl border border-[#F2C6C6] flex items-center justify-between">
+                <span className="text-[13px] font-bold text-[#9F2D2D]">Importe total</span>
+                <span className="text-base font-extrabold text-[#9F2D2D] font-mono tabular-nums">
+                  {expMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                  {expCalculatedTotal.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
 
               {/* Observación */}
               <div>
-                <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  Observaciones <span className="text-stone-400 font-normal">(Opcional)</span>
+                <label className={FORM_LABEL_CLASS}>
+                  Observación <span className="text-[#7A8780] font-normal">(opcional)</span>
                 </label>
                 <textarea
                   rows={2}
                   value={expObservacion}
                   onChange={(e) => setExpObservacion(e.target.value)}
-                  placeholder="Factura, proveedor, detalle del repuesto..."
-                  className="w-full text-xs p-2.5 rounded-xl border border-stone-300 bg-stone-50 focus:bg-white focus:border-rose-600 focus:outline-none"
+                  placeholder="Factura, proveedor, detalle..."
+                  className={FORM_TEXTAREA_CLASS}
                 />
               </div>
 
@@ -1465,76 +2379,70 @@ export const MachineryView: React.FC<Props> = ({
               <button
                 type="submit"
                 disabled={saving}
-                className="w-full flex items-center justify-center gap-2 rounded-xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold py-3 text-xs shadow-xs transition active:scale-95 disabled:opacity-50 cursor-pointer min-h-[46px]"
+                className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#C44545] hover:bg-[#A93838] active:bg-[#8E2D2D] text-white font-bold h-[42px] text-sm shadow-xs transition active:scale-[0.99] disabled:opacity-50 cursor-pointer"
               >
-                <CircleMinus className="h-4 w-4" />
-                <span>{saving ? 'Guardando...' : 'Guardar Gasto de Maquinaria'}</span>
+                <Save className="h-4 w-4 shrink-0" />
+                <span>{saving ? 'Guardando...' : 'Guardar gasto'}</span>
               </button>
             </form>
           </div>
 
           {/* Lista de gastos recientes */}
-          <div className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-5 shadow-xs space-y-3">
-            <h3 className="text-xs font-bold text-stone-900 uppercase tracking-wider">
-              Gastos de Maquinarias ({machineryExpenses.length})
-            </h3>
+          <div className="space-y-2.5">
+            <ListToolbar
+              title="Gastos de Maquinarias"
+              countLabel={`${machineryExpenses.length} reg.`}
+            />
 
-            <div className="space-y-2">
+            <CompactList
+              isEmpty={machineryExpenses.length === 0}
+              emptyMessage="No hay gastos de maquinaria registrados en esta campaña."
+            >
               {machineryExpenses.map((exp) => (
-                <div
+                <CompactListRow
                   key={exp.id}
-                  className="rounded-xl border border-stone-200 bg-stone-50/70 p-3 flex items-center justify-between gap-3 text-xs"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-9 h-9 rounded-xl bg-white border border-stone-200/80 flex items-center justify-center shrink-0 shadow-2xs">
-                      <VisualIcon name={exp.icono || exp.itemGasto || 'repuestos'} size="sm" />
+                  icon={
+                    <div className="w-8 h-8 rounded-lg bg-[#FCECEC] border border-[#F2C6C6]/60 flex items-center justify-center">
+                      <VisualIcon name={exp.icono || exp.itemGasto || 'repuestos'} size="xs" />
                     </div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-bold text-stone-900">{exp.itemGasto}</span>
-                        <span className="text-[11px] text-stone-500 font-normal">({exp.fecha})</span>
-                      </div>
-                      <p className="text-[11px] text-stone-600 mt-0.5 truncate">
-                        {exp.maquinariaNombre ? `Equipo: ${exp.maquinariaNombre}` : 'Gasto general'} &bull; {exp.cantidad} {exp.unidad}
-                      </p>
-                      {exp.observacion && (
-                        <p className="text-[11px] text-stone-500 italic mt-0.5 break-words">
-                          {exp.observacion}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span className="font-mono font-bold text-rose-800 text-sm">
-                      {formatMoney(exp.total, exp.moneda)}
+                  }
+                  title={exp.itemGasto}
+                  subtitle={
+                    <span>
+                      {formatDateDDMMAAAA(exp.fecha)} · {exp.maquinariaNombre || 'Gasto general'} · {exp.cantidad} {exp.unidad}
+                      {exp.observacion ? ` · ${exp.observacion}` : ''}
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => handleOpenEditExpense(exp)}
-                      className="p-1.5 text-stone-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition cursor-pointer"
-                      title="Editar gasto"
-                    >
-                      <Edit3 className="h-4 w-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteExp(exp.id)}
-                      className="p-1.5 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                      title="Eliminar gasto"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
+                  }
+                  rightPrimary={
+                    <span className="text-[#C44545] font-mono">
+                      - {formatMoney(exp.total, exp.moneda)}
+                    </span>
+                  }
+                  rightActions={
+                    effectiveIsAdmin ? (
+                      <div className="flex items-center gap-0.5 pl-1">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenEditExpense(exp)}
+                          className="p-1.5 text-[#7A8780] hover:text-[#26352D] hover:bg-[#EFF2EF] rounded-lg transition cursor-pointer"
+                          title="Editar gasto"
+                        >
+                          <Edit3 className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRequestDeleteExpense(exp)}
+                          className="p-1.5 text-[#7A8780] hover:text-[#C44545] hover:bg-[#FCECEC] rounded-lg transition cursor-pointer"
+                          title="Eliminar gasto"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ) : undefined
+                  }
+                />
               ))}
-
-              {machineryExpenses.length === 0 && (
-                <p className="text-xs text-stone-400 text-center py-4">
-                  No hay gastos de maquinaria registrados en esta campaña.
-                </p>
-              )}
-            </div>
+            </CompactList>
           </div>
         </div>
       )}
@@ -1543,776 +2451,982 @@ export const MachineryView: React.FC<Props> = ({
       {/* CONSULTA: MOVIMIENTOS (SERVICIOS Y GASTOS)                   */}
       {/* ============================================================ */}
       {currentScreen === 'historial' && (
-        <div className="space-y-4">
-          <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200/90 shadow-xs space-y-3.5">
-            {/* Header info */}
-            <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-3">
-              <div>
-                <h3 className="text-base sm:text-lg font-bold text-slate-900">
-                  Movimientos
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Labores en propiedad, servicios y gastos ({filteredMachineryMovements.length} registros)
-                </p>
-              </div>
-              <span className="text-xs font-bold text-slate-700 bg-slate-100 px-3 py-1.5 rounded-xl shrink-0">
-                {filteredMachineryMovements.length} registros
-              </span>
-            </div>
+        <div className="space-y-3">
+          <ListToolbar
+            title="Historial"
+            countLabel={`${filteredMachineryMovements.length} reg.`}
+            searchValue={searchTerm}
+            onSearchChange={setSearchTerm}
+            searchPlaceholder="Buscar por labor, cliente, lote o máquina..."
+            filters={
+              <CompactFilter
+                value={historialFilter}
+                onChange={(val) => {
+                  setHistorialFilter(val as 'todos' | 'ingresos' | 'gastos');
+                  setServiciosSubFilter('todos');
+                }}
+                accent={
+                  historialFilter === 'ingresos'
+                    ? 'green'
+                    : historialFilter === 'gastos'
+                    ? 'red'
+                    : 'neutral'
+                }
+                ariaLabel="Filtrar movimientos por tipo"
+                options={[
+                  { value: 'todos', label: 'Todos' },
+                  { value: 'ingresos', label: 'Ingresos' },
+                  { value: 'gastos', label: 'Gastos' },
+                ]}
+              />
+            }
+          />
 
-            {/* Filtros: Búsqueda y Dos Grupos Diferenciados iOS */}
-            <div className="space-y-3">
-              <div className="relative">
-                <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Buscar por equipo, concepto, cliente o lote..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full text-xs pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[44px]"
-                />
-              </div>
+          <CompactList
+            isEmpty={filteredMachineryMovements.length === 0}
+            emptyMessage="No hay movimientos registrados."
+          >
+            {filteredMachineryMovements.map((m) => {
+              const isExpanded = expandedMovementId === m.id;
+              const isService = m.kind === 'servicio';
 
-              {/* PRIMER GRUPO: TIPO DE MOVIMIENTO */}
-              <div className="space-y-1.5">
-                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block px-0.5">
-                  Tipo de movimiento
-                </span>
-                <div className="grid grid-cols-3 gap-2 w-full">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setHistorialFilter('todos');
-                      setServiciosSubFilter('todos');
-                    }}
-                    className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl text-xs transition cursor-pointer min-h-[42px] select-none ${
-                      historialFilter === 'todos'
-                        ? 'bg-emerald-50 border-2 border-[#367C2B] text-[#367C2B] font-bold shadow-2xs'
-                        : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
-                    }`}
-                  >
-                    <ClipboardList className={`h-4 w-4 shrink-0 ${historialFilter === 'todos' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
-                    <span className="truncate">Todos ({allMachineryMovements.length})</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setHistorialFilter('ingresos');
-                      setServiciosSubFilter('todos');
-                    }}
-                    className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl text-xs transition cursor-pointer min-h-[42px] select-none ${
-                      historialFilter === 'ingresos' || (historialFilter as string) === 'servicios'
-                        ? 'bg-emerald-50 border-2 border-[#367C2B] text-[#367C2B] font-bold shadow-2xs'
-                        : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
-                    }`}
-                  >
-                    <Tractor className={`h-4 w-4 shrink-0 ${historialFilter === 'ingresos' || (historialFilter as string) === 'servicios' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
-                    <span className="truncate">Ingresos ({jobs.length})</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setHistorialFilter('gastos');
-                      setServiciosSubFilter('todos');
-                    }}
-                    className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl text-xs transition cursor-pointer min-h-[42px] select-none ${
-                      historialFilter === 'gastos'
-                        ? 'bg-emerald-50 border-2 border-[#367C2B] text-[#367C2B] font-bold shadow-2xs'
-                        : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
-                    }`}
-                  >
-                    <Receipt className={`h-4 w-4 shrink-0 ${historialFilter === 'gastos' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
-                    <span className="truncate">Gastos ({machineryExpenses.length})</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* SEGUNDO GRUPO: ORIGEN DEL INGRESO (Sólo cuando Tipo es Ingresos) */}
-              {(historialFilter === 'ingresos' || (historialFilter as string) === 'servicios') && (
-                <div className="pt-2.5 border-t border-slate-100 space-y-1.5 animate-in fade-in duration-150">
-                  <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block px-0.5">
-                    Origen del ingreso
-                  </span>
-                  <div className="grid grid-cols-3 gap-2 w-full">
-                    <button
-                      type="button"
-                      onClick={() => setServiciosSubFilter('todos')}
-                      className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl text-xs transition cursor-pointer min-h-[42px] select-none ${
-                        serviciosSubFilter === 'todos'
-                          ? 'bg-emerald-50 border-2 border-[#367C2B] text-[#367C2B] font-bold shadow-2xs'
-                          : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
+              return (
+                <CompactListRow
+                  key={`${m.kind}-${m.id}`}
+                  icon={
+                    <div
+                      className={`w-8 h-8 rounded-lg flex items-center justify-center border ${
+                        isService
+                          ? m.tipoTrabajo === 'propiedad'
+                            ? 'bg-[#EAF5EE] border-[#BFE0CD]/70'
+                            : 'bg-[#EEF4FA] border-[#C9DCF0]/80'
+                          : 'bg-[#FCECEC] border-[#F2C6C6]/70'
                       }`}
                     >
-                      <ClipboardList className={`h-4 w-4 shrink-0 ${serviciosSubFilter === 'todos' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
-                      <span className="truncate">Todos ({jobs.length})</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setServiciosSubFilter('propiedad')}
-                      className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl text-xs transition cursor-pointer min-h-[42px] select-none ${
-                        serviciosSubFilter === 'propiedad'
-                          ? 'bg-emerald-50 border-2 border-[#367C2B] text-[#367C2B] font-bold shadow-2xs'
-                          : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
-                      }`}
-                    >
-                      <LandPlot className={`h-4 w-4 shrink-0 ${serviciosSubFilter === 'propiedad' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
-                      <span className="truncate">Propiedad ({propertyJobs.length})</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setServiciosSubFilter('terceros')}
-                      className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl text-xs transition cursor-pointer min-h-[42px] select-none ${
-                        serviciosSubFilter === 'terceros'
-                          ? 'bg-emerald-50 border-2 border-[#367C2B] text-[#367C2B] font-bold shadow-2xs'
-                          : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
-                      }`}
-                    >
-                      <User className={`h-4 w-4 shrink-0 ${serviciosSubFilter === 'terceros' ? 'text-[#367C2B]' : 'text-slate-500'}`} />
-                      <span className="truncate">Terceros ({externalJobs.length})</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Indicación discreta debajo de los filtros */}
-              <div className="pt-0.5 px-0.5">
-                <span className="text-xs text-slate-500 font-medium">
-                  Mostrando:{' '}
-                  <strong className="text-slate-800 font-bold">
-                    {historialFilter === 'todos' && 'Todos los movimientos'}
-                    {historialFilter === 'gastos' && 'Gastos directos de maquinaria'}
-                    {(historialFilter === 'ingresos' || (historialFilter as string) === 'servicios') && (
-                      <>
-                        Ingresos por trabajos &middot;{' '}
-                        {serviciosSubFilter === 'todos' && 'Todos (Propiedad y Terceros)'}
-                        {serviciosSubFilter === 'propiedad' && 'Trabajos en Propiedad'}
-                        {serviciosSubFilter === 'terceros' && 'Servicios a Terceros'}
-                      </>
-                    )}
-                  </strong>
-                </span>
-              </div>
-            </div>
-
-            {/* Listado Compacto de Movimientos estilo iOS Card */}
-            <div className="space-y-2.5 pt-1">
-              {filteredMachineryMovements.map((m) => {
-                const isExpanded = expandedMovementId === m.id;
-
-                return (
-                  <div
-                    key={`${m.kind}-${m.id}`}
-                    className={`rounded-2xl border transition overflow-hidden ${
-                      isExpanded
-                        ? 'border-slate-300 bg-slate-50/70 shadow-xs'
-                        : 'border-slate-200/90 bg-white hover:border-slate-300 shadow-2xs'
-                    }`}
-                  >
-                    {/* Fila compacta clicable */}
-                    <button
-                      type="button"
-                      onClick={() => setExpandedMovementId(isExpanded ? null : m.id)}
-                      className="w-full p-3 sm:p-3.5 flex items-center justify-between gap-3 text-left transition cursor-pointer select-none"
-                    >
-                      <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <div
-                          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-2xs border ${
-                            m.kind === 'servicio'
-                              ? m.tipoTrabajo === 'propiedad'
-                                ? 'bg-emerald-50 border-emerald-200/80'
-                                : 'bg-blue-50 border-blue-200/80'
-                              : 'bg-rose-50 border-rose-200/80'
-                          }`}
-                        >
-                          <VisualIcon
-                            name={m.icono || (m.kind === 'servicio' ? 'tractor' : 'repuestos')}
-                            size="sm"
-                          />
-                        </div>
-
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <h4 className="text-sm font-bold text-slate-900 leading-snug break-words whitespace-normal">
-                              {m.titulo}
-                            </h4>
-                            <span
-                              className={`text-[10px] font-bold px-2 py-0.5 rounded-md shrink-0 ${
-                                m.kind === 'servicio'
-                                  ? m.tipoTrabajo === 'propiedad'
-                                    ? 'bg-emerald-100 text-emerald-800'
-                                    : 'bg-blue-100 text-blue-800'
-                                  : 'bg-rose-100 text-rose-800'
-                              }`}
-                            >
-                              {m.kind === 'servicio'
-                                ? m.tipoTrabajo === 'propiedad'
-                                  ? 'Ingreso Propiedad'
-                                  : 'Ingreso Terceros'
-                                : 'Gasto Maq.'}
-                            </span>
-                          </div>
-
-                          <p className="text-[11px] text-slate-500 mt-0.5 truncate">
-                            <span className="font-semibold text-slate-600">
-                              {formatDateDDMMAAAA(m.fecha)}
-                            </span>
-                            <span className="mx-1.5 text-slate-300">·</span>
-                            <span className="font-medium text-slate-700">{m.maquinariaNombre}</span>
-                            <span className="mx-1.5 text-slate-300">·</span>
-                            <span
-                              className={
-                                m.tipoTrabajo === 'propiedad'
-                                  ? 'text-emerald-800 font-semibold'
-                                  : 'text-slate-600'
-                              }
-                            >
-                              {m.destinoOCliente}
-                            </span>
-                            {m.cantidadTexto && (
-                              <>
-                                <span className="mx-1.5 text-slate-300">·</span>
-                                <span className="font-semibold text-slate-700">
-                                  {m.cantidadTexto}
-                                </span>
-                              </>
-                            )}
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-2 shrink-0">
-                        <div className="text-right">
-                          <span
-                            className={`text-sm sm:text-base font-bold font-mono block ${
-                              m.kind === 'servicio' ? 'text-emerald-800' : 'text-rose-700'
-                            }`}
-                          >
-                            {m.kind === 'servicio' ? '+ ' : '- '}
-                            {m.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
-                            {m.total.toLocaleString('es-BO', {
-                              minimumFractionDigits: 2,
-                              maximumFractionDigits: 2,
-                            })}
+                      <VisualIcon
+                        name={m.icono || (isService ? 'tractor' : 'repuestos')}
+                        size="xs"
+                      />
+                    </div>
+                  }
+                  title={m.titulo}
+                  subtitle={
+                    <span className="inline-flex items-center gap-1.5 max-w-full truncate">
+                      <span>{formatDateDDMMAAAA(m.fecha)}</span>
+                      <span>·</span>
+                      {m.tipoTrabajo === 'propiedad' ? (
+                        <span className="font-semibold text-[#24875B] truncate">
+                          {m.destinoOCliente}
+                        </span>
+                      ) : (
+                        <span className="truncate">
+                          {m.destinoOCliente || m.maquinariaNombre}
+                          {isService ? ' · Terceros' : ''}
+                        </span>
+                      )}
+                    </span>
+                  }
+                  rightPrimary={
+                    <span className={`font-mono ${isService ? 'text-[#24875B]' : 'text-[#C44545]'}`}>
+                      {isService ? '+ ' : '- '}
+                      {m.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                      {m.total.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </span>
+                  }
+                  isExpanded={isExpanded}
+                  onClick={() => setExpandedMovementId(isExpanded ? null : m.id)}
+                  expandedContent={
+                    <div className="space-y-2 text-xs">
+                      <div className="divide-y divide-[#EFF2EF]">
+                        <div className="py-1.5 flex items-center justify-between gap-2">
+                          <span className="text-[#5E6D64] font-medium">Maquinaria</span>
+                          <span className="font-semibold text-[#26352D] text-right">
+                            {m.maquinariaNombre || '—'}
                           </span>
                         </div>
-                        <div className="text-slate-400">
-                          {isExpanded ? (
-                            <ChevronUp className="h-4 w-4" />
-                          ) : (
-                            <ChevronDown className="h-4 w-4" />
-                          )}
-                        </div>
-                      </div>
-                    </button>
-
-                    {/* Detalle desplegable con tarifa, observaciones y acciones */}
-                    {isExpanded && (
-                      <div className="px-3 pb-3 pt-1 border-t border-slate-100 space-y-2.5 animate-fadeIn">
-                        <div className="grid grid-cols-2 gap-2 text-xs bg-white p-2.5 rounded-xl border border-slate-200/70">
-                          <div>
-                            <span className="text-[11px] text-slate-400 block font-medium">
-                              Tarifa / Precio:
-                            </span>
-                            <span className="font-bold text-slate-800">
-                              {m.tarifaOPrecio !== undefined
-                                ? `${m.moneda === 'USD' ? 'USD' : 'Bs'} ${m.tarifaOPrecio} / ${m.unidad || 'unidad'}`
-                                : '—'}
+                        {m.tipoTrabajo === 'propiedad' ? (
+                          <div className="py-1.5 flex items-center justify-between gap-2">
+                            <span className="text-[#5E6D64] font-medium">Lote</span>
+                            <span className="font-semibold text-[#24875B] text-right">
+                              {m.destinoOCliente || '—'}
                             </span>
                           </div>
-                          <div>
-                            <span className="text-[11px] text-slate-400 block font-medium">
-                              Equivalencia:
-                            </span>
-                            <span className="font-bold text-slate-700 font-mono">
-                              {m.tipoCambio && m.tipoCambio > 0 ? (
-                                m.moneda === 'USD'
-                                  ? `Bs ${(m.total * m.tipoCambio).toLocaleString('es-BO', {
-                                      minimumFractionDigits: 2,
-                                      maximumFractionDigits: 2,
-                                    })} (TC: ${m.tipoCambio})`
-                                  : `USD ${(m.total / m.tipoCambio).toLocaleString('es-BO', {
-                                      minimumFractionDigits: 2,
-                                      maximumFractionDigits: 2,
-                                    })} (TC: ${m.tipoCambio})`
-                              ) : (
-                                '—'
-                              )}
+                        ) : (
+                          <div className="py-1.5 flex items-center justify-between gap-2">
+                            <span className="text-[#5E6D64] font-medium">Destino / Cliente</span>
+                            <span className="font-semibold text-[#26352D] text-right">
+                              {m.destinoOCliente || '—'}
                             </span>
                           </div>
-                        </div>
-
-                        {m.observacion && (
-                          <p className="text-xs text-slate-600 italic bg-amber-50/60 p-2.5 rounded-xl border border-amber-200/60 break-words">
-                            {m.observacion}
-                          </p>
                         )}
+                        <div className="py-1.5 flex items-center justify-between gap-2">
+                          <span className="text-[#5E6D64] font-medium">
+                            {isService ? 'Tarifa' : 'Precio'}
+                          </span>
+                          <span className="font-semibold text-[#26352D] tabular-nums text-right">
+                            {m.tarifaOPrecio !== undefined && m.tarifaOPrecio !== null
+                              ? `${m.moneda === 'USD' ? 'USD' : 'Bs'} ${m.tarifaOPrecio.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} / ${m.unidad || 'unidad'}`
+                              : '—'}
+                          </span>
+                        </div>
+                        <div className="py-1.5 flex items-center justify-between gap-2">
+                          <span className="text-[#5E6D64] font-medium">Equivalencia</span>
+                          <span className="font-mono font-semibold text-[#26352D] text-right">
+                            {m.tipoCambio && m.tipoCambio > 0
+                              ? m.moneda === 'USD'
+                                ? `Bs ${(m.total * m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(m.tipoCambio)})`
+                                : `USD ${(m.total / m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(m.tipoCambio)})`
+                              : '—'}
+                          </span>
+                        </div>
+                        {getCleanObservation(m.observacion, m.titulo) && (
+                          <div className="py-1.5 flex items-center justify-between gap-2">
+                            <span className="text-[#5E6D64] font-medium shrink-0">Observación</span>
+                            <span className="font-normal text-[#26352D] text-right italic">
+                              {getCleanObservation(m.observacion, m.titulo)}
+                            </span>
+                          </div>
+                        )}
+                      </div>
 
-                        {/* Botones de acción dentro del detalle */}
-                        <div className="flex items-center gap-2 pt-1">
-                          {m.kind === 'servicio' && m.rawJob && (
+                      {effectiveIsAdmin ? (
+                        <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E6EBE7]">
+                          {isService && m.rawJob && (
                             <>
                               <button
                                 type="button"
                                 onClick={() => handleOpenEditJob(m.rawJob!)}
-                                className="flex-1 py-2 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer min-h-[38px]"
+                                className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px]"
                               >
-                                <Edit3 className="h-3.5 w-3.5 text-slate-600" />
-                                <span>Editar</span>
+                                Editar
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setJobToDelete(m.rawJob!)}
-                                className="flex-1 py-2 px-3 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer border border-rose-200 min-h-[38px]"
+                                className="px-3.5 py-1.5 rounded-xl bg-[#FCECEC] hover:bg-[#F7DCDC] text-[#C44545] font-semibold text-xs transition cursor-pointer border border-[#F2C6C6] min-h-[34px]"
                               >
-                                <Trash2 className="h-3.5 w-3.5 text-rose-600" />
-                                <span>Eliminar</span>
+                                Eliminar
                               </button>
                             </>
                           )}
                           {m.kind === 'gasto' && m.rawExpense && (
-                            <div className="flex items-center gap-2 w-full">
+                            <>
                               <button
                                 type="button"
                                 onClick={() => handleOpenEditExpense(m.rawExpense!)}
-                                className="flex-1 py-2 px-3 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer border border-blue-200 min-h-[38px]"
+                                className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px]"
                               >
-                                <Edit3 className="h-3.5 w-3.5 text-blue-700" />
-                                <span>Editar</span>
+                                Editar
                               </button>
                               <button
                                 type="button"
-                                onClick={() => setExpenseToDelete(m.rawExpense!)}
-                                className="flex-1 py-2 px-3 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer border border-rose-200 min-h-[38px]"
+                                onClick={() => handleRequestDeleteExpense(m.rawExpense!)}
+                                className="px-3.5 py-1.5 rounded-xl bg-[#FCECEC] hover:bg-[#F7DCDC] text-[#C44545] font-semibold text-xs transition cursor-pointer border border-[#F2C6C6] min-h-[34px]"
                               >
-                                <Trash2 className="h-3.5 w-3.5 text-rose-600" />
-                                <span>Eliminar</span>
+                                Eliminar
                               </button>
-                            </div>
+                            </>
                           )}
                         </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-
-              {filteredMachineryMovements.length === 0 && (
-                <div className="py-12 text-center text-xs text-slate-400 bg-slate-50 rounded-2xl border border-slate-200/60">
-                  No se encontraron movimientos registrados con los filtros seleccionados.
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ============================================================ */}
-      {/* CONSULTA: MÁQUINAS (RESUMEN OPERATIVO)                       */}
-      {/* ============================================================ */}
-      {currentScreen === 'resumen' && (
-        <div className="space-y-4">
-          <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-xs space-y-4">
-            <div>
-              <h3 className="text-base sm:text-lg font-bold text-slate-900">
-                Máquinas ({machines.length})
-              </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Total de horas, hectáreas y cantidad de labores por equipo
-              </p>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5 pt-1">
-              {machines.map((m) => {
-                const machineJobs = jobs.filter((j) => j.maquinariaId === m.id);
-                const hrs = machineJobs
-                  .filter((j) => j.unidad === 'hora' || (j.unidad as string) === 'h')
-                  .reduce((sum, j) => sum + (Number(j.cantidad) || 0), 0);
-                const ha = machineJobs
-                  .filter((j) => j.unidad === 'hectarea' || (j.unidad as string) === 'ha')
-                  .reduce((sum, j) => sum + (Number(j.cantidad) || 0), 0);
-
-                const machineJobTypesList = getAvailableJobsForMachine(m.id);
-                const isExpanded = expandedMachineId === m.id;
-
-                return (
-                  <div
-                    key={m.id}
-                    className="w-full rounded-2xl border border-slate-200/90 bg-white p-3 sm:p-3.5 shadow-2xs space-y-2.5"
-                  >
-                    {/* Encabezado */}
-                    <div className="flex items-center justify-between gap-2.5 pb-2 border-b border-slate-100">
-                      <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                        <div className="w-9 h-9 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-center shrink-0 shadow-2xs">
-                          <VisualIcon name={m.icono || m.tipo || 'tractor'} size="sm" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <h4 className="text-sm font-bold text-slate-900 leading-snug break-words line-clamp-2">
-                            {m.nombre}
-                          </h4>
-                          <p className="text-[11px] text-slate-500 truncate">
-                            {m.tipo || 'Tractor'}
-                          </p>
-                        </div>
-                      </div>
-                      <span
-                        className={`px-2 py-0.5 text-[10px] font-bold rounded-full shrink-0 ${
-                          m.estado === 'operativo'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : m.estado === 'mantenimiento'
-                            ? 'bg-amber-100 text-amber-800'
-                            : 'bg-slate-100 text-slate-600'
-                        }`}
-                      >
-                        {m.estado || 'operativo'}
-                      </span>
-                    </div>
-
-                    {/* Estadísticas en tres columnas compactas */}
-                    <div className="grid grid-cols-3 divide-x divide-slate-200/80 bg-slate-50/80 py-2 rounded-xl border border-slate-100 text-center">
-                      <div className="px-1">
-                        <span className="text-[10px] text-slate-400 font-semibold block uppercase">Horas</span>
-                        <span className="text-xs sm:text-sm font-bold text-slate-900 font-mono">{hrs.toFixed(1)} h</span>
-                      </div>
-                      <div className="px-1">
-                        <span className="text-[10px] text-slate-400 font-semibold block uppercase">Hectáreas</span>
-                        <span className="text-xs sm:text-sm font-bold text-slate-900 font-mono">{ha.toFixed(1)} ha</span>
-                      </div>
-                      <div className="px-1">
-                        <span className="text-[10px] text-slate-400 font-semibold block uppercase">Trabajos</span>
-                        <span className="text-xs sm:text-sm font-bold text-slate-900 font-mono">{machineJobs.length}</span>
-                      </div>
-                    </div>
-
-                    {/* Fila delgada para Tarifas y trabajos */}
-                    <div className="pt-0.5">
-                      <button
-                        type="button"
-                        onClick={() => setExpandedMachineId(isExpanded ? null : m.id)}
-                        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200/80 text-slate-700 text-xs font-semibold transition cursor-pointer min-h-[34px]"
-                      >
-                        <span>Tarifas y trabajos ({machineJobTypesList.length})</span>
-                        {isExpanded ? (
-                          <ChevronUp className="h-3.5 w-3.5 text-slate-400" />
-                        ) : (
-                          <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
-                        )}
-                      </button>
-
-                      {isExpanded && (
-                        <div className="mt-2.5 space-y-2 max-h-72 overflow-y-auto pr-1">
-                          {machineJobTypesList.map((jobDef) => (
-                            <div
-                              key={jobDef.id}
-                              className="p-2.5 rounded-xl bg-white border border-slate-200/90 flex items-center justify-between gap-2 shadow-2xs"
-                            >
-                              <div className="flex items-center gap-2 min-w-0 flex-1">
-                                <div className="w-7 h-7 rounded-lg bg-slate-50 border border-slate-200/80 flex items-center justify-center shrink-0">
-                                  <VisualIcon name={jobDef.icono || jobDef.nombre} size="xs" />
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                  <span className="text-xs font-bold text-slate-900 block truncate">
-                                    {jobDef.nombre}
-                                  </span>
-                                  <span className="text-[11px] font-semibold text-emerald-800 font-mono">
-                                    {jobDef.moneda === 'USD' ? 'USD' : 'Bs'} {jobDef.tarifa} / {jobDef.unidad}
-                                  </span>
-                                </div>
-                              </div>
-                              <span className="text-[10px] bg-emerald-50 text-emerald-800 font-bold px-2 py-0.5 rounded-full border border-emerald-200 shrink-0">
-                                Activo
-                              </span>
-                            </div>
-                          ))}
-                          {machineJobTypesList.length === 0 && (
-                            <div className="p-3 text-center text-xs text-slate-500 bg-white rounded-xl border border-slate-200">
-                              Tarifa base general: {m.moneda} {m.tarifa} / {m.unidad}
-                            </div>
-                          )}
+                      ) : (
+                        <div className="flex items-center gap-1.5 pt-2 border-t border-[#E6EBE7] text-[11px] text-[#7A8780]">
+                          <Lock className="h-3.5 w-3.5 shrink-0" />
+                          <span>Solo el Administrador puede editar o eliminar registros guardados.</span>
                         </div>
                       )}
                     </div>
-                  </div>
-                );
-              })}
-
-              {machines.length === 0 && (
-                <div className="col-span-full py-12 text-center text-sm text-slate-400 bg-slate-50 rounded-2xl border border-slate-200">
-                  No hay maquinarias registradas.
-                </div>
-              )}
-            </div>
-          </div>
+                  }
+                />
+              );
+            })}
+          </CompactList>
         </div>
       )}
 
       {/* ============================================================ */}
-      {/* MODAL: EDITAR TRABAJO (ESTILO iOS)                          */}
+      {/* CONSULTA: MIS MÁQUINAS (MÁQUINAS + IMPLEMENTOS AGRÍCOLAS)    */}
       {/* ============================================================ */}
-      {editingJob && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs">
-          <div className="bg-white w-full max-w-lg rounded-3xl shadow-xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150 max-h-[90vh] flex flex-col">
-            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
-              <div>
-                <h3 className="text-base font-bold text-slate-900">
-                  Editar Trabajo de Maquinaria
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Actualiza los datos del trabajo y sus movimientos contables vinculados
-                </p>
-              </div>
+      {currentScreen === 'resumen' && (() => {
+        const searchNorm = machinesSearch.trim().toLowerCase();
+
+        const filteredSummaryMachines = machines.filter((m) => {
+          const isActive = m.estado !== 'inactivo' && m.activo !== false;
+          if (machinesStatusFilter === 'activos' && !isActive) return false;
+          if (machinesStatusFilter === 'desactivados' && isActive) return false;
+          if (!searchNorm) return true;
+          return `${m.nombre} ${m.tipo || ''} ${m.estado || ''}`.toLowerCase().includes(searchNorm);
+        });
+
+        const allImplements = (machineJobTypes || []).filter(
+          (jt) => !isVirtualMachineOnlyImplement(jt.nombre)
+        );
+        const filteredImplements = allImplements.filter((jt) => {
+          const isActive = jt.activo !== false;
+          if (machinesStatusFilter === 'activos' && !isActive) return false;
+          if (machinesStatusFilter === 'desactivados' && isActive) return false;
+          if (!searchNorm) return true;
+          const compatType = getImplementCompatibleType(jt);
+          return `${jt.nombre} ${compatType}`.toLowerCase().includes(searchNorm);
+        });
+
+        const showMachinesOpen = Boolean(searchNorm) || machinesGroupOpen;
+        const showImplementsOpen = Boolean(searchNorm) || implementsGroupOpen;
+
+        return (
+          <div className="space-y-3">
+            <ListToolbar
+              title="Mis máquinas"
+              countLabel={`${filteredSummaryMachines.length + filteredImplements.length}`}
+              searchValue={machinesSearch}
+              onSearchChange={setMachinesSearch}
+              searchPlaceholder="Buscar máquina o implemento..."
+              filters={
+                <CompactFilter
+                  value={machinesStatusFilter}
+                  onChange={(val) =>
+                    setMachinesStatusFilter(val as 'activos' | 'desactivados' | 'todos')
+                  }
+                  ariaLabel="Filtrar estado"
+                  options={[
+                    { value: 'activos', label: 'Activos' },
+                    { value: 'desactivados', label: 'Desactivados' },
+                    { value: 'todos', label: 'Todos' },
+                  ]}
+                />
+              }
+            />
+
+            {/* GRUPO 1: MÁQUINAS (abierto inicialmente) */}
+            <div className="space-y-2">
               <button
                 type="button"
-                onClick={() => setEditingJob(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-100 transition cursor-pointer"
+                onClick={() => setMachinesGroupOpen((prev) => !prev)}
+                className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-white border border-[#E2E7E3] hover:bg-[#F8FAF8] transition cursor-pointer"
               >
-                <X className="h-5 w-5" />
+                <div className="flex items-center gap-2 min-w-0">
+                  <Tractor className="h-4 w-4 text-[#24875B] shrink-0" />
+                  <span className="text-sm font-bold text-[#26352D] truncate">
+                    Máquinas ({filteredSummaryMachines.length})
+                  </span>
+                </div>
+                {showMachinesOpen ? (
+                  <ChevronUp className="h-4 w-4 text-[#7A8780] shrink-0" />
+                ) : (
+                  <ChevronDown className="h-4 w-4 text-[#7A8780] shrink-0" />
+                )}
               </button>
+
+              {showMachinesOpen && (
+                <CompactList
+                  isEmpty={filteredSummaryMachines.length === 0}
+                  emptyMessage={
+                    searchNorm
+                      ? 'No se encontraron máquinas con esa búsqueda.'
+                      : machinesStatusFilter === 'desactivados'
+                      ? 'No hay máquinas desactivadas.'
+                      : 'No hay máquinas registradas.'
+                  }
+                >
+                  {filteredSummaryMachines.map((m) => {
+                    const machineJobs = jobs
+                      .filter((j) => j.maquinariaId === m.id)
+                      .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+                    const hrs = machineJobs
+                      .filter((j) => j.unidad === 'hora' || (j.unidad as string) === 'h')
+                      .reduce((sum, j) => sum + (Number(j.cantidad) || 0), 0);
+                    const ha = machineJobs
+                      .filter((j) => j.unidad === 'hectarea' || (j.unidad as string) === 'ha')
+                      .reduce((sum, j) => sum + (Number(j.cantidad) || 0), 0);
+
+                    const assetInfo = findMachineAssetValue(m);
+                    const isExpanded = expandedMachineId === m.id;
+                    const isActive = m.estado !== 'inactivo' && m.activo !== false;
+                    const isMaintenance = m.estado === 'mantenimiento';
+                    const unitLabel = m.unidad === 'hectarea' || (m.unidad as string) === 'ha' ? 'ha' : 'h';
+
+                    return (
+                      <CompactListRow
+                        key={m.id}
+                        muted={!isActive}
+                        icon={
+                          <div className="w-8 h-8 rounded-lg bg-[#F4F7F5] border border-[#E2E7E3] flex items-center justify-center">
+                            <VisualIcon name={m.icono || m.tipo || 'tractor'} size="xs" />
+                          </div>
+                        }
+                        title={m.nombre}
+                        subtitle={
+                          <span>
+                            {getMachineTypeLabel(m)} · {hrs.toFixed(1)} h · {ha.toFixed(1)} ha
+                          </span>
+                        }
+                        rightPrimary={
+                          <span className="text-[#26352D] font-mono">
+                            {m.moneda === 'USD' ? 'USD' : 'Bs'} {m.tarifa}/{unitLabel}
+                          </span>
+                        }
+                        rightSecondary={
+                          <span
+                            className={
+                              !isActive
+                                ? 'text-[#7A8780]'
+                                : isMaintenance
+                                ? 'text-amber-700 font-semibold'
+                                : 'text-[#24875B] font-semibold'
+                            }
+                          >
+                            {!isActive ? 'Inactivo' : isMaintenance ? 'Mantenim.' : 'Operativo'}
+                          </span>
+                        }
+                        isExpanded={isExpanded}
+                        onClick={() => setExpandedMachineId(isExpanded ? null : m.id)}
+                        expandedContent={
+                          <div className="space-y-3 text-xs">
+                            {/* Resumen numérico compacto */}
+                            <div className="grid grid-cols-3 divide-x divide-[#E6EBE7] bg-white py-2 rounded-xl border border-[#E2E7E3] text-center">
+                              <div className="px-1">
+                                <span className="text-[10px] text-[#7A8780] font-semibold block uppercase">
+                                  Horas
+                                </span>
+                                <span className="text-xs font-bold text-[#26352D] font-mono">
+                                  {hrs.toFixed(1)} h
+                                </span>
+                              </div>
+                              <div className="px-1">
+                                <span className="text-[10px] text-[#7A8780] font-semibold block uppercase">
+                                  Hectáreas
+                                </span>
+                                <span className="text-xs font-bold text-[#26352D] font-mono">
+                                  {ha.toFixed(1)} ha
+                                </span>
+                              </div>
+                              <div className="px-1">
+                                <span className="text-[10px] text-[#7A8780] font-semibold block uppercase">
+                                  Servicios
+                                </span>
+                                <span className="text-xs font-bold text-[#26352D] font-mono">
+                                  {machineJobs.length}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Ficha de máquina */}
+                            <div className="rounded-xl border border-[#E2E7E3] bg-white divide-y divide-[#EFF2EF]">
+                              <div className="px-3 py-2 flex items-center justify-between gap-2">
+                                <span className="text-[#5E6D64] font-medium">Tarifa propia</span>
+                                <span className="font-mono font-semibold text-[#26352D]">
+                                  {m.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                                  {Number(m.tarifa || 0).toLocaleString('es-BO', {
+                                    minimumFractionDigits: 2,
+                                    maximumFractionDigits: 2,
+                                  })}{' '}
+                                  / {unitLabel}
+                                </span>
+                              </div>
+                              <div className="px-3 py-2 flex items-center justify-between gap-2">
+                                <span className="text-[#5E6D64] font-medium">Valor patrimonial</span>
+                                <span className="font-mono font-semibold text-[#26352D]">
+                                  {assetInfo
+                                    ? `${assetInfo.moneda === 'USD' ? 'USD' : 'Bs'} ${assetInfo.valor.toLocaleString('es-BO', {
+                                        minimumFractionDigits: 2,
+                                        maximumFractionDigits: 2,
+                                      })}`
+                                    : 'No registrado'}
+                                </span>
+                              </div>
+                              <div className="px-3 py-2 flex items-center justify-between gap-2">
+                                <span className="text-[#5E6D64] font-medium">Estado</span>
+                                <span className="font-semibold text-[#26352D]">
+                                  {!isActive ? 'Inactivo' : isMaintenance ? 'En mantenimiento' : 'Operativo'}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Historial de trabajos realizados */}
+                            <div className="space-y-1.5">
+                              <p className="text-[11px] font-semibold text-[#5E6D64]">
+                                Historial de trabajos realizados ({machineJobs.length})
+                              </p>
+                              {machineJobs.length > 0 ? (
+                                <div className="rounded-xl border border-[#E2E7E3] bg-white divide-y divide-[#EFF2EF] overflow-hidden">
+                                  {machineJobs.slice(0, 10).map((j) => {
+                                    const lotObj = j.loteId
+                                      ? lots.find((l) => l.id === j.loteId)
+                                      : null;
+                                    const destLabel =
+                                      j.tipoTrabajo === 'propiedad'
+                                        ? j.loteNombre || lotObj?.nombre || 'Lote propio'
+                                        : j.cliente || 'Cliente externo';
+                                    const uStr =
+                                      j.unidad === 'hectarea' || (j.unidad as string) === 'ha'
+                                        ? 'ha'
+                                        : 'h';
+                                    return (
+                                      <div
+                                        key={j.id}
+                                        className="px-3 py-2 flex items-center justify-between gap-2"
+                                      >
+                                        <div className="min-w-0">
+                                          <p className="text-xs font-semibold text-[#26352D] truncate">
+                                            {formatConcept(j.trabajoNombre || m.nombre)}
+                                          </p>
+                                          <p className="text-[11px] text-[#7A8780] truncate">
+                                            {formatDateDDMMAAAA(j.fecha)} · {destLabel} · {j.cantidad} {uStr}
+                                          </p>
+                                        </div>
+                                        <span className="text-xs font-bold text-[#24875B] font-mono shrink-0">
+                                          {formatMoney(j.total, (j.moneda as Currency) || 'BOB')}
+                                        </span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <div className="px-3 py-2.5 text-xs text-[#7A8780] bg-white rounded-xl border border-[#E2E7E3]">
+                                  Sin trabajos registrados en esta campaña.
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        }
+                      />
+                    );
+                  })}
+                </CompactList>
+              )}
             </div>
 
-            <form onSubmit={handleSaveEditJob} className="p-5 space-y-4 overflow-y-auto flex-1">
-              {/* Fecha */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Fecha
-                </label>
-                <input
-                  type="date"
-                  required
-                  value={editFecha}
-                  onChange={(e) => setEditFecha(e.target.value)}
-                  className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[46px]"
-                />
+            {/* GRUPO 2: IMPLEMENTOS AGRÍCOLAS (colapsado inicialmente) */}
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setImplementsGroupOpen((prev) => !prev)}
+                className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-white border border-[#E2E7E3] hover:bg-[#F8FAF8] transition cursor-pointer"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <Wrench className="h-4 w-4 text-[#24875B] shrink-0" />
+                  <span className="text-sm font-bold text-[#26352D] truncate">
+                    Implementos agrícolas ({filteredImplements.length})
+                  </span>
+                </div>
+                {showImplementsOpen ? (
+                  <ChevronUp className="h-4 w-4 text-[#7A8780] shrink-0" />
+                ) : (
+                  <ChevronDown className="h-4 w-4 text-[#7A8780] shrink-0" />
+                )}
+              </button>
+
+              {showImplementsOpen && (
+                <CompactList
+                  isEmpty={filteredImplements.length === 0}
+                  emptyMessage={
+                    searchNorm
+                      ? 'No se encontraron implementos con esa búsqueda.'
+                      : machinesStatusFilter === 'desactivados'
+                      ? 'No hay implementos desactivados.'
+                      : 'No hay implementos agrícolas registrados.'
+                  }
+                >
+                  {filteredImplements.map((jt) => {
+                    const compatType = getImplementCompatibleType(jt);
+                    const assetInfo = findImplementAssetValue(jt);
+                    const isExpanded = expandedImplementId === jt.id;
+                    const isActive = jt.activo !== false;
+                    const uLabel = jt.unidad === 'hectarea' || (jt.unidad as string) === 'ha' ? 'ha' : 'h';
+
+                    const normName = jt.nombre.trim().toLowerCase();
+                    const implementJobs = jobs
+                      .filter((j) => {
+                        if (j.trabajoTipoId && j.trabajoTipoId === jt.id) return true;
+                        const jName = (j.trabajoNombre || '').trim().toLowerCase();
+                        return jName !== '' && jName === normName;
+                      })
+                      .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+
+                    return (
+                      <CompactListRow
+                        key={jt.id}
+                        muted={!isActive}
+                        icon={
+                          <div className="w-8 h-8 rounded-lg bg-[#F4F7F5] border border-[#E2E7E3] flex items-center justify-center">
+                            <VisualIcon name={jt.icono || jt.nombre} size="xs" />
+                          </div>
+                        }
+                        title={jt.nombre}
+                        subtitle={<span>Compatible: {compatType}</span>}
+                        rightPrimary={
+                          <span className="text-[#24875B] font-mono">
+                            {jt.moneda === 'USD' ? 'USD' : 'Bs'} {jt.tarifa}/{uLabel}
+                          </span>
+                        }
+                        rightSecondary={
+                          <span className={isActive ? 'text-[#24875B] font-semibold' : 'text-[#7A8780]'}>
+                            {isActive ? 'Activo' : 'Inactivo'}
+                          </span>
+                        }
+                        isExpanded={isExpanded}
+                        onClick={() => setExpandedImplementId(isExpanded ? null : jt.id)}
+                        expandedContent={
+                          <div className="space-y-3 text-xs">
+                            <div className="rounded-xl border border-[#E2E7E3] bg-white divide-y divide-[#EFF2EF]">
+                              <div className="px-3 py-2 flex items-center justify-between gap-2">
+                                <span className="text-[#5E6D64] font-medium">Tipo de máquina compatible</span>
+                                <span className="font-semibold text-[#26352D]">{compatType}</span>
+                              </div>
+                              <div className="px-3 py-2 flex items-center justify-between gap-2">
+                                <span className="text-[#5E6D64] font-medium">Tarifa propia</span>
+                                <span className="font-mono font-semibold text-[#24875B]">
+                                  {jt.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                                  {Number(jt.tarifa || 0).toLocaleString('es-BO', {
+                                    minimumFractionDigits: 2,
+                                    maximumFractionDigits: 2,
+                                  })}{' '}
+                                  / {uLabel}
+                                </span>
+                              </div>
+                              <div className="px-3 py-2 flex items-center justify-between gap-2">
+                                <span className="text-[#5E6D64] font-medium">Unidad de cobro</span>
+                                <span className="font-semibold text-[#26352D]">
+                                  {uLabel === 'ha' ? 'Hectárea (ha)' : 'Hora (h)'}
+                                </span>
+                              </div>
+                              <div className="px-3 py-2 flex items-center justify-between gap-2">
+                                <span className="text-[#5E6D64] font-medium">Valor patrimonial</span>
+                                <span className="font-mono font-semibold text-[#26352D]">
+                                  {assetInfo
+                                    ? `${assetInfo.moneda === 'USD' ? 'USD' : 'Bs'} ${assetInfo.valor.toLocaleString('es-BO', {
+                                        minimumFractionDigits: 2,
+                                        maximumFractionDigits: 2,
+                                      })}`
+                                    : 'No registrado'}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Historial de trabajos realizados con este implemento */}
+                            <div className="space-y-1.5">
+                              <p className="text-[11px] font-semibold text-[#5E6D64]">
+                                Historial con este implemento ({implementJobs.length})
+                              </p>
+                              {implementJobs.length > 0 ? (
+                                <div className="rounded-xl border border-[#E2E7E3] bg-white divide-y divide-[#EFF2EF] overflow-hidden">
+                                  {implementJobs.slice(0, 10).map((j) => {
+                                    const lotObj = j.loteId
+                                      ? lots.find((l) => l.id === j.loteId)
+                                      : null;
+                                    const destLabel =
+                                      j.tipoTrabajo === 'propiedad'
+                                        ? j.loteNombre || lotObj?.nombre || 'Lote propio'
+                                        : j.cliente || 'Cliente externo';
+                                    const uStr =
+                                      j.unidad === 'hectarea' || (j.unidad as string) === 'ha'
+                                        ? 'ha'
+                                        : 'h';
+                                    return (
+                                      <div
+                                        key={j.id}
+                                        className="px-3 py-2 flex items-center justify-between gap-2"
+                                      >
+                                        <div className="min-w-0">
+                                          <p className="text-xs font-semibold text-[#26352D] truncate">
+                                            {j.maquinariaNombre || 'Máquina'} · {destLabel}
+                                          </p>
+                                          <p className="text-[11px] text-[#7A8780] truncate">
+                                            {formatDateDDMMAAAA(j.fecha)} · {j.cantidad} {uStr}
+                                          </p>
+                                        </div>
+                                        <span className="text-xs font-bold text-[#24875B] font-mono shrink-0">
+                                          {formatMoney(j.total, (j.moneda as Currency) || 'BOB')}
+                                        </span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <div className="px-3 py-2.5 text-xs text-[#7A8780] bg-white rounded-xl border border-[#E2E7E3]">
+                                  Sin trabajos registrados con este implemento en esta campaña.
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        }
+                      />
+                    );
+                  })}
+                </CompactList>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ============================================================ */}
+      {/* MODAL: EDITAR SERVICIO                                       */}
+      {/* ============================================================ */}
+      {editingJob && (() => {
+        const editCompatibleImplements = getCompatibleImplementsForMachine(editMachineId);
+        const editMachineObj = machines.find((m) => m.id === editMachineId);
+        const editTcNum = parseDecimalNumber(editTc);
+        const editTotalOrig =
+          (typeof editCantidad === 'number' ? editCantidad : 0) *
+          (typeof editTarifa === 'number' ? editTarifa : 0);
+        const editTotalUsd =
+          editMoneda === 'USD'
+            ? editTotalOrig
+            : editTcNum > 0
+            ? Number((editTotalOrig / editTcNum).toFixed(2))
+            : 0;
+        const hasRegisteredCobros =
+          Boolean(editJobCobroCuenta) &&
+          ((editJobCobroCuenta?.cobrado ?? 0) > 0.005 || (editJobCobroCuenta?.pagos?.length ?? 0) > 0);
+        const cobradoUsd = editJobCobroCuenta?.cobrado ?? 0;
+        const saldoProyectadoUsd = Math.max(0, Number((editTotalUsd - cobradoUsd).toFixed(2)));
+        const exceedsCobradoViolation = hasRegisteredCobros && editTotalUsd + 0.005 < cobradoUsd;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs">
+            <div className="bg-white w-full max-w-lg rounded-3xl shadow-xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150 max-h-[90vh] flex flex-col">
+              <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold text-slate-900 truncate">
+                    Editar servicio
+                  </h3>
+                  {hasRegisteredCobros && (
+                    <p className="text-[11px] text-[#24875B] font-semibold mt-0.5">
+                      Conserva {editJobCobroCuenta?.pagos?.length || 1} cobro(s) registrado(s)
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingJob(null);
+                    setEditJobCobroCuenta(null);
+                    setEditJobError(null);
+                  }}
+                  className="p-1.5 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-100 transition cursor-pointer"
+                >
+                  <X className="h-5 w-5" />
+                </button>
               </div>
 
-              {/* Maquinaria con selector visual e icono */}
-              <VisualMachinePicker
-                label="Maquinaria / Equipo *"
-                machines={machines}
-                selectedMachineId={editMachineId}
-                onSelectMachine={(m) => {
-                  setEditMachineId(m.id);
-                  const availableJobs = getAvailableJobsForMachine(m.id);
-                  if (availableJobs.length > 0 && !editJobTypeId) {
-                    const firstJob = availableJobs[0];
-                    setEditJobTypeId(firstJob.id);
-                    setEditJobNombre(firstJob.nombre);
-                    setEditTarifa(firstJob.tarifa);
-                    setEditUnidad(firstJob.unidad === 'ha' || firstJob.unidad === 'hectarea' ? 'hectarea' : 'hora');
-                    setEditMoneda(firstJob.moneda);
-                  }
-                }}
-                required
-              />
-
-              {/* Tipo de Trabajo / Labor con selector visual */}
-              <div>
-                {getAvailableJobsForMachine(editMachineId).length > 0 ? (
-                  <div className="space-y-1.5">
-                    <VisualJobTypePicker
-                      label="Tipo de Trabajo / Labor *"
-                      jobTypes={getAvailableJobsForMachine(editMachineId)}
-                      selectedJobTypeId={editJobTypeId}
-                      onSelectJobType={(jDef) => {
-                        setEditJobTypeId(jDef.id);
-                        setEditJobNombre(jDef.nombre);
-                        setEditTarifa(jDef.tarifa);
-                        setEditUnidad(jDef.unidad === 'ha' || jDef.unidad === 'hectarea' ? 'hectarea' : 'hora');
-                        setEditMoneda(jDef.moneda);
-                      }}
-                      required
-                    />
+              <form onSubmit={handleSaveEditJob} className="p-4 sm:p-5 space-y-3 overflow-y-auto flex-1">
+                {editJobError && (
+                  <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                    <span className="break-words">{editJobError}</span>
                   </div>
-                ) : (
+                )}
+
+                {/* Resumen de cuenta por cobrar cuando tiene pagos registrados */}
+                {(hasRegisteredCobros || loadingEditJobCobro) && (
+                  <div className="rounded-xl border border-[#BFE0CD] bg-[#F5FAF7] p-3 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold text-[#1D5C3F] uppercase">
+                        Estado de cobro (USD)
+                      </span>
+                      {loadingEditJobCobro && (
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin text-[#24875B]" />
+                      )}
+                    </div>
+                    {editJobCobroCuenta && (
+                      <div className="grid grid-cols-3 divide-x divide-[#D4E6DC] text-center bg-white rounded-lg border border-[#D4E6DC] py-2">
+                        <div className="px-1">
+                          <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Total</span>
+                          <span className="text-xs font-bold text-[#26352D] font-mono tabular-nums">
+                            USD {editTotalUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <div className="px-1">
+                          <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Cobrado</span>
+                          <span className="text-xs font-bold text-[#24875B] font-mono tabular-nums">
+                            USD {cobradoUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <div className="px-1">
+                          <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Saldo</span>
+                          <span className={`text-xs font-black font-mono tabular-nums ${exceedsCobradoViolation ? 'text-red-600' : 'text-amber-700'}`}>
+                            USD {saldoProyectadoUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {exceedsCobradoViolation && (
+                      <p className="text-[11px] font-semibold text-red-700">
+                        El total del servicio no puede ser menor al monto ya cobrado (USD {cobradoUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}).
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* 1. Fecha y Campaña */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-end">
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">
-                      Tipo de Trabajo / Labor <span className="text-red-500">*</span>
+                    <label className={FORM_LABEL_CLASS}>
+                      Fecha <span className="text-[#C44545]">*</span>
                     </label>
                     <input
+                      type="date"
+                      required
+                      value={editFecha}
+                      onChange={(e) => setEditFecha(e.target.value)}
+                      className={FORM_INPUT_CLASS}
+                    />
+                  </div>
+                  <AppSelect
+                    label="Campaña"
+                    required
+                    icon={<Calendar className="h-[17px] w-[17px]" />}
+                    value={editCampanaId}
+                    onChange={(e) => setEditCampanaId(e.target.value)}
+                  >
+                    <option value="">Seleccionar campaña</option>
+                    {campaigns.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.nombre} {c.activa ? '(Activa)' : ''}
+                      </option>
+                    ))}
+                  </AppSelect>
+                </div>
+
+                {/* 2. Máquina */}
+                <VisualMachinePicker
+                  label="Máquina"
+                  machines={machines}
+                  selectedMachineId={editMachineId}
+                  onSelectMachine={(m) => {
+                    setEditMachineId(m.id);
+                    const nextCompat = getCompatibleImplementsForMachine(m.id);
+                    const stillCompatible = editJobTypeId
+                      ? nextCompat.some((x) => x.id === editJobTypeId)
+                      : false;
+                    if (!stillCompatible) {
+                      setEditJobTypeId('');
+                      setEditJobNombre('');
+                      setEditTarifa(m.tarifa || 0);
+                      setEditUnidad(
+                        m.unidad === 'ha' || m.unidad === 'hectarea' ? 'hectarea' : 'hora'
+                      );
+                      setEditMoneda((m.moneda as Currency) || 'USD');
+                    }
+                  }}
+                  required
+                />
+
+                {/* 3. Implemento agrícola (opcional) */}
+                <VisualJobTypePicker
+                  label="Implemento agrícola"
+                  optionalText="(opcional)"
+                  jobTypes={editCompatibleImplements}
+                  selectedJobTypeId={editJobTypeId}
+                  onSelectJobType={(jDef) => {
+                    if (!jDef) {
+                      setEditJobTypeId('');
+                      setEditJobNombre('');
+                      if (editMachineObj) {
+                        setEditTarifa(editMachineObj.tarifa || 0);
+                        setEditUnidad(
+                          editMachineObj.unidad === 'ha' || editMachineObj.unidad === 'hectarea'
+                            ? 'hectarea'
+                            : 'hora'
+                        );
+                        setEditMoneda((editMachineObj.moneda as Currency) || 'USD');
+                      }
+                      return;
+                    }
+                    setEditJobTypeId(jDef.id);
+                    setEditJobNombre(jDef.nombre);
+                    setEditTarifa(jDef.tarifa);
+                    setEditUnidad(
+                      jDef.unidad === 'ha' || jDef.unidad === 'hectarea' ? 'hectarea' : 'hora'
+                    );
+                    setEditMoneda((jDef.moneda as Currency) || 'USD');
+                  }}
+                  allowNone
+                  noneLabel={
+                    editMachineObj
+                      ? `Sin implemento (tarifa de ${editMachineObj.nombre})`
+                      : 'Sin implemento'
+                  }
+                />
+
+                {/* 4. Destino */}
+                <div>
+                  <label className={FORM_LABEL_CLASS}>Destino</label>
+                  <div className="flex p-1 bg-[#F2F5F3] rounded-xl gap-1 border border-[#E2E7E3]">
+                    <button
+                      type="button"
+                      disabled={hasRegisteredCobros}
+                      onClick={() => setEditTipoTrabajo('propiedad')}
+                      className={`flex-1 h-[36px] text-xs font-semibold rounded-lg transition ${
+                        hasRegisteredCobros
+                          ? 'opacity-45 cursor-not-allowed text-[#7A8780]'
+                          : editTipoTrabajo === 'propiedad'
+                          ? 'bg-white text-[#24875B] shadow-xs border border-[#BFE0CD] cursor-pointer'
+                          : 'text-[#5E6D64] hover:text-[#26352D] cursor-pointer'
+                      }`}
+                    >
+                      Propiedad propia
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditTipoTrabajo('tercero')}
+                      className={`flex-1 h-[36px] text-xs font-semibold rounded-lg transition cursor-pointer ${
+                        editTipoTrabajo === 'tercero'
+                          ? 'bg-white text-[#26352D] shadow-xs border border-[#D4DDD6]'
+                          : 'text-[#5E6D64] hover:text-[#26352D]'
+                      }`}
+                    >
+                      Cliente externo
+                    </button>
+                  </div>
+                  {hasRegisteredCobros && (
+                    <p className="text-[11px] text-amber-700 mt-1">
+                      Bloqueado en Cliente externo porque ya existen cobros registrados.
+                    </p>
+                  )}
+                </div>
+
+                {/* 5. Lote o Cliente */}
+                {editTipoTrabajo === 'propiedad' ? (
+                  <VisualLotPicker
+                    lots={lots}
+                    selectedLotId={editLotId}
+                    onSelect={(id) => setEditLotId(id)}
+                    label="Lote"
+                    required
+                  />
+                ) : (
+                  <div>
+                    <label className={FORM_LABEL_CLASS}>Cliente</label>
+                    <input
                       type="text"
-                      placeholder="Ej. Siembra, Arada, Rastra..."
-                      value={editJobNombre}
-                      onChange={(e) => setEditJobNombre(e.target.value)}
-                      className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[46px]"
+                      value={editCliente}
+                      onChange={(e) => setEditCliente(e.target.value)}
+                      placeholder="Nombre del cliente"
+                      className={FORM_INPUT_CLASS}
                     />
                   </div>
                 )}
-              </div>
 
-              {/* Destino Segmented Toggle */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Destino
-                </label>
-                <div className="flex p-1 bg-slate-100 rounded-xl gap-1">
-                  <button
-                    type="button"
-                    onClick={() => setEditTipoTrabajo('tercero')}
-                    className={`flex-1 py-2 text-xs font-bold rounded-lg transition cursor-pointer ${
-                      editTipoTrabajo === 'tercero'
-                        ? 'bg-white text-blue-800 shadow-sm'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
+                {/* 6. Cantidad y Unidad */}
+                <div className="grid grid-cols-2 gap-2.5 items-end">
+                  <div>
+                    <label className={FORM_LABEL_CLASS}>
+                      Cantidad <span className="text-[#C44545]">*</span>
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      required
+                      min="0.01"
+                      value={editCantidad}
+                      onChange={(e) => setEditCantidad(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                      className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
+                    />
+                  </div>
+                  <AppSelect
+                    label="Unidad"
+                    required
+                    icon={<Wrench className="h-[17px] w-[17px]" />}
+                    value={editUnidad}
+                    onChange={(e) => setEditUnidad(e.target.value as 'hora' | 'hectarea')}
                   >
-                    Para otros (Cliente)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setEditTipoTrabajo('propiedad')}
-                    className={`flex-1 py-2 text-xs font-bold rounded-lg transition cursor-pointer ${
-                      editTipoTrabajo === 'propiedad'
-                        ? 'bg-white text-emerald-800 shadow-sm'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    En propiedad (Lote)
-                  </button>
+                    <option value="hora">Horas</option>
+                    <option value="hectarea">Hectáreas</option>
+                  </AppSelect>
                 </div>
-              </div>
 
-              {/* Cliente o Lote */}
-              {editTipoTrabajo === 'tercero' ? (
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Cliente / Beneficiario
-                  </label>
-                  <input
-                    type="text"
-                    value={editCliente}
-                    onChange={(e) => setEditCliente(e.target.value)}
-                    placeholder="Nombre del cliente externo..."
-                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-600 focus:outline-none min-h-[46px]"
+                {/* 7. Tarifa y Moneda */}
+                <div className="grid grid-cols-2 gap-2.5 items-end">
+                  <div>
+                    <label className={FORM_LABEL_CLASS}>
+                      Tarifa por {editUnidad === 'hectarea' ? 'ha' : 'hora'}
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      min="0"
+                      value={editTarifa}
+                      onChange={(e) => setEditTarifa(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                      className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
+                    />
+                  </div>
+                  <CurrencySelect
+                    label="Moneda"
+                    required
+                    value={editMoneda}
+                    onChange={(curr) => setEditMoneda(curr)}
                   />
                 </div>
-              ) : (
-                <VisualLotPicker
-                  lots={lots}
-                  selectedLotId={editLotId}
-                  onSelect={(id) => setEditLotId(id)}
-                  label="Lote Propio"
-                  required
-                />
-              )}
 
-              {/* Cantidad y Unidad */}
-              <div className="grid grid-cols-2 gap-3">
+                {/* Tipo de cambio editable */}
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Cantidad trabajada
+                  <label className={FORM_LABEL_CLASS}>
+                    Tipo de cambio (Bs/USD) <span className="text-[#C44545]">*</span>
                   </label>
                   <input
                     type="number"
                     inputMode="decimal"
                     step="any"
                     required
-                    min="0.1"
-                    value={editCantidad}
-                    onChange={(e) => setEditCantidad(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-bold min-h-[46px]"
+                    min="0.01"
+                    placeholder="6.96"
+                    value={editTc}
+                    onChange={(e) => setEditTc(e.target.value)}
+                    className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Unidad
-                  </label>
-                  <select
-                    value={editUnidad}
-                    onChange={(e) => setEditUnidad(e.target.value as 'hora' | 'hectarea')}
-                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[46px]"
-                  >
-                    <option value="hora">Horas</option>
-                    <option value="hectarea">Hectáreas</option>
-                  </select>
-                </div>
-              </div>
 
-              {/* Tarifa y Moneda */}
-              <div className="grid grid-cols-2 gap-3">
+                {/* 8. Importe total */}
+                <div className="bg-[#EAF5EE] px-3.5 py-2.5 rounded-xl border border-[#BFE0CD] flex items-center justify-between">
+                  <span className="text-[13px] font-bold text-[#175B3D]">Importe total</span>
+                  <span className="text-base font-extrabold text-[#175B3D] font-mono tabular-nums">
+                    {editMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                    {editTotalOrig.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+
+                {/* 9. Observación */}
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Precio Unitario / Tarifa por {editUnidad === 'hectarea' ? 'ha' : 'h'}
-                  </label>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="any"
-                    min="0"
-                    value={editTarifa}
-                    onChange={(e) => setEditTarifa(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none font-bold min-h-[46px]"
+                  <label className={FORM_LABEL_CLASS}>Observación</label>
+                  <textarea
+                    rows={2}
+                    value={editObservacion}
+                    onChange={(e) => setEditObservacion(e.target.value)}
+                    className={FORM_TEXTAREA_CLASS}
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Moneda
-                  </label>
-                  <select
-                    value={editMoneda}
-                    onChange={(e) => setEditMoneda(e.target.value as Currency)}
-                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none min-h-[46px]"
+
+                {/* Botones de acción */}
+                <div className="flex items-center gap-2.5 pt-1">
+                  <button
+                    type="button"
+                    disabled={saving}
+                    onClick={() => {
+                      setEditingJob(null);
+                      setEditJobCobroCuenta(null);
+                      setEditJobError(null);
+                    }}
+                    className="flex-1 h-[42px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm transition cursor-pointer"
                   >
-                    <option value="BOB">BOB (Bs)</option>
-                    <option value="USD">USD ($)</option>
-                  </select>
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={saving || exceedsCobradoViolation}
+                    className="flex-1 h-[42px] rounded-xl bg-[#24875B] hover:bg-[#1D704B] active:bg-[#175B3D] text-white font-bold text-sm transition disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
+                  >
+                    <Save className="h-4 w-4 shrink-0" />
+                    <span>{saving ? 'Guardando...' : 'Guardar cambios'}</span>
+                  </button>
                 </div>
-              </div>
-
-              {/* Recuadro de Importe Total Calculado */}
-              <div className="bg-emerald-50/80 p-3.5 rounded-xl border border-emerald-200/70 flex items-center justify-between">
-                <div>
-                  <span className="text-[11px] text-emerald-800 block uppercase font-bold">
-                    Total del Trabajo
-                  </span>
-                  <span className="text-[10px] text-slate-500 font-mono">
-                    {editCantidad || 0} {editUnidad === 'hectarea' ? 'ha' : 'h'} &times; {editMoneda === 'USD' ? 'USD' : 'Bs'} {editTarifa || 0}
-                  </span>
-                </div>
-                <span className="text-base sm:text-lg font-black text-emerald-950 font-mono">
-                  {formatMoney(
-                    (typeof editCantidad === 'number' ? editCantidad : 0) *
-                      (typeof editTarifa === 'number' ? editTarifa : 0),
-                    editMoneda
-                  )}
-                </span>
-              </div>
-
-              {/* Observación */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Observaciones
-                </label>
-                <textarea
-                  rows={2}
-                  value={editObservacion}
-                  onChange={(e) => setEditObservacion(e.target.value)}
-                  className="w-full text-sm p-3 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:outline-none"
-                />
-              </div>
-
-              {/* Botones de acción */}
-              <div className="flex items-center gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setEditingJob(null)}
-                  className="flex-1 min-h-[48px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm transition cursor-pointer"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="flex-1 min-h-[48px] rounded-xl bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 text-white font-bold text-sm transition disabled:opacity-50 cursor-pointer"
-                >
-                  {saving ? 'Guardando...' : 'Guardar Cambios'}
-                </button>
-              </div>
-            </form>
+              </form>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ============================================================ */}
       {/* MODAL: CONFIRMAR ELIMINACIÓN DE TRABAJO                      */}
@@ -2429,12 +3543,17 @@ export const MachineryView: React.FC<Props> = ({
                 type="button"
                 disabled={deletingExpense}
                 onClick={async () => {
+                  if (!effectiveIsAdmin) {
+                    setErrorMsg('Solo el Administrador puede eliminar gastos guardados.');
+                    setExpenseToDelete(null);
+                    return;
+                  }
                   setDeletingExpense(true);
                   try {
                     await deleteExpense(expenseToDelete.id);
                     setSuccessMsg('Gasto de maquinaria eliminado exitosamente.');
                     setExpenseToDelete(null);
-                    onRefreshData();
+                    onRefreshData('movements');
                   } catch (err: unknown) {
                     setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar');
                   } finally {
@@ -2457,19 +3576,9 @@ export const MachineryView: React.FC<Props> = ({
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs overflow-y-auto">
           <div className="bg-white w-full max-w-lg rounded-3xl shadow-xl border border-slate-200 p-5 sm:p-6 space-y-4 my-8 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <div className="p-2 rounded-xl bg-blue-50 border border-blue-100">
-                  <Edit3 className="h-5 w-5 text-blue-700" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-slate-900">
-                    Editar Gasto de Maquinaria
-                  </h3>
-                  <p className="text-xs text-slate-500">
-                    Modificar datos del registro en Google Sheets
-                  </p>
-                </div>
-              </div>
+              <h3 className="text-base font-bold text-slate-900">
+                Editar gasto
+              </h3>
               <button
                 type="button"
                 onClick={() => setEditingExpense(null)}
@@ -2479,46 +3588,53 @@ export const MachineryView: React.FC<Props> = ({
               </button>
             </div>
 
-            <form onSubmit={handleSaveEditExpense} className="space-y-4">
+            <form onSubmit={handleSaveEditExpense} className="space-y-3">
+              {editExpError && (
+                <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-start gap-2">
+                  <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                  <span className="break-words">{editExpError}</span>
+                </div>
+              )}
+
               {/* Fecha */}
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Fecha
-                </label>
+                <label className={FORM_LABEL_CLASS}>Fecha</label>
                 <input
                   type="date"
                   required
                   value={editExpFecha}
                   onChange={(e) => setEditExpFecha(e.target.value)}
-                  className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-600 focus:outline-none min-h-[44px]"
+                  className={FORM_INPUT_CLASS}
                 />
               </div>
 
-              {/* Maquinaria */}
+              {/* Máquina */}
               <VisualMachinePicker
-                label="Maquinaria / Equipo"
+                label="Máquina"
+                optionalText="(opcional)"
                 machines={machines}
                 selectedMachineId={editExpMachineId}
                 onSelectMachine={(m) => setEditExpMachineId(m.id)}
+                allowNone
+                noneLabel="Gasto general (sin máquina)"
               />
 
-              {/* Concepto / Ítem de gasto */}
+              {/* Concepto de gasto */}
               <VisualExpenseItemPicker
-                label="Concepto de Gasto"
+                label="Concepto de gasto"
                 items={machineryExpenseItems}
                 selectedItemName={editExpItemGasto}
                 onSelectItem={(item) => {
                   setEditExpItemGasto(item.nombre);
                   if (item.unidad) setEditExpUnidad(item.unidad);
                 }}
+                required
               />
 
               {/* Cantidad y Unidad */}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-2.5 items-end">
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Cantidad
-                  </label>
+                  <label className={FORM_LABEL_CLASS}>Cantidad</label>
                   <input
                     type="number"
                     inputMode="decimal"
@@ -2527,29 +3643,25 @@ export const MachineryView: React.FC<Props> = ({
                     min="0.01"
                     value={editExpCantidad}
                     onChange={(e) => setEditExpCantidad(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-600 focus:outline-none font-bold min-h-[44px]"
+                    className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Unidad
-                  </label>
+                  <label className={FORM_LABEL_CLASS}>Unidad</label>
                   <input
                     type="text"
                     value={editExpUnidad}
                     onChange={(e) => setEditExpUnidad(e.target.value)}
-                    placeholder="litros, repuestos, etc."
-                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-600 focus:outline-none min-h-[44px]"
+                    placeholder="litros, repuestos"
+                    className={FORM_INPUT_CLASS}
                   />
                 </div>
               </div>
 
               {/* Precio y Moneda */}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-2.5 items-end">
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Precio Unitario
-                  </label>
+                  <label className={FORM_LABEL_CLASS}>Precio unitario</label>
                   <input
                     type="number"
                     inputMode="decimal"
@@ -2558,77 +3670,321 @@ export const MachineryView: React.FC<Props> = ({
                     min="0.01"
                     value={editExpPrecio}
                     onChange={(e) => setEditExpPrecio(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-600 focus:outline-none font-bold min-h-[44px]"
+                    className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Moneda
-                  </label>
-                  <select
-                    value={editExpMoneda}
-                    onChange={(e) => setEditExpMoneda(e.target.value as Currency)}
-                    className="w-full text-sm px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-600 focus:outline-none min-h-[44px]"
-                  >
-                    <option value="BOB">BOB (Bs)</option>
-                    <option value="USD">USD ($)</option>
-                  </select>
-                </div>
+                <CurrencySelect
+                  label="Moneda"
+                  required
+                  value={editExpMoneda}
+                  onChange={(curr) => setEditExpMoneda(curr)}
+                />
               </div>
 
-              {/* Total Calculado */}
-              <div className="bg-rose-50/80 p-3 rounded-xl border border-rose-200/70 flex items-center justify-between">
-                <div>
-                  <span className="text-[11px] text-rose-800 block uppercase font-bold">
-                    Total Gasto
-                  </span>
-                  <span className="text-[10px] text-slate-500">
-                    {editExpCantidad || 1} &times; {editExpMoneda} {editExpPrecio || 0}
-                  </span>
-                </div>
-                <span className="text-base font-black text-rose-950 font-mono">
-                  {formatMoney(
+              {/* Tipo de cambio editable */}
+              <div>
+                <label className={FORM_LABEL_CLASS}>
+                  Tipo de cambio (Bs/USD) <span className="text-[#C44545]">*</span>
+                </label>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="any"
+                  required
+                  min="0.01"
+                  placeholder="6.96"
+                  value={editExpTc}
+                  onChange={(e) => setEditExpTc(e.target.value)}
+                  className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
+                />
+              </div>
+
+              {/* Importe total */}
+              <div className="bg-[#FCECEC] px-3.5 py-2.5 rounded-xl border border-[#F2C6C6] flex items-center justify-between">
+                <span className="text-[13px] font-bold text-[#9F2D2D]">Importe total</span>
+                <span className="text-base font-extrabold text-[#9F2D2D] font-mono tabular-nums">
+                  {editExpMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                  {(
                     (typeof editExpCantidad === 'number' ? editExpCantidad : 1) *
-                      (typeof editExpPrecio === 'number' ? editExpPrecio : 0),
-                    editExpMoneda
-                  )}
+                    (typeof editExpPrecio === 'number' ? editExpPrecio : 0)
+                  ).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
 
-              {/* Observaciones */}
+              {/* Observación */}
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Observaciones
-                </label>
+                <label className={FORM_LABEL_CLASS}>Observación</label>
                 <textarea
                   rows={2}
                   value={editExpObservacion}
                   onChange={(e) => setEditExpObservacion(e.target.value)}
-                  className="w-full text-sm p-3 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-600 focus:outline-none"
+                  className={FORM_TEXTAREA_CLASS}
                 />
               </div>
 
               {/* Botones */}
-              <div className="flex items-center gap-3 pt-2">
+              <div className="flex items-center gap-2.5 pt-1">
                 <button
                   type="button"
                   onClick={() => setEditingExpense(null)}
-                  className="flex-1 min-h-[48px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm transition cursor-pointer"
+                  className="flex-1 h-[42px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm transition cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
                   disabled={saving}
-                  className="flex-1 min-h-[48px] rounded-xl bg-blue-700 hover:bg-blue-800 active:bg-blue-900 text-white font-bold text-sm transition disabled:opacity-50 cursor-pointer"
+                  className="flex-1 h-[42px] rounded-xl bg-[#24875B] hover:bg-[#1D704B] active:bg-[#175B3D] text-white font-bold text-sm transition disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
                 >
-                  {saving ? 'Guardando...' : 'Guardar Cambios'}
+                  <Save className="h-4 w-4 shrink-0" />
+                  <span>{saving ? 'Guardando...' : 'Guardar cambios'}</span>
                 </button>
               </div>
             </form>
           </div>
         </div>
       )}
+
+      {/* ============================================================ */}
+      {/* MODAL: REGISTRAR COBRO EN USD O BS (cobros.registrar)        */}
+      {/* ============================================================ */}
+      {cobroModalCuenta && (() => {
+        const importeInputNum = parseDecimalNumber(cobroImporte);
+        const tcInputNum = parseDecimalNumber(cobroTc);
+        const equivUsdPreview =
+          cobroMoneda === 'BOB'
+            ? tcInputNum > 0 && importeInputNum > 0
+              ? Number((importeInputNum / tcInputNum).toFixed(2))
+              : 0
+            : importeInputNum > 0
+            ? Number(importeInputNum.toFixed(2))
+            : 0;
+        const maxEnMonedaSeleccionada =
+          cobroMoneda === 'BOB' && tcInputNum > 0
+            ? Number((cobroModalCuenta.saldo * tcInputNum).toFixed(2))
+            : Number(cobroModalCuenta.saldo.toFixed(2));
+        const nuevoSaldoEstimado = Math.max(
+          0,
+          Number((cobroModalCuenta.saldo - equivUsdPreview).toFixed(2))
+        );
+        const excedeSaldo = equivUsdPreview > cobroModalCuenta.saldo + 0.005;
+
+        return (
+          <div className="fixed inset-0 z-50 flex flex-col justify-end sm:justify-center items-center bg-slate-900/50 backdrop-blur-xs p-0 sm:p-4 animate-fadeIn">
+            <div className="fixed inset-0" onClick={() => !savingCobro && setCobroModalCuenta(null)} />
+            <div className="relative w-full max-w-md bg-white rounded-t-3xl sm:rounded-3xl shadow-2xl border-t sm:border border-slate-200 overflow-hidden z-10 max-h-[92vh] flex flex-col">
+              <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold text-slate-900 truncate">Registrar cobro</h3>
+                  <p className="text-xs text-slate-500 truncate mt-0.5">
+                    {cobroModalCuenta.cliente} · {formatDateDDMMAAAA(cobroModalCuenta.fecha)}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={savingCobro}
+                  onClick={() => setCobroModalCuenta(null)}
+                  className="p-2 rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-700 cursor-pointer"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSubmitCobro} className="p-4 sm:p-5 overflow-y-auto space-y-3">
+                {cobroModalError && (
+                  <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                    <span className="break-words">{cobroModalError}</span>
+                  </div>
+                )}
+
+                {/* Resumen de cuenta en USD */}
+                <div className="rounded-xl border border-[#E2E7E3] bg-[#F8FAF8] overflow-hidden">
+                  <div className="grid grid-cols-3 divide-x divide-[#E6EBE7] py-2 text-center">
+                    <div className="px-1.5">
+                      <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Total</span>
+                      <span className="text-xs font-bold text-[#26352D] font-mono tabular-nums">
+                        USD {cobroModalCuenta.importe.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                    <div className="px-1.5">
+                      <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Cobrado</span>
+                      <span className="text-xs font-bold text-[#24875B] font-mono tabular-nums">
+                        USD {cobroModalCuenta.cobrado.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                    <div className="px-1.5">
+                      <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Saldo</span>
+                      <span className="text-xs font-black text-amber-700 font-mono tabular-nums">
+                        USD {cobroModalCuenta.saldo.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                  </div>
+                  {cobroModalCuenta.monedaOriginalServicio === 'BOB' && cobroModalCuenta.importeOriginalServicio ? (
+                    <div className="px-3 py-1.5 border-t border-[#E6EBE7] text-[11px] text-[#5E6D64] text-center font-mono">
+                      Servicio original: Bs {cobroModalCuenta.importeOriginalServicio.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      {cobroModalCuenta.tcServicio ? ` · TC ${cobroModalCuenta.tcServicio}` : ''}
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* Moneda del cobro: selector desplegable unificado */}
+                <CurrencySelect
+                  label="Moneda del cobro"
+                  required
+                  value={cobroMoneda}
+                  onChange={(nextCurr) => {
+                    if (nextCurr === cobroMoneda) return;
+                    setCobroMoneda(nextCurr);
+                    setCobroModalError(null);
+                    if (nextCurr === 'USD') {
+                      setCobroImporte(
+                        cobroModalCuenta.saldo > 0 ? String(Number(cobroModalCuenta.saldo.toFixed(2))) : ''
+                      );
+                    } else {
+                      const tcUse = tcInputNum > 0 ? tcInputNum : (exchangeRate?.tasaBobPerUsd || 6.96);
+                      setCobroImporte(
+                        cobroModalCuenta.saldo > 0
+                          ? String(Number((cobroModalCuenta.saldo * tcUse).toFixed(2)))
+                          : ''
+                      );
+                    }
+                  }}
+                />
+
+                {/* Fecha del cobro y Tipo de cambio */}
+                <div className="grid grid-cols-2 gap-2.5 items-end">
+                  <div>
+                    <label className={FORM_LABEL_CLASS}>
+                      Fecha de cobro <span className="text-[#C44545]">*</span>
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      value={cobroFecha}
+                      onChange={(e) => setCobroFecha(e.target.value)}
+                      className={FORM_INPUT_CLASS}
+                    />
+                  </div>
+                  <div>
+                    <label className={FORM_LABEL_CLASS}>
+                      Tipo de cambio <span className="text-[#C44545]">*</span>
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      min="0.01"
+                      required
+                      placeholder="6.96"
+                      value={cobroTc}
+                      onChange={(e) => setCobroTc(e.target.value)}
+                      className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
+                    />
+                  </div>
+                </div>
+
+                {/* Importe recibido en la moneda seleccionada */}
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="text-[13px] font-semibold text-[#26352D]">
+                      Importe recibido ({cobroMoneda === 'USD' ? 'USD' : 'Bs'}){' '}
+                      <span className="text-[#C44545]">*</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setCobroImporte(String(maxEnMonedaSeleccionada))}
+                      className="text-[11px] font-semibold text-[#24875B] hover:underline cursor-pointer shrink-0"
+                    >
+                      Usar saldo ({cobroMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                      {maxEnMonedaSeleccionada.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
+                    </button>
+                  </div>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    min="0.01"
+                    required
+                    placeholder="0.00"
+                    value={cobroImporte}
+                    onChange={(e) => setCobroImporte(e.target.value)}
+                    className={`${FORM_INPUT_CLASS} font-semibold tabular-nums ${
+                      excedeSaldo ? 'border-red-400 focus:border-red-500 text-red-700' : ''
+                    }`}
+                  />
+                </div>
+
+                {/* Conversión automática y nuevo saldo estimado en USD */}
+                <div
+                  className={`rounded-xl px-3.5 py-2.5 border space-y-1 ${
+                    excedeSaldo
+                      ? 'bg-red-50 border-red-200'
+                      : cobroMoneda === 'BOB'
+                      ? 'bg-sky-50/80 border-sky-200'
+                      : 'bg-[#EAF5EE] border-[#BFE0CD]'
+                  }`}
+                >
+                  {cobroMoneda === 'BOB' && (
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-bold text-sky-950">Equivalente en USD</span>
+                      <span className="text-sm font-extrabold text-sky-950 font-mono tabular-nums">
+                        USD {equivUsdPreview.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between text-xs">
+                    <span className={`font-semibold ${excedeSaldo ? 'text-red-800' : 'text-[#26352D]'}`}>
+                      Saldo pendiente
+                    </span>
+                    <span className={`font-mono font-bold tabular-nums ${excedeSaldo ? 'text-red-700' : 'text-[#175B3D]'}`}>
+                      USD {nuevoSaldoEstimado.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                  {excedeSaldo && (
+                    <p className="text-[11px] font-semibold text-red-700">
+                      El monto supera el saldo pendiente de USD {cobroModalCuenta.saldo.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.
+                    </p>
+                  )}
+                </div>
+
+                {/* Observación */}
+                <div>
+                  <label className={FORM_LABEL_CLASS}>
+                    Observación <span className="text-[#7A8780] font-normal">(opcional)</span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    placeholder="Transferencia, pago parcial en efectivo..."
+                    value={cobroObs}
+                    onChange={(e) => setCobroObs(e.target.value)}
+                    className={FORM_TEXTAREA_CLASS}
+                  />
+                </div>
+
+                <div className="flex items-center gap-2.5 pt-1">
+                  <button
+                    type="button"
+                    disabled={savingCobro}
+                    onClick={() => setCobroModalCuenta(null)}
+                    className="flex-1 h-[42px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm transition cursor-pointer disabled:opacity-50"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingCobro || excedeSaldo}
+                    className="flex-1 h-[42px] rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white font-bold text-sm transition disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
+                  >
+                    <Save className="h-4 w-4 shrink-0" />
+                    <span>{savingCobro ? 'Guardando...' : 'Guardar cobro'}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

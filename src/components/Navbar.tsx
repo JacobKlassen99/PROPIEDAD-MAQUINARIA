@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { RefreshCw, FileCode, User, LogOut, CheckCircle2 } from 'lucide-react';
+import { RefreshCw, User, LogOut, ShieldOff } from 'lucide-react';
 import { Campaign, Currency, ExchangeRateConfig, UserSession } from '../types';
+import { hasAdminAuthorization, revokeAdminAuthorization } from '../services/backend';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface Props {
@@ -15,26 +16,26 @@ interface Props {
   onOpenAppsScriptModal: () => void;
   session: UserSession | null;
   onLogout: () => void;
+  onAdminAuthorizationRevoked?: () => void;
 }
 
 export const Navbar: React.FC<Props> = ({
   title,
-  subtitle,
   activeCampaign,
-  currency,
-  onCurrencyToggle,
-  exchangeRate,
   onRefresh,
   isRefreshing,
-  onOpenAppsScriptModal,
   session,
   onLogout,
+  onAdminAuthorizationRevoked,
 }) => {
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [showRevokeAdminConfirm, setShowRevokeAdminConfirm] = useState(false);
+  const [revokingAdmin, setRevokingAdmin] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Close dropdown on outside click
+  const isDeviceAdminAuthorized = hasAdminAuthorization();
+
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
@@ -59,82 +60,111 @@ export const Navbar: React.FC<Props> = ({
     onLogout();
   };
 
+  const handleOpenRevokeAdminConfirm = () => {
+    setIsUserMenuOpen(false);
+    setShowRevokeAdminConfirm(true);
+  };
+
+  const handleConfirmRevokeAdmin = async () => {
+    setRevokingAdmin(true);
+    try {
+      await revokeAdminAuthorization();
+      setShowRevokeAdminConfirm(false);
+      onAdminAuthorizationRevoked?.();
+    } finally {
+      setRevokingAdmin(false);
+    }
+  };
+
   return (
     <>
-      <header className="sticky top-0 z-30 w-full max-w-full flex h-14 sm:h-16 shrink-0 items-center justify-between border-b border-slate-200/80 bg-white/95 px-3 sm:px-6 backdrop-blur-md shadow-xs">
-        {/* Left: Pantalla actual (sin botón hamburguesa) */}
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-          <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 tracking-tight truncate">
+      <header
+        className="no-print shrink-0 z-30 w-full max-w-full flex items-center justify-between gap-3 border-b border-slate-200/90 bg-white px-4 sm:px-6 min-h-[60px]"
+        style={{
+          paddingTop: 'max(env(safe-area-inset-top, 0px), 0px)',
+        }}
+      >
+        {/* Left: Current Screen Title */}
+        <div className="flex items-baseline gap-2.5 min-w-0">
+          <h1 className="text-xl sm:text-2xl font-bold text-[#26352D] tracking-tight truncate">
             {title}
           </h1>
+          {activeCampaign && (
+            <span
+              className="text-xs sm:text-sm font-medium text-slate-500 whitespace-nowrap truncate max-w-[120px] sm:max-w-[200px]"
+              title={`Campaña activa: ${activeCampaign.nombre}`}
+            >
+              · {activeCampaign.nombre}
+            </span>
+          )}
         </div>
 
-        {/* Right: Acciones y sesión */}
-        <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
-
-          {/* Active Campaign Badge (ej. 2026) */}
-          {activeCampaign && (
-            <div
-              className="flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-full bg-emerald-50 border border-emerald-200/80 text-xs sm:text-xs font-bold text-emerald-900 shrink-0 max-w-[110px] sm:max-w-[180px]"
-              title={`Gestión activa: ${activeCampaign.nombre}`}
-            >
-              <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0" />
-              <span className="truncate">{activeCampaign.nombre}</span>
-            </div>
-          )}
-
-          {/* Manual Refresh Button */}
+        {/* Right: Refresh & User Session */}
+        <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={onRefresh}
             disabled={isRefreshing}
-            className="p-2 rounded-full border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 transition active:scale-95 disabled:opacity-50 cursor-pointer shrink-0 flex items-center justify-center min-w-[38px] min-h-[38px]"
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2.5 sm:px-3.5 text-[#26352D] hover:bg-slate-50 transition-colors active:scale-95 disabled:opacity-50 cursor-pointer shrink-0 min-h-[44px] min-w-[44px]"
             title="Actualizar datos desde Google Sheets"
             aria-label="Actualizar datos"
           >
-            <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin text-emerald-600' : 'text-slate-600'}`} />
+            <RefreshCw className={`h-4.5 w-4.5 ${isRefreshing ? 'animate-spin text-[#24875B]' : 'text-slate-600'}`} />
+            <span className="hidden sm:inline text-sm font-semibold whitespace-nowrap">
+              {isRefreshing ? 'Actualizando' : 'Actualizar'}
+            </span>
           </button>
 
-          {/* User Session Icon Button & Popover */}
+          {/* User Session Menu (Cuenta y Seguridad del dispositivo) */}
           <div className="relative shrink-0" ref={menuRef}>
             <button
               type="button"
               onClick={() => setIsUserMenuOpen((prev) => !prev)}
-              className="flex items-center justify-center h-9 w-9 sm:h-10 sm:w-10 rounded-full bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 transition active:scale-95 cursor-pointer focus:outline-none focus:ring-2 focus:ring-emerald-500"
-              title="Opciones de usuario y sesión"
-              aria-label="Menú de usuario"
+              className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2.5 sm:px-3.5 text-[#26352D] hover:bg-slate-50 transition-colors active:scale-95 cursor-pointer min-h-[44px] min-w-[44px]"
+              title="Opciones de cuenta y seguridad"
+              aria-label="Cuenta"
               aria-expanded={isUserMenuOpen}
             >
-              <User className="h-4.5 w-4.5 sm:h-5 sm:w-5 text-slate-700" />
+              <User className="h-4.5 w-4.5 text-[#26352D] shrink-0" />
+              <span className="hidden sm:inline text-sm font-semibold whitespace-nowrap">
+                Cuenta
+              </span>
             </button>
 
-            {/* User Dropdown Menu */}
             {isUserMenuOpen && (
-              <div className="absolute right-0 top-full mt-2 w-56 bg-white rounded-2xl shadow-xl border border-slate-200 p-2 z-50 animate-in fade-in zoom-in-95 origin-top-right">
-                {/* User Info Header */}
-                <div className="flex items-center gap-2.5 p-2 bg-slate-50 rounded-xl border border-slate-100">
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-800 font-bold text-xs">
+              <div className="absolute right-0 top-full mt-2 w-68 bg-white rounded-2xl shadow-lg border border-slate-200 p-2.5 z-50">
+                <div className="flex items-center gap-3 p-2.5 rounded-xl bg-[#FAFBF8] border border-slate-100">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#EAF5EE] text-[#24875B] font-bold text-sm">
                     {session?.usuario ? session.usuario.charAt(0).toUpperCase() : 'U'}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="text-xs sm:text-sm font-bold text-slate-900 truncate">
-                      {session?.usuario || 'Administrador'}
+                    <p className="text-sm font-bold text-[#26352D] truncate">
+                      {session?.usuario || 'Usuario'}
                     </p>
-                    <span className="inline-block text-[10px] font-semibold text-emerald-800 bg-emerald-50 px-1.5 py-0.2 rounded-full border border-emerald-200/60 capitalize tracking-tight">
-                      {session?.rol || 'administrador'}
-                    </span>
+                    <p className="text-xs text-slate-500">
+                      {isDeviceAdminAuthorized ? 'Dispositivo con acceso Admin' : 'Sesión operativa'}
+                    </p>
                   </div>
                 </div>
 
-                {/* Actions */}
-                <div className="mt-1.5 pt-1 border-t border-slate-100">
-                  {/* Cerrar sesión */}
+                <div className="mt-2 pt-2 border-t border-slate-100 space-y-1">
+                  {isDeviceAdminAuthorized && (
+                    <button
+                      type="button"
+                      onClick={handleOpenRevokeAdminConfirm}
+                      className="w-full flex items-center gap-2.5 px-3 py-2.5 text-sm font-semibold text-[#C44545] hover:bg-[#FCECEC] rounded-xl transition-colors text-left cursor-pointer min-h-[44px]"
+                    >
+                      <ShieldOff className="h-4.5 w-4.5 text-[#C44545] shrink-0" />
+                      <span>Revocar acceso administrativo</span>
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     onClick={handleOpenLogoutConfirm}
-                    className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-bold text-red-600 hover:bg-red-50 rounded-xl transition text-left cursor-pointer active:scale-98"
+                    className="w-full flex items-center gap-2.5 px-3 py-2.5 text-sm font-semibold text-[#C44545] hover:bg-[#FCECEC] rounded-xl transition-colors text-left cursor-pointer min-h-[44px]"
                   >
-                    <LogOut className="h-4 w-4 text-red-600 shrink-0" />
+                    <LogOut className="h-4.5 w-4.5 text-[#C44545] shrink-0" />
                     <span>Cerrar sesión</span>
                   </button>
                 </div>
@@ -142,47 +172,97 @@ export const Navbar: React.FC<Props> = ({
             )}
           </div>
 
-          {/* PWA In-App Install Button (Discreet) */}
-          <div className="hidden sm:block shrink-0">
+          <div className="hidden md:block shrink-0">
             <PWAInstallButton />
           </div>
         </div>
       </header>
 
-      {/* Confirmation Modal: Cerrar Sesión */}
+      {/* Revoke Administrative Device Access Confirmation Modal */}
+      {showRevokeAdminConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="revoke-admin-title"
+        >
+          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-xl border border-slate-200 space-y-5 text-center">
+            <div className="flex h-14 w-14 mx-auto items-center justify-center rounded-2xl bg-[#FCECEC] text-[#C44545]">
+              <ShieldOff className="h-7 w-7" />
+            </div>
+
+            <div className="space-y-1.5">
+              <h3 id="revoke-admin-title" className="text-lg font-bold text-[#26352D]">
+                ¿Revocar acceso administrativo?
+              </h3>
+              <p className="text-sm text-slate-600 leading-relaxed">
+                Se eliminará la autorización administrativa guardada en este dispositivo. Deberás ingresar la contraseña de administrador para volver a configurar el sistema.
+              </p>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2.5 pt-1">
+              <button
+                type="button"
+                disabled={revokingAdmin}
+                onClick={() => setShowRevokeAdminConfirm(false)}
+                className="w-full sm:flex-1 py-3 px-4 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-[#26352D] text-sm font-semibold transition-colors cursor-pointer min-h-[48px]"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={revokingAdmin}
+                onClick={handleConfirmRevokeAdmin}
+                className="w-full sm:flex-1 py-3 px-4 rounded-xl bg-[#C44545] hover:bg-[#A83737] text-white text-sm font-bold transition-colors cursor-pointer min-h-[48px] flex items-center justify-center gap-2"
+              >
+                {revokingAdmin ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    <span>Revocando...</span>
+                  </>
+                ) : (
+                  <span>Revocar acceso</span>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Logout Confirmation Modal */}
       {showLogoutConfirm && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs animate-in fade-in duration-200"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs"
           role="dialog"
           aria-modal="true"
           aria-labelledby="logout-title"
         >
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-200 space-y-5 text-center animate-in zoom-in-95 duration-200">
-            <div className="flex h-14 w-14 mx-auto items-center justify-center rounded-2xl bg-red-100 text-red-600">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-xl border border-slate-200 space-y-5 text-center">
+            <div className="flex h-14 w-14 mx-auto items-center justify-center rounded-2xl bg-[#FCECEC] text-[#C44545]">
               <LogOut className="h-7 w-7" />
             </div>
 
             <div className="space-y-1.5">
-              <h3 id="logout-title" className="text-lg font-bold text-slate-900 tracking-tight">
+              <h3 id="logout-title" className="text-lg font-bold text-[#26352D]">
                 ¿Cerrar sesión?
               </h3>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                ¿Estás seguro de que deseas salir de la aplicación MAQUINARIAS Y PROPIEDAD?
+              <p className="text-sm text-slate-600 leading-relaxed">
+                ¿Deseas salir de la aplicación Maquinarias y Propiedad?
               </p>
             </div>
 
-            <div className="flex flex-col sm:flex-row gap-2.5 pt-2">
+            <div className="flex flex-col sm:flex-row gap-2.5 pt-1">
               <button
                 type="button"
                 onClick={() => setShowLogoutConfirm(false)}
-                className="w-full sm:flex-1 py-3 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-sm font-semibold transition active:scale-95 cursor-pointer min-h-[44px]"
+                className="w-full sm:flex-1 py-3 px-4 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-[#26352D] text-sm font-semibold transition-colors cursor-pointer min-h-[48px]"
               >
                 Cancelar
               </button>
               <button
                 type="button"
                 onClick={handleConfirmLogout}
-                className="w-full sm:flex-1 py-3 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-bold transition active:scale-95 cursor-pointer min-h-[44px] shadow-sm"
+                className="w-full sm:flex-1 py-3 px-4 rounded-xl bg-[#C44545] hover:bg-[#A83737] text-white text-sm font-bold transition-colors cursor-pointer min-h-[48px]"
               >
                 Cerrar sesión
               </button>

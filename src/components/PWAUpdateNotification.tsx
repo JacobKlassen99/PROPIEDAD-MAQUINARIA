@@ -61,7 +61,7 @@ export const PWAUpdateNotification: React.FC<Props> = ({ hasUnsavedChanges = fal
   }
 
   return (
-    <div className="w-full bg-emerald-800 text-white border-b border-emerald-950 shadow-md relative z-50 transition-all duration-300">
+    <div className="shrink-0 w-full bg-emerald-800 text-white border-b border-emerald-950 shadow-md relative z-50 transition-all duration-300">
       <div className="max-w-5xl mx-auto px-3 sm:px-6 py-2.5 sm:py-3 flex flex-col sm:flex-row items-center justify-between gap-2.5 sm:gap-4">
         {/* Left info section */}
         <div className="flex items-center gap-2.5 min-w-0 w-full sm:w-auto">
