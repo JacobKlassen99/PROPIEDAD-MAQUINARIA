@@ -60,6 +60,8 @@ import {
   ItemConfig,
   HarvestRecord,
   ExpenseAllocationGroup,
+  Machine,
+  MachineJobType,
 } from '../types';
 import {
   createExpense,
@@ -79,6 +81,8 @@ import {
   assignHarvestPrice,
   allocateExpense,
   getExpenseAllocations,
+  compareChronologicalDesc,
+  getMachineIcon,
 } from '../services/backend';
 import { ReportsView } from './ReportsView';
 import {
@@ -99,6 +103,8 @@ interface Props {
   campaigns?: Campaign[];
   activeCampaign: Campaign | null;
   lots: Lot[];
+  machines: Machine[];
+  machineJobTypes?: MachineJobType[];
   expenses: Expense[];
   incomes: Income[];
   jobs: MachineryJob[];
@@ -147,6 +153,8 @@ export const PropertyView: React.FC<Props> = ({
   campaigns = [],
   activeCampaign,
   lots,
+  machines = [],
+  machineJobTypes = [],
   expenses,
   incomes,
   jobs,
@@ -530,12 +538,7 @@ export const PropertyView: React.FC<Props> = ({
         cosechaRecord: h,
         creadoEn: h.creadoEn,
       })),
-  ].sort((a, b) => {
-    const timeA = a.creadoEn ? new Date(a.creadoEn).getTime() : new Date(a.fecha).getTime();
-    const timeB = b.creadoEn ? new Date(b.creadoEn).getTime() : new Date(b.fecha).getTime();
-    if (timeB !== timeA) return timeB - timeA;
-    return (b.id || '').localeCompare(a.id || '');
-  });
+  ].sort(compareChronologicalDesc);
 
   // Total movements count
   const totalMovementsCount = allMovements.length;
@@ -1539,7 +1542,7 @@ export const PropertyView: React.FC<Props> = ({
               .toLowerCase()
               .includes(qHarv);
           })
-          .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+          .sort(compareChronologicalDesc);
 
         const totalPendingTons = filteredHarvests.reduce((sum, h) => sum + (Number(h.pendiente) || 0), 0);
         const totalHarvestedTons = filteredHarvests.reduce((sum, h) => sum + (Number(h.toneladas) || 0), 0);
@@ -2290,7 +2293,7 @@ export const PropertyView: React.FC<Props> = ({
                 >
                   {pendingHarvests
                     .filter((h) => h.pendiente > 0.0001)
-                    .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''))
+                    .sort(compareChronologicalDesc)
                     .map((h) => {
                       const lotName =
                         h.loteNombre || lots.find((l) => String(l.id) === String(h.loteId))?.nombre || 'Lote';
@@ -3125,12 +3128,14 @@ export const PropertyView: React.FC<Props> = ({
       {/* ============================================================ */}
       {currentScreen === 'maquinaria_recibida' && (() => {
         const q = machineryJobsSearch.trim().toLowerCase();
-        const filteredLinkedJobs = linkedPropertyJobs.filter((j) => {
-          if (!q) return true;
-          return `${j.trabajoNombre || ''} ${j.maquinariaNombre || ''} ${j.loteNombre || ''} ${j.fecha || ''}`
-            .toLowerCase()
-            .includes(q);
-        });
+        const filteredLinkedJobs = linkedPropertyJobs
+          .filter((j) => {
+            if (!q) return true;
+            return `${j.trabajoNombre || ''} ${j.maquinariaNombre || ''} ${j.loteNombre || ''} ${j.fecha || ''}`
+              .toLowerCase()
+              .includes(q);
+          })
+          .sort(compareChronologicalDesc);
 
         return (
           <div className="space-y-3">
@@ -3174,7 +3179,7 @@ export const PropertyView: React.FC<Props> = ({
                     key={j.id}
                     icon={
                       <div className="w-8 h-8 rounded-lg bg-[#FCECEC] border border-[#F2C6C6]/70 flex items-center justify-center">
-                        <VisualIcon name={j.icono || 'tractor'} size="xs" />
+                        <VisualIcon name={getMachineIcon(j.maquinariaId, machines, j.icono)} size="xs" />
                       </div>
                     }
                     title={fullLabor}

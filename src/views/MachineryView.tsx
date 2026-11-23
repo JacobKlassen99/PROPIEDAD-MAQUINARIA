@@ -62,6 +62,8 @@ import {
   getCobros,
   getCobroEstado,
   registrarCobro,
+  compareChronologicalDesc,
+  getMachineIcon,
 } from '../services/backend';
 import {
   convertHistoricalAmount,
@@ -1223,7 +1225,7 @@ export const MachineryView: React.FC<Props> = ({
         tarifaOPrecio: j.tarifa,
         unidad: j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'hora',
         observacion: j.observacion,
-        icono: j.icono || 'tractor',
+        icono: getMachineIcon(j.maquinariaId, machines, j.icono),
         creadoEn: j.creadoEn,
         rawJob: j,
       };
@@ -1245,17 +1247,12 @@ export const MachineryView: React.FC<Props> = ({
         tarifaOPrecio: e.precio,
         unidad: e.unidad,
         observacion: e.observacion,
-        icono: e.icono || e.itemGasto || 'repuestos',
+        icono: getMachineIcon(e.maquinariaId, machines, e.icono || e.itemGasto || 'repuestos'),
         creadoEn: e.creadoEn,
         rawExpense: e,
       };
     }),
-  ].sort((a, b) => {
-    const timeA = a.creadoEn ? new Date(a.creadoEn).getTime() : new Date(a.fecha).getTime();
-    const timeB = b.creadoEn ? new Date(b.creadoEn).getTime() : new Date(b.fecha).getTime();
-    if (timeB !== timeA) return timeB - timeA;
-    return (b.id || '').localeCompare(a.id || '');
-  });
+  ].sort(compareChronologicalDesc);
 
   const filteredMachineryMovements = allMachineryMovements.filter((m) => {
     // 1. Primary Filter: Todos | Ingresos | Gastos
@@ -1599,7 +1596,7 @@ export const MachineryView: React.FC<Props> = ({
               .toLowerCase()
               .includes(qCobro);
           })
-          .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+          .sort(compareChronologicalDesc);
 
         const totalSaldoPendienteView = filteredCobros.reduce(
           (sum, c) =>
@@ -1766,7 +1763,7 @@ export const MachineryView: React.FC<Props> = ({
                       key={rowKey}
                       icon={
                         <div className="w-8 h-8 rounded-lg bg-[#EAF5EE] border border-[#BFE0CD]/70 flex items-center justify-center">
-                          <VisualIcon name={c.icono || 'tractor'} size="xs" />
+                          <VisualIcon name={getMachineIcon(c.maquinariaId, machines, c.icono)} size="xs" />
                         </div>
                       }
                       title={
@@ -2730,7 +2727,7 @@ export const MachineryView: React.FC<Props> = ({
                   {filteredSummaryMachines.map((m) => {
                     const machineJobs = jobs
                       .filter((j) => j.maquinariaId === m.id)
-                      .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+                      .sort(compareChronologicalDesc);
                     const hrs = machineJobs
                       .filter((j) => j.unidad === 'hora' || (j.unidad as string) === 'h')
                       .reduce((sum, j) => sum + (Number(j.cantidad) || 0), 0);

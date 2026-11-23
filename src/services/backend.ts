@@ -3316,3 +3316,66 @@ export async function getExpenseAllocations(
   ]);
   return rawList.map(normalizeExpenseAllocationGroup);
 }
+
+export function parseFlexibleDate(dateStr: string | undefined | null): number {
+  if (!dateStr) return 0;
+  const str = String(dateStr).trim();
+  const dmyMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+  if (dmyMatch) {
+    const day = parseInt(dmyMatch[1], 10);
+    const month = parseInt(dmyMatch[2], 10) - 1;
+    let year = parseInt(dmyMatch[3], 10);
+    if (year < 100) year += 2000;
+    const hour = dmyMatch[4] ? parseInt(dmyMatch[4], 10) : 0;
+    const minute = dmyMatch[5] ? parseInt(dmyMatch[5], 10) : 0;
+    const second = dmyMatch[6] ? parseInt(dmyMatch[6], 10) : 0;
+    const dt = new Date(year, month, day, hour, minute, second);
+    const ts = dt.getTime();
+    if (!isNaN(ts)) return ts;
+  }
+  const ymdMatch = str.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})(?:\s+T?(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+  if (ymdMatch) {
+    const year = parseInt(ymdMatch[1], 10);
+    const month = parseInt(ymdMatch[2], 10) - 1;
+    const day = parseInt(ymdMatch[3], 10);
+    const hour = ymdMatch[4] ? parseInt(ymdMatch[4], 10) : 0;
+    const minute = ymdMatch[5] ? parseInt(ymdMatch[5], 10) : 0;
+    const second = ymdMatch[6] ? parseInt(ymdMatch[6], 10) : 0;
+    const dt = new Date(year, month, day, hour, minute, second);
+    const ts = dt.getTime();
+    if (!isNaN(ts)) return ts;
+  }
+  const parsed = Date.parse(str);
+  return isNaN(parsed) ? 0 : parsed;
+}
+
+export function compareChronologicalDesc(
+  a: { fecha?: string; creadoEn?: string },
+  b: { fecha?: string; creadoEn?: string }
+): number {
+  const timeA = parseFlexibleDate(a.fecha);
+  const timeB = parseFlexibleDate(b.fecha);
+  if (timeA !== timeB) {
+    return timeB - timeA;
+  }
+  const createdA = parseFlexibleDate(a.creadoEn);
+  const createdB = parseFlexibleDate(b.creadoEn);
+  if (createdA !== createdB) {
+    return createdB - createdA;
+  }
+  return 0;
+}
+
+export function getMachineIcon(maquinaId?: string, machines: any[] = [], fallbackIcon?: string): string {
+  if (!maquinaId) return fallbackIcon || 'tractor';
+  const cleanId = String(maquinaId).trim();
+  const found = machines.find(
+    (m) =>
+      String(m.id || '').trim() === cleanId ||
+      String(m.nombre || '').trim().toLowerCase() === cleanId.toLowerCase()
+  );
+  if (found?.icono) return String(found.icono).trim();
+  if (fallbackIcon) return fallbackIcon;
+  return 'tractor';
+}
+

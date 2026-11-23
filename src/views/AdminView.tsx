@@ -2165,29 +2165,7 @@ export const AdminView: React.FC<Props> = ({
               <ChevronRight className="h-5 w-5 text-[#8A968F] shrink-0 ml-2" />
             </button>
 
-            {/* 3. Campañas */}
-            <button
-              type="button"
-              onClick={() => navigateTo('campanas')}
-              className="w-full flex items-center justify-between px-4 py-4 hover:bg-[#F5F7F4] active:bg-[#EDF1EC] transition cursor-pointer text-left min-h-[70px]"
-            >
-              <div className="flex items-center gap-3.5 min-w-0">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-purple-50 border border-purple-200/80 text-purple-700">
-                  <Calendar className="h-5 w-5" />
-                </div>
-                <div className="min-w-0">
-                  <h3 className="text-base font-bold text-[#26352D] leading-snug">
-                    Campañas
-                  </h3>
-                  <p className="text-xs sm:text-sm text-[#5E6D64] truncate mt-0.5">
-                    {activeCampaignObj ? `Activa: ${activeCampaignObj.nombre}` : `${campaigns.length} campañas`}
-                  </p>
-                </div>
-              </div>
-              <ChevronRight className="h-5 w-5 text-[#8A968F] shrink-0 ml-2" />
-            </button>
-
-            {/* 4. Conceptos */}
+            {/* 3. Conceptos */}
             <button
               type="button"
               onClick={() => navigateTo('items')}
@@ -2209,7 +2187,7 @@ export const AdminView: React.FC<Props> = ({
               <ChevronRight className="h-5 w-5 text-[#8A968F] shrink-0 ml-2" />
             </button>
 
-            {/* 5. Tipo de cambio */}
+            {/* 4. Tipo de cambio */}
             <button
               type="button"
               onClick={() => navigateTo('monedas')}
@@ -2231,7 +2209,51 @@ export const AdminView: React.FC<Props> = ({
               <ChevronRight className="h-5 w-5 text-[#8A968F] shrink-0 ml-2" />
             </button>
 
-            {/* 6. Patrimonio */}
+            {/* 5. Campañas */}
+            <button
+              type="button"
+              onClick={() => navigateTo('campanas')}
+              className="w-full flex items-center justify-between px-4 py-4 hover:bg-[#F5F7F4] active:bg-[#EDF1EC] transition cursor-pointer text-left min-h-[70px]"
+            >
+              <div className="flex items-center gap-3.5 min-w-0">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-purple-50 border border-purple-200/80 text-purple-700">
+                  <Calendar className="h-5 w-5" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold text-[#26352D] leading-snug">
+                    Campañas
+                  </h3>
+                  <p className="text-xs sm:text-sm text-[#5E6D64] truncate mt-0.5">
+                    {activeCampaignObj ? `Activa: ${activeCampaignObj.nombre}` : `${campaigns.length} campañas`}
+                  </p>
+                </div>
+              </div>
+              <ChevronRight className="h-5 w-5 text-[#8A968F] shrink-0 ml-2" />
+            </button>
+
+            {/* 6. Reporte general */}
+            <button
+              type="button"
+              onClick={() => navigateTo('reports')}
+              className="w-full flex items-center justify-between px-4 py-4 hover:bg-[#F5F7F4] active:bg-[#EDF1EC] transition cursor-pointer text-left min-h-[70px]"
+            >
+              <div className="flex items-center gap-3.5 min-w-0">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-cyan-50 border border-cyan-200/80 text-cyan-700">
+                  <BarChart3 className="h-5 w-5" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold text-[#26352D] leading-snug">
+                    Reporte general
+                  </h3>
+                  <p className="text-xs sm:text-sm text-[#5E6D64] truncate mt-0.5">
+                    Consolidado, Maquinarias y Propiedad por campaña
+                  </p>
+                </div>
+              </div>
+              <ChevronRight className="h-5 w-5 text-[#8A968F] shrink-0 ml-2" />
+            </button>
+
+            {/* 7. Patrimonio */}
             <button
               type="button"
               onClick={() => navigateTo('activos')}
@@ -2253,7 +2275,7 @@ export const AdminView: React.FC<Props> = ({
               <ChevronRight className="h-5 w-5 text-[#8A968F] shrink-0 ml-2" />
             </button>
 
-            {/* 7. Usuarios */}
+            {/* 8. Usuarios */}
             <button
               type="button"
               onClick={() => {
@@ -2276,28 +2298,6 @@ export const AdminView: React.FC<Props> = ({
                   </h3>
                   <p className="text-xs sm:text-sm text-[#5E6D64] truncate mt-0.5">
                     Cuentas de acceso y cambio de contraseña
-                  </p>
-                </div>
-              </div>
-              <ChevronRight className="h-5 w-5 text-[#8A968F] shrink-0 ml-2" />
-            </button>
-
-            {/* 8. Reporte general */}
-            <button
-              type="button"
-              onClick={() => navigateTo('reports')}
-              className="w-full flex items-center justify-between px-4 py-4 hover:bg-[#F5F7F4] active:bg-[#EDF1EC] transition cursor-pointer text-left min-h-[70px]"
-            >
-              <div className="flex items-center gap-3.5 min-w-0">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-cyan-50 border border-cyan-200/80 text-cyan-700">
-                  <BarChart3 className="h-5 w-5" />
-                </div>
-                <div className="min-w-0">
-                  <h3 className="text-base font-bold text-[#26352D] leading-snug">
-                    Reporte general
-                  </h3>
-                  <p className="text-xs sm:text-sm text-[#5E6D64] truncate mt-0.5">
-                    Consolidado, Maquinarias y Propiedad por campaña
                   </p>
                 </div>
               </div>

@@ -481,6 +481,8 @@ export default function App() {
               campaigns={campaigns}
               activeCampaign={activeCampaign}
               lots={lots}
+              machines={machines}
+              machineJobTypes={machineJobTypes}
               expenses={expenses}
               incomes={incomes}
               jobs={jobs}
