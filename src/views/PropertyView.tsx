@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Trees,
   CirclePlus,
@@ -25,7 +25,6 @@ import {
   Edit3,
   Sparkles,
   ClipboardList,
-  BarChart3,
   Clock,
   Info,
   Save,
@@ -84,7 +83,13 @@ import {
   compareChronologicalDesc,
   getMachineIcon,
 } from '../services/backend';
-import { ReportsView } from './ReportsView';
+import { isDirectPropertyIncome } from '../services/financialSummary';
+import {
+  CurrencyConversionAnchor,
+  convertFormCurrencyValue,
+  getLotSurfaceHa,
+  isHectareUnit,
+} from '../services/currencyConversion';
 import {
   CompactList,
   CompactListRow,
@@ -122,9 +127,11 @@ type PropertyScreen =
   | 'ingreso'
   | 'gasto'
   | 'lotes'
+  | 'lote_trabajos'
+  | 'lote_cosechas'
+  | 'lote_gastos'
   | 'maquinaria_recibida'
   | 'historial'
-  | 'resultados'
   | 'pendientes_precio';
 
 interface MovementItem {
@@ -176,8 +183,11 @@ export const PropertyView: React.FC<Props> = ({
   const [historialFilter, setHistorialFilter] = usePersistedMemoryState<'todos' | 'ingresos' | 'gastos' | 'maquinaria' | 'distribuidos'>('property.historial.filter', 'todos');
   const [expandedMovementId, setExpandedMovementId] = useState<string | null>(null);
 
-  // Accordion & search state for Mis lotes and Trabajos de maquinaria (persisted in memory)
+  // Accordion & search state for Mis lotes, Lot drill-down screens, and Trabajos de maquinaria (persisted in memory)
   const [expandedLotId, setExpandedLotId] = useState<string | null>(null);
+  const [activeLotScreenId, setActiveLotScreenId] = useState<string | null>(null);
+  const [lotDetailSearch, setLotDetailSearch] = useState<string>('');
+  const [expandedLotDetailItemId, setExpandedLotDetailItemId] = useState<string | null>(null);
   const [lotsSearch, setLotsSearch] = usePersistedMemoryState<string>('property.lots.search', '');
   const [machineryJobsSearch, setMachineryJobsSearch] = usePersistedMemoryState<string>('property.machineryJobs.search', '');
 
@@ -223,7 +233,7 @@ export const PropertyView: React.FC<Props> = ({
   const [incLotId, setIncLotId] = useState('');
   const [incConcepto, setIncConcepto] = useState('');
   const [incCantidad, setIncCantidad] = useState<number | ''>('');
-  const [incUnidad, setIncUnidad] = useState('');
+  const [incUnidad, setIncUnidad] = useState('toneladas');
   const [incPrecio, setIncPrecio] = useState<number | ''>('');
   const [incMoneda, setIncMoneda] = useState<Currency>('BOB');
   const [incTc, setIncTc] = useState(
@@ -252,11 +262,18 @@ export const PropertyView: React.FC<Props> = ({
   const [priceCampanaId, setPriceCampanaId] = useState(activeCampaign?.id || '');
   const [priceToneladas, setPriceToneladas] = useState('');
   const [priceUsdTon, setPriceUsdTon] = useState('');
+  const [priceMoneda, setPriceMoneda] = useState<Currency>('USD');
   const [priceTc, setPriceTc] = useState(
     exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0 ? String(exchangeRate.tasaBobPerUsd) : ''
   );
   const [savingHarvestPrice, setSavingHarvestPrice] = useState(false);
   const [priceModalError, setPriceModalError] = useState<string | null>(null);
+
+  // Currency conversion anchors (prevent cumulative rounding drift on repeated USD <-> Bs toggles)
+  const incCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
+  const expCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
+  const editMovCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
+  const priceCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
 
   // State for Editing Harvest (harvest.update — Admin only)
   const [editingHarvest, setEditingHarvest] = useState<HarvestRecord | null>(null);
@@ -288,11 +305,12 @@ export const PropertyView: React.FC<Props> = ({
   }, [exchangeRate?.tasaBobPerUsd]);
 
   const resetNewIncomeForm = () => {
+    incCurrencyAnchorRef.current = null;
     setIncFecha(new Date().toISOString().slice(0, 10));
     setIncLotId('');
     setIncConcepto('');
     setIncCantidad('');
-    setIncUnidad('');
+    setIncUnidad('toneladas');
     setIncPrecio('');
     setIncMoneda('BOB');
     setIncTc(
@@ -316,6 +334,7 @@ export const PropertyView: React.FC<Props> = ({
   };
 
   const resetNewExpenseForm = () => {
+    expCurrencyAnchorRef.current = null;
     setExpFecha(new Date().toISOString().slice(0, 10));
     setExpLotMode('single');
     setExpLotId('');
@@ -332,6 +351,83 @@ export const PropertyView: React.FC<Props> = ({
     );
     setExpObs('');
     setErrorMsg(null);
+  };
+
+  // Automatic USD <-> Bs conversion handlers across all property forms
+  const handleIncCurrencyChange = (nextCurr: Currency) => {
+    const res = convertFormCurrencyValue({
+      currentValue: incPrecio,
+      fromCurrency: incMoneda,
+      toCurrency: nextCurr,
+      tc: incTc,
+      anchor: incCurrencyAnchorRef.current,
+    });
+    if (res.error) {
+      setErrorMsg(res.error);
+      return;
+    }
+    if (!res.converted) return;
+    incCurrencyAnchorRef.current = res.nextAnchor;
+    setIncMoneda(res.currency);
+    setIncPrecio(res.valueNum);
+    setErrorMsg(null);
+  };
+
+  const handleExpCurrencyChange = (nextCurr: Currency) => {
+    const res = convertFormCurrencyValue({
+      currentValue: expPrecio,
+      fromCurrency: expMoneda,
+      toCurrency: nextCurr,
+      tc: expTc,
+      anchor: expCurrencyAnchorRef.current,
+    });
+    if (res.error) {
+      setErrorMsg(res.error);
+      return;
+    }
+    if (!res.converted) return;
+    expCurrencyAnchorRef.current = res.nextAnchor;
+    setExpMoneda(res.currency);
+    setExpPrecio(res.valueNum);
+    setErrorMsg(null);
+  };
+
+  const handleEditMovCurrencyChange = (nextCurr: Currency) => {
+    const res = convertFormCurrencyValue({
+      currentValue: editPrecio,
+      fromCurrency: editMoneda,
+      toCurrency: nextCurr,
+      tc: editTc,
+      anchor: editMovCurrencyAnchorRef.current,
+    });
+    if (res.error) {
+      setErrorMsg(res.error);
+      return;
+    }
+    if (!res.converted) return;
+    editMovCurrencyAnchorRef.current = res.nextAnchor;
+    setEditMoneda(res.currency);
+    setEditPrecio(res.valueNum);
+    setErrorMsg(null);
+  };
+
+  const handlePriceCurrencyChange = (nextCurr: Currency) => {
+    const res = convertFormCurrencyValue({
+      currentValue: priceUsdTon,
+      fromCurrency: priceMoneda,
+      toCurrency: nextCurr,
+      tc: priceTc,
+      anchor: priceCurrencyAnchorRef.current,
+    });
+    if (res.error) {
+      setPriceModalError(res.error);
+      return;
+    }
+    if (!res.converted) return;
+    priceCurrencyAnchorRef.current = res.nextAnchor;
+    setPriceMoneda(res.currency);
+    setPriceUsdTon(res.valueStr);
+    setPriceModalError(null);
   };
 
   // Shared SWR query: pending harvests (reused by Main badge, Pendientes de precio, and Asignar precio)
@@ -460,7 +556,7 @@ export const PropertyView: React.FC<Props> = ({
   );
 
   const propertyExpenseDirects = propertyExpenses.filter((e) => !e.esTrabajoPropio && !e.trabajoId);
-  const propertyIncomeDirects = propertyIncomes.filter((i) => !i.trabajoId);
+  const propertyIncomeDirects = propertyIncomes.filter(isDirectPropertyIncome);
 
   const formatConcept = (raw: string | undefined): string => {
     if (!raw) return '';
@@ -840,11 +936,13 @@ export const PropertyView: React.FC<Props> = ({
   };
 
   const handleOpenAssignPrice = (harvest: HarvestRecord) => {
+    priceCurrencyAnchorRef.current = null;
     setSelectedHarvestForPrice(harvest);
     setPriceFecha(new Date().toISOString().slice(0, 10));
     setPriceCampanaId(activeCampaign?.id || harvest.campanaId || '');
     setPriceToneladas(harvest.pendiente > 0 ? String(Number(harvest.pendiente.toFixed(4))) : '');
     setPriceUsdTon('');
+    setPriceMoneda('USD');
     setPriceTc(
       exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
         ? String(exchangeRate.tasaBobPerUsd)
@@ -862,7 +960,7 @@ export const PropertyView: React.FC<Props> = ({
     setSuccessMsg(null);
 
     const tonsNum = parseDecimalNumber(priceToneladas);
-    const precioNum = parseDecimalNumber(priceUsdTon);
+    const precioInputNum = parseDecimalNumber(priceUsdTon);
     const tcNum = parseDecimalNumber(priceTc);
     const targetCampId = priceCampanaId || activeCampaign?.id || selectedHarvestForPrice.campanaId || '';
 
@@ -880,14 +978,30 @@ export const PropertyView: React.FC<Props> = ({
       );
       return;
     }
-    if (precioNum <= 0) {
-      setPriceModalError('Ingresa un precio USD/tonelada mayor a 0.');
+    if (precioInputNum <= 0) {
+      setPriceModalError(`Ingresa un precio ${priceMoneda === 'USD' ? 'USD' : 'Bs'}/tonelada mayor a 0.`);
       return;
     }
     if (tcNum <= 0) {
       setPriceModalError('Ingresa un tipo de cambio válido mayor a 0.');
       return;
     }
+
+    // GAS harvest.price expects precioUsdTon; if user entered in Bs, convert accurately using TC (or exact USD anchor)
+    const anchor = priceCurrencyAnchorRef.current;
+    const canUseExactUsdAnchor =
+      priceMoneda === 'BOB' &&
+      anchor !== null &&
+      anchor.baseCurrency === 'USD' &&
+      anchor.lastCurrency === 'BOB' &&
+      Math.abs(anchor.lastDisplayedValue - precioInputNum) < 0.005 &&
+      Math.abs(anchor.lastTc - tcNum) < 0.0001;
+    const precioUsdTonToSend =
+      priceMoneda === 'USD'
+        ? precioInputNum
+        : canUseExactUsdAnchor
+        ? Number(anchor!.baseAmount.toFixed(4))
+        : Number((precioInputNum / tcNum).toFixed(4));
 
     setSavingHarvestPrice(true);
     try {
@@ -896,20 +1010,22 @@ export const PropertyView: React.FC<Props> = ({
         fecha: priceFecha,
         campanaId: targetCampId,
         toneladas: tonsNum,
-        precioUsdTon: precioNum,
+        precioUsdTon: precioUsdTonToSend,
         tc: tcNum,
       });
 
       if (priceRes?.cosecha) {
         patchHarvestAcrossCaches(priceRes.cosecha);
       }
-      const totalUsd = tonsNum * precioNum;
+      const totalUsd = tonsNum * precioUsdTonToSend;
       setSuccessMsg(
-        `Precio asignado: ${tonsNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t a USD ${precioNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/t (USD ${totalUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}). El ingreso fue generado por el servidor.`
+        `Precio asignado: ${tonsNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t a USD ${precioUsdTonToSend.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/t (USD ${totalUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}). El ingreso fue generado por el servidor.`
       );
+      priceCurrencyAnchorRef.current = null;
       setSelectedHarvestForPrice(null);
       setPriceToneladas('');
       setPriceUsdTon('');
+      setPriceMoneda('USD');
 
       // Selective invalidation & refresh: harvests + movements (backend created the Property income)
       invalidateQueries(['harvest.']);
@@ -1106,6 +1222,7 @@ export const PropertyView: React.FC<Props> = ({
       setErrorMsg('Solo el Administrador puede editar movimientos guardados.');
       return;
     }
+    editMovCurrencyAnchorRef.current = null;
     setEditingMovement(m);
     setEditFecha(m.fecha || new Date().toISOString().slice(0, 10));
     setEditLotId(m.loteId || '');
@@ -1258,27 +1375,63 @@ export const PropertyView: React.FC<Props> = ({
     );
   });
 
+  const activeLotForScreen = useMemo(
+    () => (activeLotScreenId ? lots.find((l) => String(l.id) === String(activeLotScreenId)) || null : null),
+    [lots, activeLotScreenId]
+  );
+
+  const isLotSubScreen =
+    currentScreen === 'lote_trabajos' ||
+    currentScreen === 'lote_cosechas' ||
+    currentScreen === 'lote_gastos';
+
+  const openLotDetailScreen = (lotId: string, screen: 'lote_trabajos' | 'lote_cosechas' | 'lote_gastos') => {
+    setActiveLotScreenId(lotId);
+    setExpandedLotId(lotId);
+    setLotDetailSearch('');
+    setExpandedLotDetailItemId(null);
+    setCurrentScreen(screen);
+  };
+
   return (
     <div className="w-full max-w-full space-y-4">
-      {currentScreen !== 'main' && currentScreen !== 'resultados' && (
+      {currentScreen !== 'main' && (
         <div className="flex items-center gap-3 my-1">
           <button
             type="button"
-            onClick={() => setCurrentScreen('main')}
-            aria-label="Volver a Propiedad"
+            onClick={() => {
+              if (isLotSubScreen) {
+                setCurrentScreen('lotes');
+              } else {
+                setCurrentScreen('main');
+              }
+            }}
+            aria-label={isLotSubScreen ? 'Volver a Mis lotes' : 'Volver a Propiedad'}
             className="min-h-[44px] min-w-[44px] px-3 rounded-xl bg-white border border-slate-200 flex items-center justify-center gap-1.5 text-slate-800 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer shrink-0"
           >
             <ArrowLeft className="h-4 w-4 text-slate-800 shrink-0" />
             <span className="text-sm font-semibold text-slate-800">Volver</span>
           </button>
-          <h2 className="text-lg sm:text-xl font-bold text-slate-900 truncate">
-            {currentScreen === 'ingreso' && 'Venta / Cosecha'}
-            {currentScreen === 'gasto' && 'Registrar gasto'}
-            {currentScreen === 'lotes' && 'Mis lotes'}
-            {currentScreen === 'pendientes_precio' && 'Pendientes de precio'}
-            {currentScreen === 'maquinaria_recibida' && 'Trabajos de maquinaria'}
-            {currentScreen === 'historial' && 'Historial'}
-          </h2>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-lg sm:text-xl font-bold text-slate-900 truncate">
+              {currentScreen === 'ingreso' && 'Venta / Cosecha'}
+              {currentScreen === 'gasto' && 'Registrar gasto'}
+              {currentScreen === 'lotes' && 'Mis lotes'}
+              {currentScreen === 'pendientes_precio' && 'Pendientes de precio'}
+              {currentScreen === 'maquinaria_recibida' && 'Trabajos de maquinaria'}
+              {currentScreen === 'historial' && 'Historial'}
+              {currentScreen === 'lote_trabajos' && 'Trabajos de maquinaria'}
+              {currentScreen === 'lote_cosechas' && 'Cosechas e ingresos'}
+              {currentScreen === 'lote_gastos' && 'Gastos directos'}
+            </h2>
+            {isLotSubScreen && activeLotForScreen && (
+              <p className="text-xs font-semibold text-[#24875B] truncate">
+                {activeLotForScreen.nombre}
+                {activeLotForScreen.superficieHectareas ? ` · ${activeLotForScreen.superficieHectareas} ha` : ''}
+                {activeLotForScreen.cultivoActual ? ` · ${activeLotForScreen.cultivoActual}` : ''}
+              </p>
+            )}
+          </div>
         </div>
       )}
 
@@ -1477,51 +1630,9 @@ export const PropertyView: React.FC<Props> = ({
                 </div>
                 <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
               </button>
-
-              {/* 5. Resultados */}
-              <button
-                type="button"
-                onClick={() => setCurrentScreen('resultados')}
-                className="w-full px-4 py-4 flex items-center justify-between gap-3 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[72px]"
-              >
-                <div className="flex items-center gap-3.5 min-w-0">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-purple-50 border border-purple-200/80 text-purple-700 shrink-0">
-                    <BarChart3 className="h-5 w-5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-base font-bold text-slate-900 leading-snug">
-                      Resultados
-                    </h3>
-                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
-                      Ingresos, gastos y balance por lote
-                    </p>
-                  </div>
-                </div>
-                <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
-              </button>
             </div>
           </section>
         </div>
-      )}
-
-      {/* ============================================================ */}
-      {/* SUB-VISTA: RESULTADOS DE PROPIEDAD                           */}
-      {/* ============================================================ */}
-      {currentScreen === 'resultados' && (
-        <ReportsView
-          campaigns={campaigns}
-          activeCampaign={activeCampaign}
-          machines={[]}
-          lots={lots}
-          jobs={jobs}
-          expenses={expenses}
-          incomes={incomes}
-          currency={currency}
-          exchangeRate={exchangeRate}
-          initialScreen="propiedad"
-          onRootBackLabel="Volver a Propiedad"
-          onBack={() => setCurrentScreen('main')}
-        />
       )}
 
       {/* ============================================================ */}
@@ -1905,6 +2016,7 @@ export const PropertyView: React.FC<Props> = ({
                     items={propertyIncomeItems}
                     selectedItemName={incConcepto}
                     onSelectItem={(item) => {
+                      incCurrencyAnchorRef.current = null;
                       setIncConcepto(item.nombre);
                       if (item.unidad) setIncUnidad(item.unidad);
                       if (item.precioPredeterminado || item.precio) {
@@ -1983,7 +2095,10 @@ export const PropertyView: React.FC<Props> = ({
                         min="0.01"
                         placeholder="0.00"
                         value={incPrecio}
-                        onChange={(e) => setIncPrecio(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                        onChange={(e) => {
+                          incCurrencyAnchorRef.current = null;
+                          setIncPrecio(e.target.value === '' ? '' : parseFloat(e.target.value));
+                        }}
                         className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                       />
                     </div>
@@ -1991,7 +2106,7 @@ export const PropertyView: React.FC<Props> = ({
                       label="Moneda"
                       required
                       value={incMoneda}
-                      onChange={(curr) => setIncMoneda(curr)}
+                      onChange={handleIncCurrencyChange}
                     />
                   </div>
 
@@ -2339,6 +2454,7 @@ export const PropertyView: React.FC<Props> = ({
       {/* ============================================================ */}
       {currentScreen === 'gasto' && (() => {
         const standardExpUnits = [
+          { val: 'ha', label: 'Hectáreas (ha)' },
           { val: 'kg', label: 'Kilogramos (kg)' },
           { val: 'litros', label: 'Litros (l)' },
           { val: 'bolsas', label: 'Bolsas' },
@@ -2361,7 +2477,13 @@ export const PropertyView: React.FC<Props> = ({
                 <div className="flex p-1 bg-[#F2F5F3] rounded-xl gap-1 border border-[#E2E7E3]">
                   <button
                     type="button"
-                    onClick={() => setExpLotMode('single')}
+                    onClick={() => {
+                      setExpLotMode('single');
+                      if (expLotId && isHectareUnit(expUnidad)) {
+                        const ha = getLotSurfaceHa(lots, expLotId);
+                        if (ha !== null) setExpCantidad(ha);
+                      }
+                    }}
                     className={`flex-1 h-[36px] text-xs font-semibold rounded-lg transition cursor-pointer ${
                       expLotMode === 'single'
                         ? 'bg-white text-[#26352D] shadow-xs border border-[#D4DDD6]'
@@ -2389,7 +2511,13 @@ export const PropertyView: React.FC<Props> = ({
                 <VisualLotPicker
                   lots={lots}
                   selectedLotId={expLotId}
-                  onSelect={(id) => setExpLotId(id)}
+                  onSelect={(id) => {
+                    setExpLotId(id);
+                    if (isHectareUnit(expUnidad)) {
+                      const ha = getLotSurfaceHa(lots, id);
+                      if (ha !== null) setExpCantidad(ha);
+                    }
+                  }}
                   label="Lote"
                   required
                 />
@@ -2491,9 +2619,18 @@ export const PropertyView: React.FC<Props> = ({
                 items={propertyExpenseItems}
                 selectedItemName={expItem}
                 onSelectItem={(item) => {
+                  expCurrencyAnchorRef.current = null;
                   setExpItem(item.nombre);
-                  if (item.unidad) setExpUnidad(item.unidad);
-                  if (item.precioDefecto) setExpPrecio(item.precioDefecto);
+                  if (item.unidad) {
+                    setExpUnidad(item.unidad);
+                    if (expLotMode === 'single' && expLotId && isHectareUnit(item.unidad)) {
+                      const ha = getLotSurfaceHa(lots, expLotId);
+                      if (ha !== null) setExpCantidad(ha);
+                    }
+                  }
+                  if (item.precioPredeterminado || item.precio) {
+                    setExpPrecio(item.precioPredeterminado || item.precio || '');
+                  }
                   if (item.moneda) setExpMoneda(item.moneda);
                 }}
                 label="Concepto de gasto"
@@ -2540,7 +2677,14 @@ export const PropertyView: React.FC<Props> = ({
                   label="Unidad"
                   icon={<List className="h-[17px] w-[17px]" />}
                   value={expUnidad}
-                  onChange={(e) => setExpUnidad(e.target.value)}
+                  onChange={(e) => {
+                    const nextU = e.target.value;
+                    setExpUnidad(nextU);
+                    if (expLotMode === 'single' && expLotId && isHectareUnit(nextU)) {
+                      const ha = getLotSurfaceHa(lots, expLotId);
+                      if (ha !== null) setExpCantidad(ha);
+                    }
+                  }}
                 >
                   <option value="">Seleccionar unidad</option>
                   {standardExpUnits.map((u) => (
@@ -2566,7 +2710,10 @@ export const PropertyView: React.FC<Props> = ({
                     min="0.01"
                     placeholder="0.00"
                     value={expPrecio}
-                    onChange={(e) => setExpPrecio(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                    onChange={(e) => {
+                      expCurrencyAnchorRef.current = null;
+                      setExpPrecio(e.target.value === '' ? '' : parseFloat(e.target.value));
+                    }}
                     className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                   />
                 </div>
@@ -2574,7 +2721,7 @@ export const PropertyView: React.FC<Props> = ({
                   label="Moneda"
                   required
                   value={expMoneda}
-                  onChange={(curr) => setExpMoneda(curr)}
+                  onChange={handleExpCurrencyChange}
                 />
               </div>
 
@@ -2830,7 +2977,7 @@ export const PropertyView: React.FC<Props> = ({
       })()}
 
       {/* ============================================================ */}
-      {/* 3. MIS LOTES (UNIFICADO CON EL RESUMEN POR LOTE - ACCORDION) */}
+      {/* 3. MIS LOTES (INFO AGRONÓMICA + ACCESOS A PANTALLAS PROPIAS) */}
       {/* ============================================================ */}
       {currentScreen === 'lotes' && (() => {
         const q = lotsSearch.trim().toLowerCase();
@@ -2863,28 +3010,13 @@ export const PropertyView: React.FC<Props> = ({
             >
               {filteredLots.map((lot) => {
                 const isExpanded = expandedLotId === lot.id;
-                const lotMachineryJobs = linkedPropertyJobs.filter((j) => j.loteId === lot.id);
-                const lotIncomes = propertyIncomeDirects.filter((i) => i.loteId === lot.id);
-                const lotExpensesDirect = propertyExpenseDirects.filter((e) => e.loteId === lot.id);
-
-                const tcDefault = exchangeRate?.tasaBobPerUsd || 6.96;
-                const lotTotalIncomesUsd = lotIncomes.reduce((sum, i) => {
-                  const tc = i.tipoCambio || i.tc || tcDefault;
-                  return sum + (i.moneda === 'USD' ? i.total : i.total / tc);
-                }, 0);
-
-                const lotTotalDirectExpensesUsd = lotExpensesDirect.reduce((sum, e) => {
-                  const tc = e.tipoCambio || e.tc || tcDefault;
-                  return sum + (e.moneda === 'USD' ? e.total : e.total / tc);
-                }, 0);
-
-                const lotTotalMachineryJobsUsd = lotMachineryJobs.reduce((sum, j) => {
-                  const tc = j.tipoCambio || j.tc || tcDefault;
-                  return sum + (j.moneda === 'USD' ? j.total : j.total / tc);
-                }, 0);
-
-                const lotTotalExpensesUsd = lotTotalDirectExpensesUsd + lotTotalMachineryJobsUsd;
-                const lotNetMarginUsd = lotTotalIncomesUsd - lotTotalExpensesUsd;
+                const lotMachineryJobs = linkedPropertyJobs.filter((j) => String(j.loteId) === String(lot.id));
+                const lotIncomes = propertyIncomeDirects.filter((i) => String(i.loteId) === String(lot.id));
+                const lotPendingHarvests = pendingHarvests.filter(
+                  (h) => String(h.loteId) === String(lot.id) && h.pendiente > 0.0001
+                );
+                const lotHarvestsAndIncomesCount = lotIncomes.length + lotPendingHarvests.length;
+                const lotExpensesDirect = propertyExpenseDirects.filter((e) => String(e.loteId) === String(lot.id));
 
                 return (
                   <CompactListRow
@@ -2904,25 +3036,11 @@ export const PropertyView: React.FC<Props> = ({
                         {lot.ubicacion ? ` · ${lot.ubicacion}` : ''}
                       </span>
                     }
-                    rightPrimary={
-                      <span
-                        className={`font-mono ${
-                          lotNetMarginUsd >= 0 ? 'text-[#24875B]' : 'text-[#C44545]'
-                        }`}
-                      >
-                        USD{' '}
-                        {lotNetMarginUsd.toLocaleString('es-BO', {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}
-                      </span>
-                    }
-                    rightSecondary="Margen"
                     isExpanded={isExpanded}
                     onClick={() => setExpandedLotId(isExpanded ? null : lot.id)}
                     expandedContent={
-                      <div className="space-y-3 text-xs">
-                        {/* 1. Encabezado agronómico compacto */}
+                      <div className="space-y-2.5 text-xs">
+                        {/* 1. Información agronómica */}
                         <div className="grid grid-cols-2 gap-2 bg-white p-2.5 rounded-xl border border-[#E2E7E3]">
                           <div>
                             <span className="text-[10px] text-[#7A8780] block uppercase font-semibold">
@@ -2950,169 +3068,493 @@ export const PropertyView: React.FC<Props> = ({
                           )}
                         </div>
 
-                        {/* Resumen Balance Económico del Lote */}
-                        <div className="grid grid-cols-3 divide-x divide-[#DCE7DF] bg-white py-2 px-1 rounded-xl border border-[#D4E6DA] text-center">
-                          <div className="px-1">
-                            <span className="text-[9px] text-[#5E6D64] font-bold block uppercase">
-                              Ingresos
-                            </span>
-                            <span className="font-bold font-mono text-[#24875B] text-[11px] sm:text-xs">
-                              USD{' '}
-                              {lotTotalIncomesUsd.toLocaleString('es-BO', {
-                                minimumFractionDigits: 2,
-                                maximumFractionDigits: 2,
-                              })}
+                        {/* 2. Accesos a pantallas independientes del lote */}
+                        <div className="rounded-xl border border-[#E2E7E3] bg-white divide-y divide-[#EFF2EF] overflow-hidden">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openLotDetailScreen(lot.id, 'lote_trabajos');
+                            }}
+                            className="w-full px-3 py-2.5 flex items-center justify-between gap-2 hover:bg-[#F7F9F7] active:bg-[#EDF1EC] transition cursor-pointer text-left min-h-[42px]"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <Tractor className="h-4 w-4 text-amber-600 shrink-0" />
+                              <span className="text-xs font-semibold text-[#26352D] truncate">
+                                Trabajos de maquinaria ({lotMachineryJobs.length})
+                              </span>
+                            </div>
+                            <ChevronRight className="h-4 w-4 text-[#8A968F] shrink-0" />
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openLotDetailScreen(lot.id, 'lote_cosechas');
+                            }}
+                            className="w-full px-3 py-2.5 flex items-center justify-between gap-2 hover:bg-[#F7F9F7] active:bg-[#EDF1EC] transition cursor-pointer text-left min-h-[42px]"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <Wheat className="h-4 w-4 text-[#24875B] shrink-0" />
+                              <span className="text-xs font-semibold text-[#26352D] truncate">
+                                Cosechas e ingresos ({lotHarvestsAndIncomesCount})
+                              </span>
+                            </div>
+                            <ChevronRight className="h-4 w-4 text-[#8A968F] shrink-0" />
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openLotDetailScreen(lot.id, 'lote_gastos');
+                            }}
+                            className="w-full px-3 py-2.5 flex items-center justify-between gap-2 hover:bg-[#F7F9F7] active:bg-[#EDF1EC] transition cursor-pointer text-left min-h-[42px]"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <Receipt className="h-4 w-4 text-[#C44545] shrink-0" />
+                              <span className="text-xs font-semibold text-[#26352D] truncate">
+                                Gastos directos ({lotExpensesDirect.length})
+                              </span>
+                            </div>
+                            <ChevronRight className="h-4 w-4 text-[#8A968F] shrink-0" />
+                          </button>
+                        </div>
+                      </div>
+                    }
+                  />
+                );
+              })}
+            </CompactList>
+          </div>
+        );
+      })()}
+
+      {/* ============================================================ */}
+      {/* 3B. PANTALLA INDEPENDIENTE: TRABAJOS DE MAQUINARIA DEL LOTE  */}
+      {/* ============================================================ */}
+      {currentScreen === 'lote_trabajos' && (() => {
+        const q = lotDetailSearch.trim().toLowerCase();
+        const lotJobs = linkedPropertyJobs
+          .filter((j) => String(j.loteId) === String(activeLotScreenId))
+          .filter((j) => {
+            if (!q) return true;
+            return `${j.trabajoNombre || ''} ${j.maquinariaNombre || ''} ${j.observacion || ''} ${formatDateDDMMAAAA(j.fecha)}`
+              .toLowerCase()
+              .includes(q);
+          })
+          .sort(compareChronologicalDesc);
+
+        return (
+          <div className="space-y-3">
+            <ListToolbar
+              title={activeLotForScreen ? `${activeLotForScreen.nombre} · Maquinaria` : 'Trabajos de maquinaria'}
+              countLabel={`${lotJobs.length} reg.`}
+              searchValue={lotDetailSearch}
+              onSearchChange={setLotDetailSearch}
+              searchPlaceholder="Buscar labor, máquina o fecha..."
+            />
+
+            <CompactList
+              isEmpty={lotJobs.length === 0}
+              emptyMessage={
+                q
+                  ? 'No se encontraron trabajos con esa búsqueda.'
+                  : 'Sin labores de maquinaria registradas en este lote.'
+              }
+            >
+              {lotJobs.map((j) => {
+                const fullLabor =
+                  j.trabajoNombre ||
+                  (j.maquinariaNombre ? `Labor con ${j.maquinariaNombre}` : 'Trabajo de Maquinaria');
+                const unitLabel =
+                  j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'h';
+                return (
+                  <CompactListRow
+                    key={j.id}
+                    icon={
+                      <div className="w-8 h-8 rounded-lg bg-[#FCECEC] border border-[#F2C6C6]/70 flex items-center justify-center">
+                        <VisualIcon name={getMachineIcon(j.maquinariaId, machines, j.icono)} size="xs" />
+                      </div>
+                    }
+                    title={fullLabor}
+                    subtitle={
+                      <span>
+                        {formatDateDDMMAAAA(j.fecha)} · {j.maquinariaNombre || 'Maquinaria'} · {j.cantidad}{' '}
+                        {unitLabel}
+                      </span>
+                    }
+                    rightPrimary={
+                      <span className="text-[#C44545] font-mono">
+                        - {j.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                        {(Number(j.total) || 0).toLocaleString('es-BO', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </span>
+                    }
+                    rightSecondary={`${j.moneda === 'USD' ? 'USD' : 'Bs'} ${j.tarifa}/${unitLabel}`}
+                  />
+                );
+              })}
+            </CompactList>
+          </div>
+        );
+      })()}
+
+      {/* ============================================================ */}
+      {/* 3C. PANTALLA INDEPENDIENTE: COSECHAS E INGRESOS DEL LOTE     */}
+      {/* ============================================================ */}
+      {currentScreen === 'lote_cosechas' && (() => {
+        const q = lotDetailSearch.trim().toLowerCase();
+        const lotIncomeItems: MovementItem[] = [
+          ...propertyIncomeDirects
+            .filter((i) => String(i.loteId) === String(activeLotScreenId))
+            .map((i) => ({
+              id: i.id,
+              tipo: 'ingreso' as const,
+              fecha: i.fecha,
+              loteId: i.loteId,
+              loteNombre: i.loteNombre || activeLotForScreen?.nombre || 'Lote',
+              titulo: formatConcept(i.concepto),
+              detalle: `${i.cantidad} ${i.unidad || ''} ${i.precio ? `@ ${i.moneda === 'USD' ? 'USD' : 'Bs'} ${i.precio}` : ''} ${i.observacion ? `• ${i.observacion}` : ''}`.trim(),
+              monto: i.total,
+              moneda: (i.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
+              tipoCambio: i.tipoCambio || i.tc || exchangeRate?.tasaBobPerUsd,
+              cantidad: i.cantidad,
+              unidad: i.unidad,
+              precioUnitario: i.precio,
+              observacion: i.observacion,
+              icono:
+                i.icono ||
+                itemsConfig.find(
+                  (it) => (it.nombre || '').toLowerCase() === (i.concepto || '').toLowerCase()
+                )?.icono ||
+                getIconDefinition(i.concepto || '', 'ingreso').id,
+              creadoEn: i.creadoEn,
+            })),
+          ...pendingHarvests
+            .filter((h) => String(h.loteId) === String(activeLotScreenId) && h.pendiente > 0.0001)
+            .map((h) => ({
+              id: `harv_${h.id}`,
+              tipo: 'cosecha' as const,
+              fecha: h.fecha,
+              loteId: h.loteId,
+              loteNombre: h.loteNombre || activeLotForScreen?.nombre || 'Lote',
+              titulo: `Cosecha ${formatConcept(h.producto)}`,
+              detalle:
+                h.asignadas > 0
+                  ? `${h.toneladas} t totales · ${h.asignadas} t asignadas · ${h.pendiente} t pendientes`
+                  : `${h.toneladas} t · Sin precio`,
+              monto: 0,
+              moneda: 'USD' as Currency,
+              cantidad: h.toneladas,
+              unidad: 't',
+              observacion: h.observacion,
+              icono: getIconDefinition(h.producto, 'ingreso').id || 'granos',
+              cosechaRecord: h,
+              creadoEn: h.creadoEn,
+            })),
+        ]
+          .filter((item) => {
+            if (!q) return true;
+            return `${item.titulo} ${item.detalle} ${item.observacion || ''} ${formatDateDDMMAAAA(item.fecha)}`
+              .toLowerCase()
+              .includes(q);
+          })
+          .sort(compareChronologicalDesc);
+
+        return (
+          <div className="space-y-3">
+            <ListToolbar
+              title={activeLotForScreen ? `${activeLotForScreen.nombre} · Cosechas e ingresos` : 'Cosechas e ingresos'}
+              countLabel={`${lotIncomeItems.length} reg.`}
+              searchValue={lotDetailSearch}
+              onSearchChange={setLotDetailSearch}
+              searchPlaceholder="Buscar producto, fecha u observación..."
+            />
+
+            <CompactList
+              isEmpty={lotIncomeItems.length === 0}
+              emptyMessage={
+                q
+                  ? 'No se encontraron cosechas o ingresos con esa búsqueda.'
+                  : 'Sin cosechas o ingresos registrados en este lote.'
+              }
+            >
+              {lotIncomeItems.map((m) => {
+                const isExpanded = expandedLotDetailItemId === m.id;
+                const isHarvest = m.tipo === 'cosecha';
+                const isUnpricedHarvest = isHarvest && m.cosechaRecord?.asignadas === 0;
+
+                return (
+                  <CompactListRow
+                    key={`${m.tipo}-${m.id}`}
+                    icon={
+                      <div
+                        className={`w-8 h-8 rounded-lg flex items-center justify-center border ${
+                          isHarvest
+                            ? 'bg-amber-50 border-amber-200 text-amber-700'
+                            : 'bg-[#EAF5EE] border-[#BFE0CD]/70 text-[#24875B]'
+                        }`}
+                      >
+                        <VisualIcon name={m.icono || 'granos'} size="xs" />
+                      </div>
+                    }
+                    title={m.titulo}
+                    subtitle={
+                      <span>
+                        {formatDateDDMMAAAA(m.fecha)} ·{' '}
+                        {isHarvest
+                          ? `${m.cosechaRecord?.pendiente} t pend. (${isUnpricedHarvest ? 'Sin precio' : 'Parcial'})`
+                          : `${m.cantidad || 0} ${m.unidad || ''}`.trim()}
+                      </span>
+                    }
+                    rightPrimary={
+                      isHarvest ? (
+                        <span className="text-xs font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200/80">
+                          {isUnpricedHarvest ? 'Sin precio' : `${m.cosechaRecord?.pendiente} t pend.`}
+                        </span>
+                      ) : (
+                        <span className="font-mono text-[#24875B]">
+                          + {m.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                          {(Number(m.monto) || 0).toLocaleString('es-BO', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                        </span>
+                      )
+                    }
+                    isExpanded={isExpanded}
+                    onClick={() => setExpandedLotDetailItemId(isExpanded ? null : m.id)}
+                    expandedContent={
+                      isHarvest && m.cosechaRecord ? (
+                        <div className="space-y-2.5 text-xs">
+                          <div className="divide-y divide-[#EFF2EF]">
+                            <div className="py-1.5 flex items-center justify-between gap-2">
+                              <span className="text-[#5E6D64] font-medium">Toneladas totales</span>
+                              <span className="font-semibold text-[#26352D]">{m.cosechaRecord.toneladas} t</span>
+                            </div>
+                            <div className="py-1.5 flex items-center justify-between gap-2">
+                              <span className="text-[#5E6D64] font-medium">Asignadas / Pendientes</span>
+                              <span className="font-mono font-semibold text-[#26352D]">
+                                {m.cosechaRecord.asignadas} t asig. · {m.cosechaRecord.pendiente} t pend.
+                              </span>
+                            </div>
+                            {m.cosechaRecord.observacion && (
+                              <div className="py-1.5 flex items-center justify-between gap-2">
+                                <span className="text-[#5E6D64] font-medium">Observación</span>
+                                <span className="italic text-[#26352D] text-right">{m.cosechaRecord.observacion}</span>
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E6EBE7]">
+                            {m.cosechaRecord.pendiente > 0.0001 && (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenAssignPrice(m.cosechaRecord!)}
+                                className="px-3.5 py-1.5 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white font-semibold text-xs transition cursor-pointer min-h-[34px]"
+                              >
+                                Asignar precio
+                              </button>
+                            )}
+                            {effectiveIsAdmin && (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenEditHarvest(m.cosechaRecord!)}
+                                className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px]"
+                              >
+                                Editar
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-2 text-xs">
+                          <div className="divide-y divide-[#EFF2EF]">
+                            <div className="py-1.5 flex items-center justify-between gap-2">
+                              <span className="text-[#5E6D64] font-medium">Cantidad</span>
+                              <span className="font-semibold text-[#26352D]">
+                                {m.cantidad ? `${m.cantidad} ${m.unidad || ''}` : '—'}
+                              </span>
+                            </div>
+                            <div className="py-1.5 flex items-center justify-between gap-2">
+                              <span className="text-[#5E6D64] font-medium">Equivalencia</span>
+                              <span className="font-mono font-semibold text-[#26352D] text-right">
+                                {m.tipoCambio && m.tipoCambio > 0
+                                  ? m.moneda === 'USD'
+                                    ? `Bs ${(m.monto * m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(m.tipoCambio)})`
+                                    : `USD ${(m.monto / m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(m.tipoCambio)})`
+                                  : '—'}
+                              </span>
+                            </div>
+                            {m.observacion && (
+                              <div className="py-1.5 flex items-center justify-between gap-2">
+                                <span className="text-[#5E6D64] font-medium shrink-0">Observación</span>
+                                <span className="italic text-[#26352D] text-right">{m.observacion}</span>
+                              </div>
+                            )}
+                          </div>
+                          {effectiveIsAdmin && (
+                            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E6EBE7]">
+                              <button
+                                type="button"
+                                onClick={() => handleOpenEditMovement(m)}
+                                className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px]"
+                              >
+                                Editar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handlePromptDeleteInc(m.id, m.titulo)}
+                                className="px-3.5 py-1.5 rounded-xl bg-[#FCECEC] hover:bg-[#F7DCDC] text-[#C44545] font-semibold text-xs transition cursor-pointer border border-[#F2C6C6] min-h-[34px]"
+                              >
+                                Eliminar
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    }
+                  />
+                );
+              })}
+            </CompactList>
+          </div>
+        );
+      })()}
+
+      {/* ============================================================ */}
+      {/* 3D. PANTALLA INDEPENDIENTE: GASTOS DIRECTOS DEL LOTE         */}
+      {/* ============================================================ */}
+      {currentScreen === 'lote_gastos' && (() => {
+        const q = lotDetailSearch.trim().toLowerCase();
+        const lotExpenses = propertyExpenseDirects
+          .filter((e) => String(e.loteId) === String(activeLotScreenId))
+          .filter((e) => {
+            if (!q) return true;
+            return `${e.itemGasto || ''} ${e.observacion || ''} ${formatDateDDMMAAAA(e.fecha)}`
+              .toLowerCase()
+              .includes(q);
+          })
+          .sort(compareChronologicalDesc);
+
+        return (
+          <div className="space-y-3">
+            <ListToolbar
+              title={activeLotForScreen ? `${activeLotForScreen.nombre} · Gastos directos` : 'Gastos directos'}
+              countLabel={`${lotExpenses.length} reg.`}
+              searchValue={lotDetailSearch}
+              onSearchChange={setLotDetailSearch}
+              searchPlaceholder="Buscar insumo, fecha u observación..."
+            />
+
+            <CompactList
+              isEmpty={lotExpenses.length === 0}
+              emptyMessage={
+                q
+                  ? 'No se encontraron gastos con esa búsqueda.'
+                  : 'Sin gastos directos registrados en este lote.'
+              }
+            >
+              {lotExpenses.map((e) => {
+                const isExpanded = expandedLotDetailItemId === e.id;
+                const tcVal = e.tipoCambio || e.tc || exchangeRate?.tasaBobPerUsd;
+                const expIcon =
+                  e.icono ||
+                  itemsConfig.find(
+                    (it) => (it.nombre || '').toLowerCase() === (e.itemGasto || '').toLowerCase()
+                  )?.icono ||
+                  'semillas';
+                const movItem: MovementItem = {
+                  id: e.id,
+                  tipo: 'gasto_directo',
+                  fecha: e.fecha,
+                  loteId: e.loteId,
+                  loteNombre: e.loteNombre || activeLotForScreen?.nombre || 'Lote',
+                  titulo: formatConcept(e.itemGasto),
+                  detalle: `${e.cantidad} ${e.unidad || ''}`.trim(),
+                  monto: e.total,
+                  moneda: (e.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
+                  tipoCambio: tcVal,
+                  cantidad: e.cantidad,
+                  unidad: e.unidad,
+                  precioUnitario: e.precio,
+                  observacion: e.observacion,
+                  icono: expIcon,
+                  creadoEn: e.creadoEn,
+                };
+
+                return (
+                  <CompactListRow
+                    key={e.id}
+                    icon={
+                      <div className="w-8 h-8 rounded-lg bg-[#FCECEC] border border-[#F2C6C6]/70 flex items-center justify-center">
+                        <VisualIcon name={expIcon} size="xs" />
+                      </div>
+                    }
+                    title={formatConcept(e.itemGasto)}
+                    subtitle={
+                      <span>
+                        {formatDateDDMMAAAA(e.fecha)} · {e.cantidad} {e.unidad || ''}
+                      </span>
+                    }
+                    rightPrimary={
+                      <span className="font-mono text-[#C44545]">
+                        - {e.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                        {(Number(e.total) || 0).toLocaleString('es-BO', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </span>
+                    }
+                    isExpanded={isExpanded}
+                    onClick={() => setExpandedLotDetailItemId(isExpanded ? null : e.id)}
+                    expandedContent={
+                      <div className="space-y-2 text-xs">
+                        <div className="divide-y divide-[#EFF2EF]">
+                          <div className="py-1.5 flex items-center justify-between gap-2">
+                            <span className="text-[#5E6D64] font-medium">Cantidad</span>
+                            <span className="font-semibold text-[#26352D]">
+                              {e.cantidad} {e.unidad || ''}
                             </span>
                           </div>
-                          <div className="px-1">
-                            <span className="text-[9px] text-[#5E6D64] font-bold block uppercase">
-                              Gastos
-                            </span>
-                            <span className="font-bold font-mono text-[#C44545] text-[11px] sm:text-xs">
-                              USD{' '}
-                              {lotTotalExpensesUsd.toLocaleString('es-BO', {
-                                minimumFractionDigits: 2,
-                                maximumFractionDigits: 2,
-                              })}
+                          <div className="py-1.5 flex items-center justify-between gap-2">
+                            <span className="text-[#5E6D64] font-medium">Equivalencia</span>
+                            <span className="font-mono font-semibold text-[#26352D] text-right">
+                              {tcVal && tcVal > 0
+                                ? e.moneda === 'USD'
+                                  ? `Bs ${(e.total * tcVal).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(tcVal)})`
+                                  : `USD ${(e.total / tcVal).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(tcVal)})`
+                                : '—'}
                             </span>
                           </div>
-                          <div className="px-1">
-                            <span className="text-[9px] text-[#5E6D64] font-bold block uppercase">
-                              Margen
-                            </span>
-                            <span
-                              className={`font-bold font-mono text-[11px] sm:text-xs ${
-                                lotNetMarginUsd >= 0 ? 'text-[#24875B]' : 'text-[#C44545]'
-                              }`}
+                          {e.observacion && (
+                            <div className="py-1.5 flex items-center justify-between gap-2">
+                              <span className="text-[#5E6D64] font-medium shrink-0">Observación</span>
+                              <span className="italic text-[#26352D] text-right">{e.observacion}</span>
+                            </div>
+                          )}
+                        </div>
+                        {effectiveIsAdmin && (
+                          <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E6EBE7]">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditMovement(movItem)}
+                              className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px]"
                             >
-                              USD{' '}
-                              {lotNetMarginUsd.toLocaleString('es-BO', {
-                                minimumFractionDigits: 2,
-                                maximumFractionDigits: 2,
-                              })}
-                            </span>
+                              Editar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handlePromptDeleteExp(e.id, formatConcept(e.itemGasto))}
+                              className="px-3.5 py-1.5 rounded-xl bg-[#FCECEC] hover:bg-[#F7DCDC] text-[#C44545] font-semibold text-xs transition cursor-pointer border border-[#F2C6C6] min-h-[34px]"
+                            >
+                              Eliminar
+                            </button>
                           </div>
-                        </div>
-
-                        {/* 2. Trabajos de Maquinaria */}
-                        <div className="rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
-                          <div className="px-3 py-2 bg-[#F7F9F7] border-b border-[#EFF2EF] flex items-center gap-1.5 font-semibold text-[#26352D]">
-                            <Tractor className="h-3.5 w-3.5 text-amber-600" />
-                            <span>Trabajos de Maquinaria ({lotMachineryJobs.length})</span>
-                          </div>
-                          {lotMachineryJobs.length > 0 ? (
-                            <div className="divide-y divide-[#EFF2EF]">
-                              {lotMachineryJobs.map((j) => (
-                                <div
-                                  key={j.id}
-                                  className="px-3 py-2 flex items-center justify-between gap-2"
-                                >
-                                  <div className="min-w-0">
-                                    <p className="font-semibold text-[#26352D] truncate">
-                                      {j.trabajoNombre ||
-                                        (j.maquinariaNombre
-                                          ? `Labor con ${j.maquinariaNombre}`
-                                          : 'Trabajo de Maquinaria')}
-                                    </p>
-                                    <p className="text-[11px] text-[#7A8780]">
-                                      {formatDateDDMMAAAA(j.fecha)} · {j.cantidad}{' '}
-                                      {j.unidad === 'hectarea' || (j.unidad as string) === 'ha'
-                                        ? 'ha'
-                                        : 'h'}
-                                    </p>
-                                  </div>
-                                  <span className="font-bold font-mono text-[#C44545] shrink-0">
-                                    - {j.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
-                                    {j.total.toLocaleString('es-BO', {
-                                      minimumFractionDigits: 2,
-                                      maximumFractionDigits: 2,
-                                    })}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="px-3 py-2.5 text-[11px] text-[#7A8780]">
-                              Sin labores de maquinaria registradas en este lote.
-                            </p>
-                          )}
-                        </div>
-
-                        {/* 3. Cosechas e Ingresos */}
-                        <div className="rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
-                          <div className="px-3 py-2 bg-[#F7F9F7] border-b border-[#EFF2EF] flex items-center gap-1.5 font-semibold text-[#26352D]">
-                            <Wheat className="h-3.5 w-3.5 text-[#24875B]" />
-                            <span>Cosechas e Ingresos ({lotIncomes.length})</span>
-                          </div>
-                          {lotIncomes.length > 0 ? (
-                            <div className="divide-y divide-[#EFF2EF]">
-                              {lotIncomes.map((i) => (
-                                <div
-                                  key={i.id}
-                                  className="px-3 py-2 flex items-center justify-between gap-2"
-                                >
-                                  <div className="min-w-0">
-                                    <p className="font-semibold text-[#26352D] truncate">
-                                      {i.concepto}
-                                    </p>
-                                    <p className="text-[11px] text-[#7A8780]">
-                                      {formatDateDDMMAAAA(i.fecha)} · {i.cantidad} {i.unidad || ''}
-                                    </p>
-                                  </div>
-                                  <span className="font-bold font-mono text-[#24875B] shrink-0">
-                                    + {i.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
-                                    {i.total.toLocaleString('es-BO', {
-                                      minimumFractionDigits: 2,
-                                      maximumFractionDigits: 2,
-                                    })}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="px-3 py-2.5 text-[11px] text-[#7A8780]">
-                              Sin cosechas o ingresos registrados en este lote.
-                            </p>
-                          )}
-                        </div>
-
-                        {/* 4. Insumos y Gastos Directos */}
-                        <div className="rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
-                          <div className="px-3 py-2 bg-[#F7F9F7] border-b border-[#EFF2EF] flex items-center gap-1.5 font-semibold text-[#26352D]">
-                            <Receipt className="h-3.5 w-3.5 text-[#C44545]" />
-                            <span>Insumos y Gastos Directos ({lotExpensesDirect.length})</span>
-                          </div>
-                          {lotExpensesDirect.length > 0 ? (
-                            <div className="divide-y divide-[#EFF2EF]">
-                              {lotExpensesDirect.map((e) => (
-                                <div
-                                  key={e.id}
-                                  className="px-3 py-2 flex items-center justify-between gap-2"
-                                >
-                                  <div className="min-w-0">
-                                    <p className="font-semibold text-[#26352D] truncate">
-                                      {e.itemGasto}
-                                    </p>
-                                    <p className="text-[11px] text-[#7A8780]">
-                                      {formatDateDDMMAAAA(e.fecha)} · {e.cantidad} {e.unidad || ''}
-                                    </p>
-                                  </div>
-                                  <span className="font-bold font-mono text-[#C44545] shrink-0">
-                                    - {e.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
-                                    {e.total.toLocaleString('es-BO', {
-                                      minimumFractionDigits: 2,
-                                      maximumFractionDigits: 2,
-                                    })}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="px-3 py-2.5 text-[11px] text-[#7A8780]">
-                              Sin insumos directos registrados en este lote.
-                            </p>
-                          )}
-                        </div>
+                        )}
                       </div>
                     }
                   />
@@ -3634,7 +4076,13 @@ export const PropertyView: React.FC<Props> = ({
               <VisualLotPicker
                 lots={lots}
                 selectedLotId={editLotId}
-                onSelect={(id) => setEditLotId(id)}
+                onSelect={(id) => {
+                  setEditLotId(id);
+                  if (editingMovement.tipo === 'gasto_directo' && isHectareUnit(editUnidad)) {
+                    const ha = getLotSurfaceHa(lots, id);
+                    if (ha !== null) setEditCantidad(ha);
+                  }
+                }}
                 label="Lote"
                 required
               />
@@ -3676,8 +4124,19 @@ export const PropertyView: React.FC<Props> = ({
                   <input
                     type="text"
                     value={editUnidad}
-                    onChange={(e) => setEditUnidad(e.target.value)}
-                    placeholder="kg, toneladas, bolsas"
+                    onChange={(e) => {
+                      const nextU = e.target.value;
+                      setEditUnidad(nextU);
+                      if (
+                        editingMovement.tipo === 'gasto_directo' &&
+                        editLotId &&
+                        isHectareUnit(nextU)
+                      ) {
+                        const ha = getLotSurfaceHa(lots, editLotId);
+                        if (ha !== null) setEditCantidad(ha);
+                      }
+                    }}
+                    placeholder="ha, kg, toneladas, bolsas"
                     className={FORM_INPUT_CLASS}
                   />
                 </div>
@@ -3696,7 +4155,10 @@ export const PropertyView: React.FC<Props> = ({
                     required
                     min="0"
                     value={editPrecio}
-                    onChange={(e) => setEditPrecio(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                    onChange={(e) => {
+                      editMovCurrencyAnchorRef.current = null;
+                      setEditPrecio(e.target.value === '' ? '' : parseFloat(e.target.value));
+                    }}
                     className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                   />
                 </div>
@@ -3704,7 +4166,7 @@ export const PropertyView: React.FC<Props> = ({
                   label="Moneda"
                   required
                   value={editMoneda}
-                  onChange={(curr) => setEditMoneda(curr)}
+                  onChange={handleEditMovCurrencyChange}
                 />
               </div>
 
@@ -3822,8 +4284,19 @@ export const PropertyView: React.FC<Props> = ({
         const tonsPreview = parseDecimalNumber(priceToneladas);
         const pricePreview = parseDecimalNumber(priceUsdTon);
         const tcPreview = parseDecimalNumber(priceTc);
-        const totalUsdPreview = tonsPreview > 0 && pricePreview > 0 ? tonsPreview * pricePreview : 0;
-        const totalBobPreview = totalUsdPreview > 0 && tcPreview > 0 ? totalUsdPreview * tcPreview : 0;
+        const totalInSelectedCurr = tonsPreview > 0 && pricePreview > 0 ? tonsPreview * pricePreview : 0;
+        const totalUsdPreview =
+          priceMoneda === 'USD'
+            ? totalInSelectedCurr
+            : tcPreview > 0
+            ? totalInSelectedCurr / tcPreview
+            : 0;
+        const totalBobPreview =
+          priceMoneda === 'BOB'
+            ? totalInSelectedCurr
+            : tcPreview > 0
+            ? totalInSelectedCurr * tcPreview
+            : 0;
 
         return (
           <div className="fixed inset-0 z-50 flex flex-col justify-end sm:justify-center items-center bg-slate-900/50 backdrop-blur-xs p-0 sm:p-4 animate-fadeIn">
@@ -3927,11 +4400,12 @@ export const PropertyView: React.FC<Props> = ({
                   />
                 </div>
 
-                {/* Precio USD/t y TC */}
+                {/* Precio por tonelada y Moneda (conversión automática USD <-> Bs) */}
                 <div className="grid grid-cols-2 gap-2.5 items-end">
                   <div>
                     <label className={FORM_LABEL_CLASS}>
-                      Precio (USD/t) <span className="text-[#C44545]">*</span>
+                      Precio ({priceMoneda === 'USD' ? 'USD' : 'Bs'}/t){' '}
+                      <span className="text-[#C44545]">*</span>
                     </label>
                     <input
                       type="number"
@@ -3941,10 +4415,23 @@ export const PropertyView: React.FC<Props> = ({
                       required
                       placeholder="0.00"
                       value={priceUsdTon}
-                      onChange={(e) => setPriceUsdTon(e.target.value)}
+                      onChange={(e) => {
+                        priceCurrencyAnchorRef.current = null;
+                        setPriceUsdTon(e.target.value);
+                      }}
                       className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                     />
                   </div>
+                  <CurrencySelect
+                    label="Moneda"
+                    required
+                    value={priceMoneda}
+                    onChange={handlePriceCurrencyChange}
+                  />
+                </div>
+
+                {/* Tipo de cambio y Fecha */}
+                <div className="grid grid-cols-2 gap-2.5 items-end">
                   <div>
                     <label className={FORM_LABEL_CLASS}>
                       Tipo de cambio <span className="text-[#C44545]">*</span>
@@ -3961,20 +4448,18 @@ export const PropertyView: React.FC<Props> = ({
                       className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                     />
                   </div>
-                </div>
-
-                {/* Fecha */}
-                <div>
-                  <label className={FORM_LABEL_CLASS}>
-                    Fecha de fijación <span className="text-[#C44545]">*</span>
-                  </label>
-                  <input
-                    type="date"
-                    required
-                    value={priceFecha}
-                    onChange={(e) => setPriceFecha(e.target.value)}
-                    className={FORM_INPUT_CLASS}
-                  />
+                  <div>
+                    <label className={FORM_LABEL_CLASS}>
+                      Fecha de fijación <span className="text-[#C44545]">*</span>
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      value={priceFecha}
+                      onChange={(e) => setPriceFecha(e.target.value)}
+                      className={FORM_INPUT_CLASS}
+                    />
+                  </div>
                 </div>
 
                 {/* Importe total */}
@@ -3982,19 +4467,31 @@ export const PropertyView: React.FC<Props> = ({
                   <div className="flex items-center justify-between">
                     <span className="text-[13px] font-bold text-[#175B3D]">Importe total</span>
                     <span className="text-base font-extrabold text-[#175B3D] font-mono tabular-nums">
-                      USD{' '}
-                      {totalUsdPreview.toLocaleString('es-BO', {
+                      {priceMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
+                      {totalInSelectedCurr.toLocaleString('es-BO', {
                         minimumFractionDigits: 2,
                         maximumFractionDigits: 2,
                       })}
                     </span>
                   </div>
-                  {totalBobPreview > 0 && (
+                  {priceMoneda === 'USD' && totalBobPreview > 0 && (
                     <div className="flex items-center justify-between text-[11px] text-[#1D5C3F]">
                       <span>Equivalente en Bs</span>
                       <span className="font-mono font-semibold tabular-nums">
                         Bs{' '}
                         {totalBobPreview.toLocaleString('es-BO', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </span>
+                    </div>
+                  )}
+                  {priceMoneda === 'BOB' && totalUsdPreview > 0 && (
+                    <div className="flex items-center justify-between text-[11px] text-[#1D5C3F]">
+                      <span>Equivalente en USD</span>
+                      <span className="font-mono font-semibold tabular-nums">
+                        USD{' '}
+                        {totalUsdPreview.toLocaleString('es-BO', {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 2,
                         })}

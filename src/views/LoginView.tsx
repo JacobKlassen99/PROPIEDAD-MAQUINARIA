@@ -1,34 +1,59 @@
 import React, { useState } from 'react';
 import { Lock, Eye, EyeOff, RefreshCw, AlertCircle } from 'lucide-react';
-import { loginWithUserPassword } from '../services/backend';
+import { BackendError, BackendErrorKind, loginWithUserPassword } from '../services/backend';
 import { UserSession } from '../types';
 
 interface Props {
   onLoginSuccess: (session: UserSession) => void;
 }
 
+const ERROR_TITLES: Record<BackendErrorKind, string> = {
+  auth: 'Error de acceso',
+  network: 'Error de conexión',
+  server: 'Error del servidor',
+  invalid_response: 'Respuesta inválida del servidor',
+  unknown: 'Error al iniciar sesión',
+};
+
 export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ title: string; message: string } | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
-    if (!password.trim()) {
-      setError('Por favor ingresa la contraseña.');
+    const secret = String(password).trim();
+    if (!secret) {
+      setError({
+        title: ERROR_TITLES.auth,
+        message: 'Por favor ingresa la contraseña.',
+      });
       return;
     }
 
     setLoading(true);
     try {
-      const session = await loginWithUserPassword(password.trim());
+      const session = await loginWithUserPassword(secret);
       onLoginSuccess(session);
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Error al verificar credenciales';
-      setError(errorMsg);
+      if (err instanceof BackendError) {
+        setError({
+          title: ERROR_TITLES[err.kind] || ERROR_TITLES.unknown,
+          message: err.message,
+        });
+      } else {
+        const errorMsg =
+          err instanceof Error && err.message
+            ? err.message
+            : 'No se pudo completar el inicio de sesión. Intenta nuevamente.';
+        setError({
+          title: ERROR_TITLES.unknown,
+          message: errorMsg,
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -50,8 +75,8 @@ export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
           <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-start gap-2">
             <AlertCircle className="h-4 w-4 shrink-0 text-red-600 mt-0.5" />
             <div className="flex-1">
-              <p className="font-semibold text-red-900">Error de acceso</p>
-              <p className="mt-0.5 text-stone-800">{error}</p>
+              <p className="font-semibold text-red-900">{error.title}</p>
+              <p className="mt-0.5 text-stone-800">{error.message}</p>
             </div>
           </div>
         )}
@@ -70,6 +95,10 @@ export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Ingrese contraseña"
+                autoComplete="current-password"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 required
                 autoFocus
                 className="block w-full pl-9 pr-10 py-2.5 text-sm rounded-xl border border-slate-200 bg-slate-50/50 text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-emerald-600 focus:outline-none focus:ring-1 focus:ring-emerald-600 transition"

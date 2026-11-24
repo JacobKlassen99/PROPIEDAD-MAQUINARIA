@@ -23,6 +23,7 @@ import {
 } from '../types';
 import {
   matchesCampaignRecord,
+  isDirectPropertyIncome,
   isInternalMachineryJobExpense,
   convertHistoricalAmount,
   formatCurrencyAmount,
@@ -298,15 +299,23 @@ const ReportsViewInner: React.FC<Props> = ({
   const [showReconciliation, setShowReconciliation] = useState<boolean>(false);
   const [expandedReportLotId, setExpandedReportLotId] = useState<string | null>(null);
 
+  const effectiveCampaignId = useMemo(() => {
+    if (selectedCampaignId === 'all') return 'all';
+    if (safeCampaigns.some((c) => String(c.id) === String(selectedCampaignId))) {
+      return String(selectedCampaignId);
+    }
+    return defaultCampaignId;
+  }, [selectedCampaignId, safeCampaigns, defaultCampaignId]);
+
   const currentCampaign = useMemo(() => {
-    if (selectedCampaignId === 'all') return null;
+    if (effectiveCampaignId === 'all') return null;
     return (
-      safeCampaigns.find((c) => String(c.id) === String(selectedCampaignId)) ||
+      safeCampaigns.find((c) => String(c.id) === String(effectiveCampaignId)) ||
       activeCampaign ||
       safeCampaigns[0] ||
       null
     );
-  }, [safeCampaigns, selectedCampaignId, activeCampaign]);
+  }, [safeCampaigns, effectiveCampaignId, activeCampaign]);
 
   const activeScope: GeneralScopeTab =
     rootMode === 'maquinarias'
@@ -406,7 +415,7 @@ const ReportsViewInner: React.FC<Props> = ({
         )
       : allMachExpenses;
 
-    const propJobs = scopedJobs.filter((j) => j.tipoTrabajo !== 'tercero');
+    const propJobs = scopedJobs.filter((j) => j.tipoTrabajo === 'propiedad');
     const extJobs = scopedJobs.filter((j) => j.tipoTrabajo === 'tercero');
 
     const ingresosPropiedad = propJobs.reduce(
@@ -522,7 +531,7 @@ const ReportsViewInner: React.FC<Props> = ({
   // 2. PROPIEDAD CALCULATIONS (BY LOT SORTED BY NAME/NUMBER, PER-HECTARE METRICS)
   // ==========================================================================
   const propertyData = useMemo(() => {
-    const directIncomes = campaignIncomes.filter((i) => !i.trabajoId && !i.esTrabajoPropio);
+    const directIncomes = campaignIncomes.filter(isDirectPropertyIncome);
     const directExpenses = campaignExpenses.filter(
       (e) => e.modulo === 'propiedad' && !isInternalMachineryJobExpense(e)
     );
@@ -742,7 +751,7 @@ const ReportsViewInner: React.FC<Props> = ({
     const internalJobs = campaignJobs.filter((j) => j.tipoTrabajo === 'propiedad');
     const machExpenses = campaignExpenses.filter((e) => e.modulo === 'maquinarias');
 
-    const propIncomes = campaignIncomes.filter((i) => !i.trabajoId && !i.esTrabajoPropio);
+    const propIncomes = campaignIncomes.filter(isDirectPropertyIncome);
     const propDirectExpenses = campaignExpenses.filter(
       (e) => e.modulo === 'propiedad' && !isInternalMachineryJobExpense(e)
     );
@@ -1164,7 +1173,7 @@ const ReportsViewInner: React.FC<Props> = ({
         )}
 
         <CompactFilter
-          value={selectedCampaignId}
+          value={effectiveCampaignId}
           onChange={(val) => setSelectedCampaignId(val)}
           ariaLabel="Campaña"
           options={[
@@ -1172,7 +1181,9 @@ const ReportsViewInner: React.FC<Props> = ({
               value: String(c.id),
               label: c.activa ? `${c.nombre} (Activa)` : c.nombre,
             })),
-            ...(safeCampaigns.length > 1 ? [{ value: 'all', label: 'Todas las campañas' }] : []),
+            ...(safeCampaigns.length > 1 || effectiveCampaignId === 'all' || safeCampaigns.length === 0
+              ? [{ value: 'all', label: 'Todas las campañas' }]
+              : []),
           ]}
         />
 

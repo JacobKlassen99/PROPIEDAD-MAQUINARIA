@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   Tractor,
   CirclePlus,
@@ -26,7 +26,6 @@ import {
   Edit3,
   Wrench,
   History,
-  BarChart3,
   Wallet,
   Info,
   Save,
@@ -84,7 +83,12 @@ import {
   FORM_LABEL_CLASS,
   FORM_TEXTAREA_CLASS,
 } from '../components/AppSelect';
-import { ReportsView } from './ReportsView';
+import {
+  CurrencyConversionAnchor,
+  convertFormCurrencyValue,
+  getLotSurfaceHa,
+  isHectareUnit,
+} from '../services/currencyConversion';
 import {
   CompactList,
   CompactListRow,
@@ -129,7 +133,6 @@ type MachineryScreen =
   | 'gasto'
   | 'historial'
   | 'resumen'
-  | 'resultados'
   | 'por_cobrar';
 
 const toYYYYMMDD = (dStr: string | undefined): string => {
@@ -317,7 +320,15 @@ export const MachineryView: React.FC<Props> = ({
     }
   };
 
+  // Currency conversion anchors (prevent cumulative rounding drift on repeated USD <-> Bs toggles)
+  const cobroCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
+  const jobCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
+  const expCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
+  const editJobCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
+  const editExpCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
+
   const handleOpenCobroModal = (cuenta: CobroCuenta) => {
+    cobroCurrencyAnchorRef.current = null;
     setCobroModalCuenta(cuenta);
     setCobroFecha(new Date().toISOString().slice(0, 10));
     setCobroMoneda('USD');
@@ -458,6 +469,7 @@ export const MachineryView: React.FC<Props> = ({
   }, [exchangeRate?.tasaBobPerUsd]);
 
   const resetNewServiceForm = () => {
+    jobCurrencyAnchorRef.current = null;
     setSelectedMachineId('');
     setSelectedJobTypeId('');
     setSelectedJobNombre('');
@@ -478,6 +490,7 @@ export const MachineryView: React.FC<Props> = ({
   };
 
   const resetNewExpenseForm = () => {
+    expCurrencyAnchorRef.current = null;
     setExpMachineId('');
     setExpItemGasto('');
     setExpCantidad(1);
@@ -631,9 +644,15 @@ export const MachineryView: React.FC<Props> = ({
 
   const applyMachineBaseTariff = (m: Machine | undefined) => {
     if (!m) return;
+    jobCurrencyAnchorRef.current = null;
+    const nextUnit: 'hora' | 'hectarea' = isHectareUnit(m.unidad) ? 'hectarea' : 'hora';
     setTarifa(m.tarifa || 0);
-    setUnidad(m.unidad === 'ha' || m.unidad === 'hectarea' ? 'hectarea' : 'hora');
+    setUnidad(nextUnit);
     setJobMoneda((m.moneda as Currency) || 'USD');
+    if (nextUnit === 'hectarea' && serviceDestino === 'propiedad' && selectedLotId) {
+      const ha = getLotSurfaceHa(lots, selectedLotId);
+      if (ha !== null) setCantidad(ha);
+    }
   };
 
   // Tariff rule: selecting a machine without implement applies ONLY the machine's own tariff
@@ -654,11 +673,113 @@ export const MachineryView: React.FC<Props> = ({
       applyMachineBaseTariff(m);
       return;
     }
+    jobCurrencyAnchorRef.current = null;
+    const nextUnit: 'hora' | 'hectarea' = isHectareUnit(jobDef.unidad) ? 'hectarea' : 'hora';
     setSelectedJobTypeId(jobDef.id);
     setSelectedJobNombre(jobDef.nombre);
     setTarifa(jobDef.tarifa);
-    setUnidad(jobDef.unidad === 'ha' || jobDef.unidad === 'hectarea' ? 'hectarea' : 'hora');
+    setUnidad(nextUnit);
     setJobMoneda((jobDef.moneda as Currency) || 'USD');
+    if (nextUnit === 'hectarea' && serviceDestino === 'propiedad' && selectedLotId) {
+      const ha = getLotSurfaceHa(lots, selectedLotId);
+      if (ha !== null) setCantidad(ha);
+    }
+  };
+
+  // Automatic USD <-> Bs conversion handlers across all machinery forms
+  const handleJobCurrencyChange = (nextCurr: Currency) => {
+    const res = convertFormCurrencyValue({
+      currentValue: tarifa,
+      fromCurrency: jobMoneda,
+      toCurrency: nextCurr,
+      tc: jobTc,
+      anchor: jobCurrencyAnchorRef.current,
+    });
+    if (res.error) {
+      setErrorMsg(res.error);
+      return;
+    }
+    if (!res.converted) return;
+    jobCurrencyAnchorRef.current = res.nextAnchor;
+    setJobMoneda(res.currency);
+    setTarifa(res.valueNum);
+    setErrorMsg(null);
+  };
+
+  const handleExpCurrencyChange = (nextCurr: Currency) => {
+    const res = convertFormCurrencyValue({
+      currentValue: expPrecio,
+      fromCurrency: expMoneda,
+      toCurrency: nextCurr,
+      tc: expTc,
+      anchor: expCurrencyAnchorRef.current,
+    });
+    if (res.error) {
+      setErrorMsg(res.error);
+      return;
+    }
+    if (!res.converted) return;
+    expCurrencyAnchorRef.current = res.nextAnchor;
+    setExpMoneda(res.currency);
+    setExpPrecio(res.valueNum);
+    setErrorMsg(null);
+  };
+
+  const handleEditJobCurrencyChange = (nextCurr: Currency) => {
+    const res = convertFormCurrencyValue({
+      currentValue: editTarifa,
+      fromCurrency: editMoneda,
+      toCurrency: nextCurr,
+      tc: editTc,
+      anchor: editJobCurrencyAnchorRef.current,
+    });
+    if (res.error) {
+      setEditJobError(res.error);
+      return;
+    }
+    if (!res.converted) return;
+    editJobCurrencyAnchorRef.current = res.nextAnchor;
+    setEditMoneda(res.currency);
+    setEditTarifa(res.valueNum);
+    setEditJobError(null);
+  };
+
+  const handleEditExpCurrencyChange = (nextCurr: Currency) => {
+    const res = convertFormCurrencyValue({
+      currentValue: editExpPrecio,
+      fromCurrency: editExpMoneda,
+      toCurrency: nextCurr,
+      tc: editExpTc,
+      anchor: editExpCurrencyAnchorRef.current,
+    });
+    if (res.error) {
+      setEditExpError(res.error);
+      return;
+    }
+    if (!res.converted) return;
+    editExpCurrencyAnchorRef.current = res.nextAnchor;
+    setEditExpMoneda(res.currency);
+    setEditExpPrecio(res.valueNum);
+    setEditExpError(null);
+  };
+
+  const handleCobroCurrencyChange = (nextCurr: Currency) => {
+    const res = convertFormCurrencyValue({
+      currentValue: cobroImporte,
+      fromCurrency: cobroMoneda,
+      toCurrency: nextCurr,
+      tc: cobroTc,
+      anchor: cobroCurrencyAnchorRef.current,
+    });
+    if (res.error) {
+      setCobroModalError(res.error);
+      return;
+    }
+    if (!res.converted) return;
+    cobroCurrencyAnchorRef.current = res.nextAnchor;
+    setCobroMoneda(res.currency);
+    setCobroImporte(res.valueStr);
+    setCobroModalError(null);
   };
 
   const calculatedTotal =
@@ -830,6 +951,7 @@ export const MachineryView: React.FC<Props> = ({
       setErrorMsg('Solo el Administrador puede editar servicios guardados.');
       return;
     }
+    editJobCurrencyAnchorRef.current = null;
     setEditingJob(j);
     setEditJobError(null);
     setEditCampanaId(j.campanaId || activeCampaign?.id || '');
@@ -1070,6 +1192,7 @@ export const MachineryView: React.FC<Props> = ({
       setErrorMsg('Solo el Administrador puede editar gastos guardados.');
       return;
     }
+    editExpCurrencyAnchorRef.current = null;
     setEditingExpense(exp);
     setEditExpError(null);
     setEditExpFecha(exp.fecha ? exp.fecha.slice(0, 10) : new Date().toISOString().slice(0, 10));
@@ -1281,7 +1404,7 @@ export const MachineryView: React.FC<Props> = ({
 
   return (
     <div className="w-full max-w-full space-y-4 sm:space-y-6">
-      {currentScreen !== 'main' && currentScreen !== 'resultados' && (
+      {currentScreen !== 'main' && (
         <div className="flex items-center gap-3 my-1">
           <button
             type="button"
@@ -1483,52 +1606,9 @@ export const MachineryView: React.FC<Props> = ({
                 </div>
                 <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
               </button>
-
-              {/* 4. Resultados */}
-              <button
-                type="button"
-                onClick={() => setCurrentScreen('resultados')}
-                className="w-full px-4 py-4 flex items-center justify-between gap-3 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[72px]"
-              >
-                <div className="flex items-center gap-3.5 min-w-0">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-purple-50 border border-purple-200/80 text-purple-700 shrink-0">
-                    <BarChart3 className="h-5 w-5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-base font-bold text-slate-900 leading-snug">
-                      Resultados
-                    </h3>
-                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
-                      Ingresos, gastos y balance por máquina
-                    </p>
-                  </div>
-                </div>
-                <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
-              </button>
             </div>
           </section>
         </div>
-      )}
-
-      {/* ============================================================ */}
-      {/* SUB-VISTA: RESULTADOS DE MAQUINARIAS                         */}
-      {/* ============================================================ */}
-      {currentScreen === 'resultados' && (
-        <ReportsView
-          campaigns={campaigns}
-          activeCampaign={activeCampaign}
-          machines={machines}
-          machineJobTypes={machineJobTypes}
-          lots={lots}
-          jobs={jobs}
-          expenses={expenses}
-          incomes={[]}
-          currency={currency}
-          exchangeRate={exchangeRate}
-          initialScreen="maquinarias"
-          onRootBackLabel="Volver a Maquinarias"
-          onBack={() => setCurrentScreen('main')}
-        />
       )}
 
       {/* ============================================================ */}
@@ -2063,7 +2143,13 @@ export const MachineryView: React.FC<Props> = ({
                   <div className="flex p-1 bg-[#F2F5F3] rounded-xl gap-1 border border-[#E2E7E3]">
                     <button
                       type="button"
-                      onClick={() => setServiceDestino('propiedad')}
+                      onClick={() => {
+                        setServiceDestino('propiedad');
+                        if (selectedLotId && isHectareUnit(unidad)) {
+                          const ha = getLotSurfaceHa(lots, selectedLotId);
+                          if (ha !== null) setCantidad(ha);
+                        }
+                      }}
                       className={`flex-1 h-[36px] text-xs font-semibold rounded-lg transition cursor-pointer ${
                         serviceDestino === 'propiedad'
                           ? 'bg-white text-[#24875B] shadow-xs border border-[#BFE0CD]'
@@ -2091,7 +2177,13 @@ export const MachineryView: React.FC<Props> = ({
                   <VisualLotPicker
                     lots={lots}
                     selectedLotId={selectedLotId}
-                    onSelect={(id) => setSelectedLotId(id)}
+                    onSelect={(id) => {
+                      setSelectedLotId(id);
+                      if (isHectareUnit(unidad)) {
+                        const ha = getLotSurfaceHa(lots, id);
+                        if (ha !== null) setCantidad(ha);
+                      }
+                    }}
                     label="Lote"
                     required
                   />
@@ -2136,7 +2228,14 @@ export const MachineryView: React.FC<Props> = ({
                     required
                     icon={<Wrench className="h-[17px] w-[17px]" />}
                     value={unidad}
-                    onChange={(e) => setUnidad(e.target.value as 'hora' | 'hectarea')}
+                    onChange={(e) => {
+                      const nextU = e.target.value as 'hora' | 'hectarea';
+                      setUnidad(nextU);
+                      if (isHectareUnit(nextU) && serviceDestino === 'propiedad' && selectedLotId) {
+                        const ha = getLotSurfaceHa(lots, selectedLotId);
+                        if (ha !== null) setCantidad(ha);
+                      }
+                    }}
                   >
                     <option value="hora">Horas</option>
                     <option value="hectarea">Hectáreas</option>
@@ -2158,7 +2257,10 @@ export const MachineryView: React.FC<Props> = ({
                       min="0"
                       placeholder="0.00"
                       value={tarifa}
-                      onChange={(e) => setTarifa(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                      onChange={(e) => {
+                        jobCurrencyAnchorRef.current = null;
+                        setTarifa(e.target.value === '' ? '' : parseFloat(e.target.value));
+                      }}
                       className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                     />
                   </div>
@@ -2166,7 +2268,7 @@ export const MachineryView: React.FC<Props> = ({
                     label="Moneda"
                     required
                     value={jobMoneda}
-                    onChange={(curr) => setJobMoneda(curr)}
+                    onChange={handleJobCurrencyChange}
                   />
                 </div>
 
@@ -2250,6 +2352,7 @@ export const MachineryView: React.FC<Props> = ({
                 items={machineryExpenseItems}
                 selectedItemName={expItemGasto}
                 onSelectItem={(item) => {
+                  expCurrencyAnchorRef.current = null;
                   setExpItemGasto(item.nombre);
                   if (item.unidad) setExpUnidad(item.unidad);
                   if (item.precioPredeterminado && !expPrecio) setExpPrecio(item.precioPredeterminado);
@@ -2319,7 +2422,10 @@ export const MachineryView: React.FC<Props> = ({
                     min="0.01"
                     placeholder="0.00"
                     value={expPrecio}
-                    onChange={(e) => setExpPrecio(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                    onChange={(e) => {
+                      expCurrencyAnchorRef.current = null;
+                      setExpPrecio(e.target.value === '' ? '' : parseFloat(e.target.value));
+                    }}
                     className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                   />
                 </div>
@@ -2327,7 +2433,7 @@ export const MachineryView: React.FC<Props> = ({
                   label="Moneda"
                   required
                   value={expMoneda}
-                  onChange={(curr) => setExpMoneda(curr)}
+                  onChange={handleExpCurrencyChange}
                 />
               </div>
 
@@ -2937,7 +3043,7 @@ export const MachineryView: React.FC<Props> = ({
                         const jName = (j.trabajoNombre || '').trim().toLowerCase();
                         return jName !== '' && jName === normName;
                       })
-                      .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+                      .sort(compareChronologicalDesc);
 
                     return (
                       <CompactListRow
@@ -3197,13 +3303,17 @@ export const MachineryView: React.FC<Props> = ({
                       ? nextCompat.some((x) => x.id === editJobTypeId)
                       : false;
                     if (!stillCompatible) {
+                      editJobCurrencyAnchorRef.current = null;
+                      const nextU: 'hora' | 'hectarea' = isHectareUnit(m.unidad) ? 'hectarea' : 'hora';
                       setEditJobTypeId('');
                       setEditJobNombre('');
                       setEditTarifa(m.tarifa || 0);
-                      setEditUnidad(
-                        m.unidad === 'ha' || m.unidad === 'hectarea' ? 'hectarea' : 'hora'
-                      );
+                      setEditUnidad(nextU);
                       setEditMoneda((m.moneda as Currency) || 'USD');
+                      if (nextU === 'hectarea' && editTipoTrabajo === 'propiedad' && editLotId) {
+                        const ha = getLotSurfaceHa(lots, editLotId);
+                        if (ha !== null) setEditCantidad(ha);
+                      }
                     }
                   }}
                   required
@@ -3216,27 +3326,36 @@ export const MachineryView: React.FC<Props> = ({
                   jobTypes={editCompatibleImplements}
                   selectedJobTypeId={editJobTypeId}
                   onSelectJobType={(jDef) => {
+                    editJobCurrencyAnchorRef.current = null;
                     if (!jDef) {
                       setEditJobTypeId('');
                       setEditJobNombre('');
                       if (editMachineObj) {
+                        const nextU: 'hora' | 'hectarea' = isHectareUnit(editMachineObj.unidad)
+                          ? 'hectarea'
+                          : 'hora';
                         setEditTarifa(editMachineObj.tarifa || 0);
-                        setEditUnidad(
-                          editMachineObj.unidad === 'ha' || editMachineObj.unidad === 'hectarea'
-                            ? 'hectarea'
-                            : 'hora'
-                        );
+                        setEditUnidad(nextU);
                         setEditMoneda((editMachineObj.moneda as Currency) || 'USD');
+                        if (nextU === 'hectarea' && editTipoTrabajo === 'propiedad' && editLotId) {
+                          const ha = getLotSurfaceHa(lots, editLotId);
+                          if (ha !== null) setEditCantidad(ha);
+                        }
                       }
                       return;
                     }
+                    const nextU: 'hora' | 'hectarea' = isHectareUnit(jDef.unidad)
+                      ? 'hectarea'
+                      : 'hora';
                     setEditJobTypeId(jDef.id);
                     setEditJobNombre(jDef.nombre);
                     setEditTarifa(jDef.tarifa);
-                    setEditUnidad(
-                      jDef.unidad === 'ha' || jDef.unidad === 'hectarea' ? 'hectarea' : 'hora'
-                    );
+                    setEditUnidad(nextU);
                     setEditMoneda((jDef.moneda as Currency) || 'USD');
+                    if (nextU === 'hectarea' && editTipoTrabajo === 'propiedad' && editLotId) {
+                      const ha = getLotSurfaceHa(lots, editLotId);
+                      if (ha !== null) setEditCantidad(ha);
+                    }
                   }}
                   allowNone
                   noneLabel={
@@ -3288,7 +3407,13 @@ export const MachineryView: React.FC<Props> = ({
                   <VisualLotPicker
                     lots={lots}
                     selectedLotId={editLotId}
-                    onSelect={(id) => setEditLotId(id)}
+                    onSelect={(id) => {
+                      setEditLotId(id);
+                      if (isHectareUnit(editUnidad)) {
+                        const ha = getLotSurfaceHa(lots, id);
+                        if (ha !== null) setEditCantidad(ha);
+                      }
+                    }}
                     label="Lote"
                     required
                   />
@@ -3327,7 +3452,14 @@ export const MachineryView: React.FC<Props> = ({
                     required
                     icon={<Wrench className="h-[17px] w-[17px]" />}
                     value={editUnidad}
-                    onChange={(e) => setEditUnidad(e.target.value as 'hora' | 'hectarea')}
+                    onChange={(e) => {
+                      const nextU = e.target.value as 'hora' | 'hectarea';
+                      setEditUnidad(nextU);
+                      if (isHectareUnit(nextU) && editTipoTrabajo === 'propiedad' && editLotId) {
+                        const ha = getLotSurfaceHa(lots, editLotId);
+                        if (ha !== null) setEditCantidad(ha);
+                      }
+                    }}
                   >
                     <option value="hora">Horas</option>
                     <option value="hectarea">Hectáreas</option>
@@ -3346,7 +3478,10 @@ export const MachineryView: React.FC<Props> = ({
                       step="any"
                       min="0"
                       value={editTarifa}
-                      onChange={(e) => setEditTarifa(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                      onChange={(e) => {
+                        editJobCurrencyAnchorRef.current = null;
+                        setEditTarifa(e.target.value === '' ? '' : parseFloat(e.target.value));
+                      }}
                       className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                     />
                   </div>
@@ -3354,7 +3489,7 @@ export const MachineryView: React.FC<Props> = ({
                     label="Moneda"
                     required
                     value={editMoneda}
-                    onChange={(curr) => setEditMoneda(curr)}
+                    onChange={handleEditJobCurrencyChange}
                   />
                 </div>
 
@@ -3666,7 +3801,10 @@ export const MachineryView: React.FC<Props> = ({
                     required
                     min="0.01"
                     value={editExpPrecio}
-                    onChange={(e) => setEditExpPrecio(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                    onChange={(e) => {
+                      editExpCurrencyAnchorRef.current = null;
+                      setEditExpPrecio(e.target.value === '' ? '' : parseFloat(e.target.value));
+                    }}
                     className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
                   />
                 </div>
@@ -3674,7 +3812,7 @@ export const MachineryView: React.FC<Props> = ({
                   label="Moneda"
                   required
                   value={editExpMoneda}
-                  onChange={(curr) => setEditExpMoneda(curr)}
+                  onChange={handleEditExpCurrencyChange}
                 />
               </div>
 
@@ -3825,28 +3963,12 @@ export const MachineryView: React.FC<Props> = ({
                   ) : null}
                 </div>
 
-                {/* Moneda del cobro: selector desplegable unificado */}
+                {/* Moneda del cobro: selector desplegable unificado con conversión automática */}
                 <CurrencySelect
                   label="Moneda del cobro"
                   required
                   value={cobroMoneda}
-                  onChange={(nextCurr) => {
-                    if (nextCurr === cobroMoneda) return;
-                    setCobroMoneda(nextCurr);
-                    setCobroModalError(null);
-                    if (nextCurr === 'USD') {
-                      setCobroImporte(
-                        cobroModalCuenta.saldo > 0 ? String(Number(cobroModalCuenta.saldo.toFixed(2))) : ''
-                      );
-                    } else {
-                      const tcUse = tcInputNum > 0 ? tcInputNum : (exchangeRate?.tasaBobPerUsd || 6.96);
-                      setCobroImporte(
-                        cobroModalCuenta.saldo > 0
-                          ? String(Number((cobroModalCuenta.saldo * tcUse).toFixed(2)))
-                          : ''
-                      );
-                    }
-                  }}
+                  onChange={handleCobroCurrencyChange}
                 />
 
                 {/* Fecha del cobro y Tipo de cambio */}
@@ -3890,7 +4012,17 @@ export const MachineryView: React.FC<Props> = ({
                     </label>
                     <button
                       type="button"
-                      onClick={() => setCobroImporte(String(maxEnMonedaSeleccionada))}
+                      onClick={() => {
+                        const tcRef = tcInputNum > 0 ? tcInputNum : (exchangeRate?.tasaBobPerUsd || 6.96);
+                        cobroCurrencyAnchorRef.current = {
+                          baseAmount: Number(cobroModalCuenta.saldo.toFixed(2)),
+                          baseCurrency: 'USD',
+                          lastDisplayedValue: maxEnMonedaSeleccionada,
+                          lastCurrency: cobroMoneda,
+                          lastTc: tcRef,
+                        };
+                        setCobroImporte(maxEnMonedaSeleccionada.toFixed(2));
+                      }}
                       className="text-[11px] font-semibold text-[#24875B] hover:underline cursor-pointer shrink-0"
                     >
                       Usar saldo ({cobroMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
@@ -3905,7 +4037,10 @@ export const MachineryView: React.FC<Props> = ({
                     required
                     placeholder="0.00"
                     value={cobroImporte}
-                    onChange={(e) => setCobroImporte(e.target.value)}
+                    onChange={(e) => {
+                      cobroCurrencyAnchorRef.current = null;
+                      setCobroImporte(e.target.value);
+                    }}
                     className={`${FORM_INPUT_CLASS} font-semibold tabular-nums ${
                       excedeSaldo ? 'border-red-400 focus:border-red-500 text-red-700' : ''
                     }`}

@@ -25,8 +25,17 @@ async function startServer() {
           method: 'GET',
           redirect: 'follow',
         });
-        const data = await response.json();
-        return res.json(data);
+        const rawText = await response.text();
+        try {
+          const data = JSON.parse(rawText);
+          return res.status(response.ok ? 200 : response.status).json(data);
+        } catch {
+          return res.status(502).json({
+            ok: false,
+            code: 'INVALID_BACKEND_RESPONSE',
+            error: 'Google Apps Script devolvió una respuesta no válida.',
+          });
+        }
       }
 
       if (req.method === 'POST') {
@@ -38,8 +47,17 @@ async function startServer() {
           body: typeof req.body === 'string' ? req.body : JSON.stringify(req.body),
           redirect: 'follow',
         });
-        const data = await response.json();
-        return res.json(data);
+        const rawText = await response.text();
+        try {
+          const data = JSON.parse(rawText);
+          return res.status(response.ok ? 200 : response.status).json(data);
+        } catch {
+          return res.status(502).json({
+            ok: false,
+            code: 'INVALID_BACKEND_RESPONSE',
+            error: 'Google Apps Script devolvió una respuesta no válida.',
+          });
+        }
       }
 
       return res.status(405).json({ ok: false, error: 'Method not allowed' });

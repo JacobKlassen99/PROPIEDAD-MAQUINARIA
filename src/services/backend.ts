@@ -37,6 +37,41 @@ import {
 const GAS_DIRECT_URL = 'https://script.google.com/macros/s/AKfycbwiFRh5R1k5ZxxFD67Fl0xcmIA1NVbx9XOg2gtjbvyYgAFoprbVB8foMTnUpPvMY0tf/exec';
 const PROXY_URL = '/api/gas';
 
+export type BackendErrorKind = 'auth' | 'network' | 'server' | 'invalid_response' | 'unknown';
+
+export class BackendError extends Error {
+  readonly kind: BackendErrorKind;
+  readonly status?: number;
+  readonly code?: string;
+
+  constructor(
+    message: string,
+    kind: BackendErrorKind = 'unknown',
+    options?: { status?: number; code?: string }
+  ) {
+    super(message);
+    this.name = 'BackendError';
+    this.kind = kind;
+    this.status = options?.status;
+    this.code = options?.code;
+  }
+}
+
+function isLikelyCredentialErrorMessage(msg: string, code?: string): boolean {
+  const lower = String(msg || '').toLowerCase();
+  const c = String(code || '').toUpperCase();
+  if (c === 'INVALID_CREDENTIALS' || c === 'AUTH_FAILED' || c === 'UNAUTHORIZED') return true;
+  return (
+    lower.includes('contraseña incorrecta') ||
+    lower.includes('contrasena incorrecta') ||
+    lower.includes('usuario o pin incorrecto') ||
+    lower.includes('pin incorrecto') ||
+    lower.includes('credenciales incorrectas') ||
+    lower.includes('ingrese la contraseña') ||
+    lower.includes('ingrese la contrasena')
+  );
+}
+
 // In-flight request deduplication map
 const pendingRequests = new Map<string, Promise<any>>();
 
@@ -396,10 +431,16 @@ export function invalidateBackendDomains(patterns: string[]) {
  * Low-level dispatch to Google Apps Script
  */
 async function callGAS<T>(action: string, payload: Record<string, any> = {}, useCache = false): Promise<T> {
-  const cacheKey = `${action}:${canonicalizePayload(payload)}`;
+  const isSensitiveAuthAction =
+    action === 'auth.login' ||
+    action === 'auth.logout' ||
+    action === 'auth.admin.authorize' ||
+    action === 'auth.admin.revoke';
+
+  const cacheKey = isSensitiveAuthAction ? '' : `${action}:${canonicalizePayload(payload)}`;
   const reqGen = getCacheSessionGeneration();
 
-  if (useCache && memoryCache.has(cacheKey)) {
+  if (!isSensitiveAuthAction && useCache && memoryCache.has(cacheKey)) {
     const entry = memoryCache.get(cacheKey)!;
     if (Date.now() - entry.timestamp < CACHE_TTL_MS) {
       return entry.data as T;
@@ -407,8 +448,8 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
     memoryCache.delete(cacheKey);
   }
 
-  // Deduplicate inflight requests for identical queries
-  if (pendingRequests.has(cacheKey)) {
+  // Deduplicate inflight requests for identical non-sensitive queries
+  if (!isSensitiveAuthAction && pendingRequests.has(cacheKey)) {
     return pendingRequests.get(cacheKey)! as Promise<T>;
   }
 
@@ -417,25 +458,45 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
     const currentAdminToken = getAdminToken();
 
     if (action === 'auth.login') {
-      // Contract for auth.login: never include tokens, credentials inside data
+      // Contract for auth.login:
+      // - Never include existing session/admin tokens.
+      // - Always keep PIN / password as string to preserve leading zeros.
+      // - Only include `usuario` when an explicit individual username is supplied;
+      //   omitting `usuario` allows GAS handleLogin2026_() to delegate to handleLogin()
+      //   for shared CONTRASENA_USUARIO / CONTRASENA_ADMIN authentication.
+      const rawUsuario =
+        payload.usuario !== undefined && payload.usuario !== null
+          ? String(payload.usuario).trim()
+          : '';
+      const rawSecret = String(
+        payload.pin ?? payload.password ?? payload.contrasena ?? ''
+      ).trim();
+
+      const loginData: Record<string, string> = {
+        pin: rawSecret,
+        password: rawSecret,
+        contrasena: rawSecret,
+      };
+      if (rawUsuario) {
+        loginData.usuario = rawUsuario;
+      }
+
       body = {
         action: 'auth.login',
-        data: {
-          usuario: payload.usuario || 'usuario',
-          pin: payload.pin || payload.password || payload.contrasena,
-          password: payload.password || payload.contrasena || payload.pin,
-          contrasena: payload.contrasena || payload.password || payload.pin,
-        },
+        data: loginData,
       };
     } else if (action === 'auth.admin.authorize') {
-      // Contract for auth.admin.authorize: validates CONTRASENA_ADMIN
+      // Contract for auth.admin.authorize: validates CONTRASENA_ADMIN (preserved as string)
+      const rawAdminSecret = String(
+        payload.password ?? payload.contrasena ?? payload.contrasenaAdmin ?? ''
+      ).trim();
       body = {
         action: 'auth.admin.authorize',
         ...(activeSession?.token ? { token: activeSession.token } : {}),
         data: {
-          password: payload.password || payload.contrasena || payload.contrasenaAdmin,
-          contrasena: payload.contrasena || payload.password || payload.contrasenaAdmin,
-          contrasenaAdmin: payload.contrasenaAdmin || payload.password || payload.contrasena,
+          password: rawAdminSecret,
+          contrasena: rawAdminSecret,
+          contrasenaAdmin: rawAdminSecret,
         },
       };
     } else {
@@ -452,35 +513,93 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
       };
     }
 
+    const serializedBody = JSON.stringify(body);
     let response: Response;
     try {
-      // First attempt via full-stack / Netlify proxy
+      // First attempt via full-stack / Netlify proxy (cache: 'no-store' for Safari/Android reliability)
       response = await fetch(PROXY_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: serializedBody,
+        cache: 'no-store',
       });
 
       if (!response.ok && response.status === 404) {
-        // Fallback to direct Apps Script if proxy route is unavailable
+        // Fallback to direct Apps Script only if proxy route does not exist
         response = await fetch(GAS_DIRECT_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify(body),
+          body: serializedBody,
           redirect: 'follow',
+          cache: 'no-store',
         });
       }
     } catch {
-      // Network fallback directly to GAS
-      response = await fetch(GAS_DIRECT_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(body),
-        redirect: 'follow',
-      });
+      // Network error reaching proxy: try direct Apps Script as fallback
+      try {
+        response = await fetch(GAS_DIRECT_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: serializedBody,
+          redirect: 'follow',
+          cache: 'no-store',
+        });
+      } catch {
+        throw new BackendError(
+          'No se pudo conectar con el servidor. Verifica tu conexión a internet e intenta nuevamente.',
+          'network'
+        );
+      }
     }
 
-    const data = await response.json();
+    let rawText = '';
+    try {
+      rawText = await response.text();
+    } catch {
+      throw new BackendError(
+        'Se interrumpió la comunicación con el servidor. Intenta nuevamente.',
+        'network',
+        { status: response.status }
+      );
+    }
+
+    let data: any;
+    try {
+      data = rawText ? JSON.parse(rawText) : null;
+    } catch {
+      if (response.status >= 500) {
+        throw new BackendError(
+          `El servidor no respondió correctamente (HTTP ${response.status}). Intenta nuevamente en unos momentos.`,
+          'server',
+          { status: response.status }
+        );
+      }
+      throw new BackendError(
+        'El servidor devolvió una respuesta inválida. Intenta nuevamente en unos momentos.',
+        'invalid_response',
+        { status: response.status }
+      );
+    }
+
+    if (!data || typeof data !== 'object') {
+      throw new BackendError(
+        'El servidor devolvió una respuesta inválida o vacía. Intenta nuevamente.',
+        'invalid_response',
+        { status: response.status }
+      );
+    }
+
+    // Distinguish HTTP 5xx / proxy errors from business/auth responses
+    if (!response.ok && response.status >= 500) {
+      const serverMsg =
+        typeof data.error === 'string' && data.error.trim()
+          ? data.error.trim()
+          : `Error del servidor (HTTP ${response.status}). Intenta nuevamente en unos momentos.`;
+      throw new BackendError(serverMsg, 'server', {
+        status: response.status,
+        code: typeof data.code === 'string' ? data.code : undefined,
+      });
+    }
 
     // Safe diagnostic logging (no token/PIN/password logged)
     if (action === 'getMachines' || action === 'getLots' || action === 'getCampaigns') {
@@ -492,7 +611,11 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
     }
 
     if (!data.ok) {
-      const errStr = String(data.error || '').toLowerCase();
+      const rawErrMsg =
+        typeof data.error === 'string' && data.error.trim()
+          ? data.error.trim()
+          : `Error en la acción ${action}`;
+      const errStr = rawErrMsg.toLowerCase();
       const code = String(data.code || '');
 
       // Check for expired or missing user session, revoked token, or password update
@@ -523,13 +646,30 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
         setAdminToken(null);
       }
 
-      throw new Error(data.error || `Error en la acción ${action}`);
+      const isProxyOrServerErr =
+        errStr.includes('proxy') ||
+        errStr.includes('timeout') ||
+        errStr.includes('lockservice') ||
+        errStr.includes('no encontrada') ||
+        errStr.includes('falta la hoja') ||
+        errStr.includes('exceeded maximum execution time');
+
+      const kind: BackendErrorKind = isLikelyCredentialErrorMessage(rawErrMsg, code)
+        ? 'auth'
+        : isProxyOrServerErr
+        ? 'server'
+        : action === 'auth.login'
+        ? 'server'
+        : 'unknown';
+
+      throw new BackendError(rawErrMsg, kind, { status: response.status, code });
     }
 
     const result = data.result !== undefined ? data.result : data;
 
     // Warm in-memory cache on read actions (only if session generation hasn't changed)
     if (
+      !isSensitiveAuthAction &&
       (useCache || CACHEABLE_READ_ACTIONS.has(action)) &&
       reqGen === getCacheSessionGeneration()
     ) {
@@ -539,12 +679,14 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
     return result as T;
   })();
 
-  pendingRequests.set(cacheKey, requestPromise);
+  if (!isSensitiveAuthAction) {
+    pendingRequests.set(cacheKey, requestPromise);
+  }
 
   try {
     return await requestPromise;
   } finally {
-    if (pendingRequests.get(cacheKey) === requestPromise) {
+    if (!isSensitiveAuthAction && pendingRequests.get(cacheKey) === requestPromise) {
       pendingRequests.delete(cacheKey);
     }
   }
@@ -567,19 +709,25 @@ export async function checkBackendHealth(): Promise<BackendHealthResponse> {
  * Da acceso a los módulos operativos MAQUINARIAS y PROPIEDAD.
  */
 export async function loginWithUserPassword(password: string): Promise<UserSession> {
-  if (!password || !password.trim()) {
-    throw new Error('Ingrese la contraseña.');
+  const secret = String(password ?? '').trim();
+  if (!secret) {
+    throw new BackendError('Ingrese la contraseña.', 'auth');
   }
 
+  // IMPORTANT: Do NOT pass a hardcoded `usuario` field here.
+  // GAS `handleLogin2026_` checks `if (!usuario) return handleLogin(p)` to
+  // validate shared CONTRASENA_USUARIO / CONTRASENA_ADMIN credentials.
   const result = await callGAS<UserSession & { tokenAdmin?: string }>('auth.login', {
-    usuario: 'usuario',
-    pin: password.trim(),
-    password: password.trim(),
-    contrasena: password.trim(),
+    pin: secret,
+    password: secret,
+    contrasena: secret,
   });
 
-  if (!result || !result.token) {
-    throw new Error('La autenticación en Apps Script no retornó un token válido');
+  if (!result || typeof result.token !== 'string' || !result.token.trim()) {
+    throw new BackendError(
+      'El servidor no devolvió un token de sesión válido. Intenta nuevamente.',
+      'invalid_response'
+    );
   }
 
   if (result.tokenAdmin) {
@@ -591,10 +739,40 @@ export async function loginWithUserPassword(password: string): Promise<UserSessi
 }
 
 /**
- * Compatible con la llamada anterior de loginWithPin
+ * Compatible con inicio de sesión por usuario + PIN (conservando ceros iniciales como texto)
+ * o contraseña compartida si `usuario` está vacío.
  */
 export async function loginWithPin(usuario: string, pin: string): Promise<UserSession> {
-  return loginWithUserPassword(pin || usuario);
+  const cleanUser = String(usuario ?? '').trim();
+  const cleanPin = String(pin ?? '').trim();
+
+  if (!cleanUser) {
+    return loginWithUserPassword(cleanPin);
+  }
+  if (!cleanPin) {
+    throw new BackendError('Ingrese el PIN o contraseña.', 'auth');
+  }
+
+  const result = await callGAS<UserSession & { tokenAdmin?: string }>('auth.login', {
+    usuario: cleanUser,
+    pin: cleanPin,
+    password: cleanPin,
+    contrasena: cleanPin,
+  });
+
+  if (!result || typeof result.token !== 'string' || !result.token.trim()) {
+    throw new BackendError(
+      'El servidor no devolvió un token de sesión válido. Intenta nuevamente.',
+      'invalid_response'
+    );
+  }
+
+  if (result.tokenAdmin) {
+    setAdminToken(result.tokenAdmin);
+  }
+
+  setActiveSession(result);
+  return result;
 }
 
 /**
@@ -706,6 +884,8 @@ export async function logout(): Promise<void> {
   } catch {
     // Ignore network error on logout
   } finally {
+    // GAS handleLogout revokes both userToken and adminTok; clear both locally
+    setAdminToken(null);
     setActiveSession(null);
   }
 }
@@ -1593,6 +1773,7 @@ export function normalizeMachineryJob(raw: any): MachineryJob {
     total: totalVal,
     observacion: obs,
     linkedMovimientoId: raw.linkedMovimientoId || raw.trabajoId || '',
+    creadoEn: raw.creadoEn ? String(raw.creadoEn) : undefined,
   };
 }
 
@@ -1816,6 +1997,7 @@ export async function getExpenses(campanaId?: string, modulo?: 'maquinarias' | '
         observacion: String(e.observaciones || e.observacion || ''),
         esTrabajoPropio: Boolean(e.esTrabajoPropio || e.trabajoId),
         trabajoId: e.trabajoId || undefined,
+        creadoEn: e.creadoEn ? String(e.creadoEn) : undefined,
       };
     });
 
@@ -1984,8 +2166,12 @@ export async function getIncomes(campanaId?: string, modulo?: 'maquinarias' | 'p
         tipoCambio: parseDecimalNumber(i.tc ?? i.tipoCambio ?? getConfiguredExchangeRate() ?? 0),
         total: tot,
         observacion: String(i.observaciones || i.observacion || ''),
-        esTrabajoPropio: Boolean(i.esTrabajoPropio || i.trabajoId),
+        esTrabajoPropio: Boolean(
+          i.esTrabajoPropio ||
+            (i.trabajoId && !String(i.trabajoId).trim().toUpperCase().startsWith('COSECHA:'))
+        ),
         trabajoId: i.trabajoId || undefined,
+        creadoEn: i.creadoEn ? String(i.creadoEn) : undefined,
       };
     });
 

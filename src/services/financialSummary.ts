@@ -6,6 +6,7 @@ import {
   Income,
   MachineryJob,
 } from '../types';
+import { parseFlexibleDate } from './backend';
 
 export interface ModuleOperationalResult {
   ingresos: number;
@@ -19,32 +20,78 @@ export interface OperationalSummaryPair {
 }
 
 /**
- * Matches a record to a target campaign using the same rules as ReportsView
- * (exact campanaId, campana name, year fallback, or date window).
+ * Matches a record to a target campaign cleanly without cross-campaign leakage:
+ * 1. If campanaId is present, it must match targetCamp.id (or targetCamp.nombre fallback).
+ * 2. Otherwise, if campana/campanaNombre is present, it must match targetCamp.nombre.
+ * 3. Only when both are absent, falls back to parsed date window or campaign year.
  */
 export function matchesCampaignRecord(
   item: { campanaId?: string; campana?: string; campanaNombre?: string; fecha?: string } | null | undefined,
   targetCamp: Campaign | null | undefined
 ): boolean {
   if (!item || !targetCamp) return false;
-  if (item.campanaId && targetCamp.id && String(item.campanaId) === String(targetCamp.id)) {
-    return true;
-  }
+  const targetId = String(targetCamp.id ?? '').trim();
   const targetName = String(targetCamp.nombre ?? '').trim().toLowerCase();
+  const itemCampId = String(item.campanaId ?? '').trim();
   const itemCampName = String(item.campana || item.campanaNombre || '').trim().toLowerCase();
-  if (itemCampName && targetName && itemCampName === targetName) {
-    return true;
+
+  if (itemCampId) {
+    if (targetId && itemCampId === targetId) return true;
+    if (targetName && itemCampId.toLowerCase() === targetName) return true;
+    return false;
   }
+
+  if (itemCampName) {
+    if (targetName && itemCampName === targetName) return true;
+    if (targetId && itemCampName === targetId.toLowerCase()) return true;
+    return false;
+  }
+
+  const itemTs = parseFlexibleDate(item.fecha);
+  if (!itemTs) return false;
+  const itemDateObj = new Date(itemTs);
+  const itemDayTs = new Date(
+    itemDateObj.getFullYear(),
+    itemDateObj.getMonth(),
+    itemDateObj.getDate()
+  ).getTime();
+
+  const startTs = parseFlexibleDate(targetCamp.fechaInicio);
+  const endTs = parseFlexibleDate(targetCamp.fechaFin);
+  if (startTs && endTs) {
+    const startObj = new Date(startTs);
+    const endObj = new Date(endTs);
+    const startDayTs = new Date(startObj.getFullYear(), startObj.getMonth(), startObj.getDate()).getTime();
+    const endDayTs = new Date(endObj.getFullYear(), endObj.getMonth(), endObj.getDate()).getTime();
+    return itemDayTs >= startDayTs && itemDayTs <= endDayTs;
+  }
+
   const yearMatch = targetName.match(/\b(20\d{2})\b/);
-  if (yearMatch && item.fecha && String(item.fecha).startsWith(yearMatch[1])) {
+  if (yearMatch && itemDateObj.getFullYear() === Number(yearMatch[1])) {
     return true;
   }
-  if (item.fecha && targetCamp.fechaInicio && targetCamp.fechaFin) {
-    if (item.fecha >= targetCamp.fechaInicio && item.fecha <= targetCamp.fechaFin) {
-      return true;
-    }
+
+  if (startTs && !endTs) {
+    const startObj = new Date(startTs);
+    const startDayTs = new Date(startObj.getFullYear(), startObj.getMonth(), startObj.getDate()).getTime();
+    return itemDayTs >= startDayTs;
   }
+
   return false;
+}
+
+/**
+ * Identifies direct property incomes (direct crop sales AND priced harvests
+ * whose trabajoId starts with "COSECHA:"), excluding machinery service mirror rows.
+ */
+export function isDirectPropertyIncome(i: Income | null | undefined): boolean {
+  if (!i) return false;
+  if (i.modulo && i.modulo !== 'propiedad') return false;
+  const tid = String(i.trabajoId || '').trim();
+  if (tid) {
+    return tid.toUpperCase().startsWith('COSECHA:');
+  }
+  return !i.esTrabajoPropio;
 }
 
 /**
@@ -161,9 +208,9 @@ export function computeOperationalSummaries(params: {
       0
     );
 
-  // 2. Propiedad: direct crop/property incomes minus (direct property expenses + internal machinery jobs)
+  // 2. Propiedad: direct crop/property incomes (incl. priced harvests) minus (direct property expenses + internal machinery jobs)
   const propIngresos = campaignIncomes
-    .filter((i) => !i.trabajoId)
+    .filter(isDirectPropertyIncome)
     .reduce(
       (sum, i) =>
         sum +
