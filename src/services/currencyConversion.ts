@@ -1,4 +1,5 @@
 import { Currency, Lot } from '../types';
+import { tStatic } from './i18n';
 
 /**
  * Anchor stored in a ref per monetary form so repeated USD <-> Bs toggles
@@ -94,7 +95,7 @@ export function convertFormCurrencyValue(params: {
       valueNum: parsedCurrent,
       valueStr: String(currentValue ?? ''),
       nextAnchor: anchor,
-      error: 'Ingresa un tipo de cambio válido mayor a 0 para convertir el importe.',
+      error: tStatic('common.tcInvalidConvert'),
     };
   }
 

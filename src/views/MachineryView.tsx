@@ -26,7 +26,6 @@ import {
   Edit3,
   Wrench,
   History,
-  Wallet,
   Info,
   Save,
   Lock,
@@ -45,6 +44,8 @@ import {
   ItemConfig,
   Asset,
   CobroCuenta,
+  Customer,
+  PaymentSettings,
 } from '../types';
 import {
   createMachineryJob,
@@ -58,12 +59,11 @@ import {
   isTechnicalId,
   isVirtualMachineOnlyImplement,
   parseDecimalNumber,
-  getCobros,
   getCobroEstado,
-  registrarCobro,
   compareChronologicalDesc,
   getMachineIcon,
 } from '../services/backend';
+import { addDaysToIso } from '../services/interestEngine';
 import {
   convertHistoricalAmount,
   formatCurrencyAmount,
@@ -76,13 +76,16 @@ import {
   VisualExpenseItemPicker,
   VisualLotPicker,
 } from '../components/VisualEntityPicker';
+import { CustomerPicker } from '../components/CustomerPicker';
 import {
   AppSelect,
   CurrencySelect,
   FORM_INPUT_CLASS,
   FORM_LABEL_CLASS,
-  FORM_TEXTAREA_CLASS,
 } from '../components/AppSelect';
+import { ObservationField } from '../components/ObservationField';
+import { Switch } from '../components/Switch';
+import { useI18n } from '../services/i18n';
 import {
   CurrencyConversionAnchor,
   convertFormCurrencyValue,
@@ -99,11 +102,9 @@ import {
   cacheKeys,
   getQuerySnapshot,
   invalidateQueries,
-  patchQueriesByPrefix,
   revalidateQuery,
-  setQueryData,
 } from '../services/dataCache';
-import { usePersistedMemoryState, useSwrQuery } from '../hooks/useSwrQuery';
+import { usePersistedMemoryState } from '../hooks/useSwrQuery';
 import type { RefreshScope } from '../App';
 
 interface Props {
@@ -116,6 +117,8 @@ interface Props {
   expenses: Expense[];
   itemsConfig: ItemConfig[];
   assets?: Asset[];
+  customers?: Customer[];
+  paymentSettings?: PaymentSettings | null;
   currency: Currency;
   exchangeRate: ExchangeRateConfig;
   isAdmin?: boolean;
@@ -132,8 +135,7 @@ type MachineryScreen =
   | 'trabajo_propiedad'
   | 'gasto'
   | 'historial'
-  | 'resumen'
-  | 'por_cobrar';
+  | 'resumen';
 
 const toYYYYMMDD = (dStr: string | undefined): string => {
   if (!dStr) return new Date().toISOString().slice(0, 10);
@@ -162,11 +164,14 @@ export const MachineryView: React.FC<Props> = ({
   expenses,
   itemsConfig = [],
   assets = [],
+  customers = [],
+  paymentSettings = null,
   currency,
   exchangeRate,
   isAdmin,
   onRefreshData,
 }) => {
+  const { lang, bi, t, translateStatus, translateUnit, translateError } = useI18n();
   const effectiveIsAdmin = isAdmin ?? hasAdminAuthorization();
   const [currentScreen, setCurrentScreen] = useState<MachineryScreen>('main');
   const [saving, setSaving] = useState(false);
@@ -187,238 +192,33 @@ export const MachineryView: React.FC<Props> = ({
   const [expenseToDelete, setExpenseToDelete] = useState<Expense | null>(null);
   const [deletingExpense, setDeletingExpense] = useState(false);
 
-  // State for Por cobrar (shared SWR memory cache: cobros.list, cobros.estado, cobros.registrar)
-  const [porCobrarSearch, setPorCobrarSearch] = usePersistedMemoryState<string>('machinery.porCobrar.search', '');
-  const [porCobrarCampaignId, setPorCobrarCampaignId] = usePersistedMemoryState<string>('machinery.porCobrar.campaignId', 'all');
-  const [porCobrarEstadoFilter, setPorCobrarEstadoFilter] = usePersistedMemoryState<'pendientes' | 'todos' | 'PAGADO'>('machinery.porCobrar.estado', 'pendientes');
-  const [expandedPorCobrarId, setExpandedPorCobrarId] = useState<string | null>(null);
-  const [loadingCobroEstadoId, setLoadingCobroEstadoId] = useState<string | null>(null);
-  const [cobroEstadoErrors, setCobroEstadoErrors] = useState<Record<string, string>>({});
-
-  // Modal state for registering partial/full payment via cobros.registrar (USD or BOB with editable TC)
-  const [cobroModalCuenta, setCobroModalCuenta] = useState<CobroCuenta | null>(null);
-  const [cobroFecha, setCobroFecha] = useState(new Date().toISOString().slice(0, 10));
-  const [cobroMoneda, setCobroMoneda] = useState<Currency>('USD');
-  const [cobroImporte, setCobroImporte] = useState('');
-  const [cobroTc, setCobroTc] = useState(
-    exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0 ? String(exchangeRate.tasaBobPerUsd) : ''
-  );
-  const [cobroObs, setCobroObs] = useState('');
-  const [savingCobro, setSavingCobro] = useState(false);
-  const [cobroModalError, setCobroModalError] = useState<string | null>(null);
-
-  // Shared SWR query for global pending cobros badge (shares exact key with default Por cobrar view!)
-  const pendingCobrosKey = cacheKeys.cobrosList(undefined, true);
-  const pendingCobrosQuery = useSwrQuery<CobroCuenta[]>(
-    pendingCobrosKey,
-    () => getCobros({ soloPendientes: true }, false),
-    { enabled: true, minIntervalMs: 3000 }
-  );
-
-  // Shared SWR query for active Por cobrar filter combination
-  const activeCobrosTargetCamp = porCobrarCampaignId === 'all' ? undefined : porCobrarCampaignId;
-  const activeCobrosSoloPend = porCobrarEstadoFilter === 'pendientes';
-  const activeCobrosKey = cacheKeys.cobrosList(activeCobrosTargetCamp, activeCobrosSoloPend);
-
-  const activeCobrosQuery = useSwrQuery<CobroCuenta[]>(
-    activeCobrosKey,
-    () =>
-      getCobros(
-        {
-          ...(activeCobrosTargetCamp ? { campanaId: activeCobrosTargetCamp } : {}),
-          soloPendientes: activeCobrosSoloPend,
-        },
-        false
-      ),
-    { enabled: currentScreen === 'por_cobrar', minIntervalMs: 2500 }
-  );
-
-  const cobros = activeCobrosQuery.data ?? [];
-  const cobrosHasLoaded = activeCobrosQuery.hasLoaded;
-  const cobrosLoading = activeCobrosQuery.isFetching;
-  const cobrosInitialLoading = activeCobrosQuery.isInitialLoading;
-  const cobrosRevalidating = activeCobrosQuery.isRevalidating;
-  const cobrosError = activeCobrosQuery.error;
-
-  const pendingCobrosCount = useMemo(() => {
-    if (!pendingCobrosQuery.hasLoaded) return null;
-    return (pendingCobrosQuery.data || []).filter((c) => c.estado !== 'PAGADO' && c.saldo > 0.005).length;
-  }, [pendingCobrosQuery.hasLoaded, pendingCobrosQuery.data]);
-
-  const loadCobros = useCallback(async () => {
-    await activeCobrosQuery.refresh();
-    if (activeCobrosKey !== pendingCobrosKey) {
-      pendingCobrosQuery.refresh().catch(() => {});
-    }
-  }, [activeCobrosQuery, pendingCobrosQuery, activeCobrosKey, pendingCobrosKey]);
-
-  const mergeDetailedCuenta = useCallback((item: CobroCuenta, detailed: CobroCuenta): CobroCuenta => ({
-    ...item,
-    ...detailed,
-    cliente:
-      detailed.cliente && detailed.cliente !== 'Cliente externo'
-        ? detailed.cliente
-        : item.cliente,
-    fecha: detailed.fecha || item.fecha,
-    campanaId: detailed.campanaId || item.campanaId,
-    campanaNombre: detailed.campanaNombre || item.campanaNombre,
-    maquinariaId: detailed.maquinariaId || item.maquinariaId,
-    maquinariaNombre: detailed.maquinariaNombre || item.maquinariaNombre,
-    trabajoNombre: detailed.trabajoNombre || item.trabajoNombre,
-  }), []);
-
-  const patchCuentaAcrossCaches = useCallback(
-    (trabajoId: string, updated: CobroCuenta) => {
-      const estadoKey = cacheKeys.cobroEstado(trabajoId);
-      setQueryData<CobroCuenta>(estadoKey, (prev) =>
-        prev ? mergeDetailedCuenta(prev, updated) : updated
-      );
-      patchQueriesByPrefix<CobroCuenta[]>('cobros.list:', (list) =>
-        list.map((item) =>
-          String(item.trabajoId) === String(trabajoId) ? mergeDetailedCuenta(item, updated) : item
-        )
-      );
-    },
-    [mergeDetailedCuenta]
-  );
-
-  const handleToggleCobroRow = async (cuenta: CobroCuenta) => {
-    const key = cuenta.trabajoId || cuenta.id || '';
-    if (!key) return;
-    if (expandedPorCobrarId === key) {
-      setExpandedPorCobrarId(null);
-      return;
-    }
-    setExpandedPorCobrarId(key);
-    setCobroEstadoErrors((prev) => {
-      if (!prev[key]) return prev;
-      const next = { ...prev };
-      delete next[key];
-      return next;
-    });
-
-    const estadoKey = cacheKeys.cobroEstado(cuenta.trabajoId);
-    const cachedDetail = getQuerySnapshot<CobroCuenta>(estadoKey);
-    if (cachedDetail.hasLoaded && cachedDetail.data) {
-      // Immediately ensure row displays cached payments without waiting for network
-      patchCuentaAcrossCaches(cuenta.trabajoId, cachedDetail.data);
-    }
-
-    setLoadingCobroEstadoId(key);
-    try {
-      const detailed = await revalidateQuery<CobroCuenta>(
-        estadoKey,
-        () => getCobroEstado(cuenta.trabajoId, false),
-        { minIntervalMs: 3000 }
-      );
-      patchCuentaAcrossCaches(cuenta.trabajoId, detailed);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'No se pudo consultar el detalle de pagos (cobros.estado).';
-      setCobroEstadoErrors((prev) => ({ ...prev, [key]: msg }));
-    } finally {
-      setLoadingCobroEstadoId((curr) => (curr === key ? null : curr));
-    }
-  };
-
   // Currency conversion anchors (prevent cumulative rounding drift on repeated USD <-> Bs toggles)
-  const cobroCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
   const jobCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
   const expCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
   const editJobCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
   const editExpCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
 
-  const handleOpenCobroModal = (cuenta: CobroCuenta) => {
-    cobroCurrencyAnchorRef.current = null;
-    setCobroModalCuenta(cuenta);
-    setCobroFecha(new Date().toISOString().slice(0, 10));
-    setCobroMoneda('USD');
-    const defaultTc =
-      exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
-        ? String(exchangeRate.tasaBobPerUsd)
-        : '';
-    setCobroTc(defaultTc);
-    setCobroImporte(cuenta.saldo > 0 ? String(Number(cuenta.saldo.toFixed(2))) : '');
-    setCobroObs('');
-    setCobroModalError(null);
-  };
-
-  const handleSubmitCobro = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!cobroModalCuenta || savingCobro) return;
-    setCobroModalError(null);
-    setErrorMsg(null);
-    setSuccessMsg(null);
-
-    const importeOriginalNum = parseDecimalNumber(cobroImporte);
-    const tcNum = parseDecimalNumber(cobroTc);
-    if (importeOriginalNum <= 0) {
-      setCobroModalError('Ingresa un importe válido mayor a 0.');
-      return;
+  // Customer lookup helper (always resolves current catalog name by clienteId)
+  const customersById = useMemo(() => {
+    const map = new Map<string, Customer>();
+    for (const c of customers) {
+      if (c.id) map.set(String(c.id), c);
     }
-    if (tcNum <= 0) {
-      setCobroModalError('Ingresa un tipo de cambio válido mayor a 0.');
-      return;
-    }
+    return map;
+  }, [customers]);
 
-    const importeUsdCalc =
-      cobroMoneda === 'BOB'
-        ? Number((importeOriginalNum / tcNum).toFixed(2))
-        : Number(importeOriginalNum.toFixed(2));
-
-    if (importeUsdCalc <= 0) {
-      setCobroModalError('El equivalente en USD del cobro debe ser mayor a 0.');
-      return;
-    }
-    if (importeUsdCalc > cobroModalCuenta.saldo + 0.005) {
-      const maxEnMoneda =
-        cobroMoneda === 'BOB'
-          ? `Bs ${Number((cobroModalCuenta.saldo * tcNum).toFixed(2)).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (USD ${cobroModalCuenta.saldo.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`
-          : `USD ${cobroModalCuenta.saldo.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-      setCobroModalError(`El importe ingresado supera el saldo pendiente (${maxEnMoneda}).`);
-      return;
-    }
-    if (!cobroFecha) {
-      setCobroModalError('Selecciona la fecha del cobro.');
-      return;
-    }
-
-    setSavingCobro(true);
-    try {
-      const res = await registrarCobro({
-        trabajoId: cobroModalCuenta.trabajoId,
-        importeOriginal: importeOriginalNum,
-        monedaCobro: cobroMoneda,
-        tc: tcNum,
-        fecha: cobroFecha,
-        observacion: cobroObs.trim(),
-      });
-
-      const updatedCuenta = res.cuenta;
-      if (updatedCuenta) {
-        patchCuentaAcrossCaches(cobroModalCuenta.trabajoId, updatedCuenta);
+  const resolveJobCustomerLabel = useCallback(
+    (j: MachineryJob): string => {
+      if (j.clienteId) {
+        const found = customersById.get(String(j.clienteId));
+        if (found) return found.nombre;
       }
-
-      setCobroModalCuenta(null);
-      setCobroObs('');
-      setCobroImporte('');
-      const pagoLabel =
-        cobroMoneda === 'BOB'
-          ? `Bs ${importeOriginalNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (USD ${importeUsdCalc.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · TC ${tcNum})`
-          : `USD ${importeOriginalNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-      const saldoText = updatedCuenta
-        ? ` Saldo restante: USD ${updatedCuenta.saldo.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${updatedCuenta.estado}).`
-        : '';
-      setSuccessMsg(`Cobro registrado: ${pagoLabel}.${saldoText}`);
-
-      // Selective invalidation & background refresh of cobros (no duplicate income created)
-      invalidateQueries(['cobros.']);
-      await loadCobros();
-    } catch (err: unknown) {
-      setCobroModalError(err instanceof Error ? err.message : 'Error al registrar el cobro en el backend.');
-    } finally {
-      setSavingCobro(false);
-    }
-  };
+      if (j.clientePendiente) return t('customers.pendingClient');
+      if (j.cliente && j.cliente.trim()) return j.cliente.trim();
+      return t('customers.pendingClient');
+    },
+    [customersById, t]
+  );
 
   // Form State for Machinery Job (Unified Registrar servicio)
   const [serviceDestino, setServiceDestino] = useState<'propiedad' | 'tercero'>('propiedad');
@@ -426,7 +226,13 @@ export const MachineryView: React.FC<Props> = ({
   const [selectedJobTypeId, setSelectedJobTypeId] = useState<string>('');
   const [selectedJobNombre, setSelectedJobNombre] = useState<string>('');
   const [selectedLotId, setSelectedLotId] = useState('');
+  const [clienteId, setClienteId] = useState('');
+  const [clientePendiente, setClientePendiente] = useState(false);
   const [cliente, setCliente] = useState('');
+  const [jobPlazoDias, setJobPlazoDias] = useState('');
+  const [jobFechaVencimiento, setJobFechaVencimiento] = useState('');
+  const [jobAplicarInteres, setJobAplicarInteres] = useState(false);
+  const [jobTasaInteres, setJobTasaInteres] = useState('');
   const [cantidad, setCantidad] = useState<number | ''>('');
   const [fecha, setFecha] = useState(new Date().toISOString().slice(0, 10));
   const [tarifa, setTarifa] = useState<number | ''>('');
@@ -464,22 +270,52 @@ export const MachineryView: React.FC<Props> = ({
       const rateStr = String(exchangeRate.tasaBobPerUsd);
       setJobTc((prev) => (prev ? prev : rateStr));
       setExpTc((prev) => (prev ? prev : rateStr));
-      setCobroTc((prev) => (prev ? prev : rateStr));
     }
   }, [exchangeRate?.tasaBobPerUsd]);
 
+  const preloadPaymentDefaultsForNewService = useCallback(
+    (baseDate: string) => {
+      if (paymentSettings?.configurado) {
+        const plazo =
+          paymentSettings.plazoDiasPredeterminado !== null &&
+          paymentSettings.plazoDiasPredeterminado !== undefined
+            ? paymentSettings.plazoDiasPredeterminado
+            : null;
+        setJobPlazoDias(plazo !== null ? String(plazo) : '');
+        setJobFechaVencimiento(plazo !== null ? addDaysToIso(baseDate, plazo) : '');
+        setJobAplicarInteres(Boolean(paymentSettings.aplicarInteresPorDefecto));
+        setJobTasaInteres(
+          paymentSettings.porcentajeInteresMensual !== null &&
+            paymentSettings.porcentajeInteresMensual !== undefined
+            ? String(paymentSettings.porcentajeInteresMensual)
+            : ''
+        );
+      } else {
+        setJobPlazoDias('');
+        setJobFechaVencimiento('');
+        setJobAplicarInteres(false);
+        setJobTasaInteres('');
+      }
+    },
+    [paymentSettings]
+  );
+
   const resetNewServiceForm = () => {
+    const todayStr = new Date().toISOString().slice(0, 10);
     jobCurrencyAnchorRef.current = null;
     setSelectedMachineId('');
     setSelectedJobTypeId('');
     setSelectedJobNombre('');
     setSelectedLotId('');
+    setClienteId('');
+    setClientePendiente(false);
     setCliente('');
     setCantidad('');
     setTarifa('');
     setUnidad('hora');
     setJobMoneda('USD');
-    setFecha(new Date().toISOString().slice(0, 10));
+    setFecha(todayStr);
+    preloadPaymentDefaultsForNewService(todayStr);
     setJobTc(
       exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
         ? String(exchangeRate.tasaBobPerUsd)
@@ -515,7 +351,13 @@ export const MachineryView: React.FC<Props> = ({
   const [editJobTypeId, setEditJobTypeId] = useState<string>('');
   const [editJobNombre, setEditJobNombre] = useState<string>('');
   const [editTipoTrabajo, setEditTipoTrabajo] = useState<'tercero' | 'propiedad'>('tercero');
+  const [editClienteId, setEditClienteId] = useState('');
+  const [editClientePendiente, setEditClientePendiente] = useState(false);
   const [editCliente, setEditCliente] = useState('');
+  const [editPlazoDias, setEditPlazoDias] = useState('');
+  const [editFechaVencimiento, setEditFechaVencimiento] = useState('');
+  const [editAplicarInteres, setEditAplicarInteres] = useState(false);
+  const [editTasaInteres, setEditTasaInteres] = useState('');
   const [editLotId, setEditLotId] = useState('');
   const [editCantidad, setEditCantidad] = useState<number | ''>('');
   const [editUnidad, setEditUnidad] = useState<'hora' | 'hectarea'>('hora');
@@ -548,7 +390,16 @@ export const MachineryView: React.FC<Props> = ({
 
   const getMachineTypeLabel = (m: Machine | undefined): string => {
     const raw = (m?.tipo || '').trim();
-    return raw || 'Tractor';
+    if (!raw) return 'Tractor';
+    if (lang === 'en') {
+      const norm = raw.toLowerCase();
+      if (norm === 'cosechadora') return 'Harvester';
+      if (norm === 'fumigadora' || norm === 'pulverizadora') return 'Sprayer';
+      if (norm === 'sembradora') return 'Planter';
+      if (norm === 'camión' || norm === 'camion') return 'Truck';
+      if (norm === 'otro') return 'Other';
+    }
+    return raw;
   };
 
   const getImplementCompatibleType = (jt: MachineJobType): string => {
@@ -763,25 +614,6 @@ export const MachineryView: React.FC<Props> = ({
     setEditExpError(null);
   };
 
-  const handleCobroCurrencyChange = (nextCurr: Currency) => {
-    const res = convertFormCurrencyValue({
-      currentValue: cobroImporte,
-      fromCurrency: cobroMoneda,
-      toCurrency: nextCurr,
-      tc: cobroTc,
-      anchor: cobroCurrencyAnchorRef.current,
-    });
-    if (res.error) {
-      setCobroModalError(res.error);
-      return;
-    }
-    if (!res.converted) return;
-    cobroCurrencyAnchorRef.current = res.nextAnchor;
-    setCobroMoneda(res.currency);
-    setCobroImporte(res.valueStr);
-    setCobroModalError(null);
-  };
-
   const calculatedTotal =
     typeof cantidad === 'number' && typeof tarifa === 'number' ? cantidad * tarifa : 0;
 
@@ -796,33 +628,78 @@ export const MachineryView: React.FC<Props> = ({
     setSuccessMsg(null);
 
     if (!activeCampaign) {
-      setErrorMsg('Debes seleccionar o activar una campaña antes de registrar trabajos.');
+      setErrorMsg(
+        bi(
+          'Debes seleccionar o activar una campaña antes de registrar trabajos.',
+          'You must select or activate a campaign before recording jobs.'
+        )
+      );
       return;
     }
 
     if (!selectedMachineId) {
-      setErrorMsg('Por favor selecciona una maquinaria.');
+      setErrorMsg(bi('Por favor selecciona una maquinaria.', 'Please select a machine.'));
       return;
     }
 
     if (tipoTrabajo === 'propiedad' && !selectedLotId) {
-      setErrorMsg('Para trabajos en propiedad, el Lote es obligatorio.');
+      setErrorMsg(
+        bi('Para trabajos en propiedad, el Lote es obligatorio.', 'For farm jobs, the lot is required.')
+      );
       return;
     }
 
     if (!cantidad || cantidad <= 0) {
-      setErrorMsg('La cantidad trabajada debe ser mayor a 0.');
+      setErrorMsg(
+        bi('La cantidad trabajada debe ser mayor a 0.', 'Quantity worked must be greater than 0.')
+      );
+      return;
+    }
+
+    if (tipoTrabajo === 'tercero' && !clienteId && !clientePendiente) {
+      setErrorMsg(
+        bi(
+          'Selecciona un cliente del catálogo o marca «Cliente pendiente».',
+          'Select a customer from the catalog or choose "Pending customer".'
+        )
+      );
+      return;
+    }
+
+    const parsedPlazoDias =
+      tipoTrabajo === 'tercero' && jobPlazoDias.trim() !== ''
+        ? Math.max(0, Math.round(Number(jobPlazoDias)))
+        : null;
+    const parsedTasa =
+      tipoTrabajo === 'tercero' && jobAplicarInteres && jobTasaInteres.trim() !== ''
+        ? parseDecimalNumber(jobTasaInteres)
+        : null;
+
+    if (tipoTrabajo === 'tercero' && jobAplicarInteres && (!parsedTasa || parsedTasa <= 0)) {
+      setErrorMsg(
+        bi(
+          'Ingresa un porcentaje de interés mensual mayor a 0 o desactiva el interés por mora.',
+          'Enter a monthly interest percentage greater than 0 or disable late-payment interest.'
+        )
+      );
       return;
     }
 
     const tcNum = parseDecimalNumber(jobTc);
     if (tcNum <= 0) {
-      setErrorMsg('Ingresa un tipo de cambio válido mayor a 0.');
+      setErrorMsg(
+        bi('Ingresa un tipo de cambio válido mayor a 0.', 'Enter a valid exchange rate greater than 0.')
+      );
       return;
     }
 
     const machineObj = machines.find((m) => m.id === selectedMachineId);
     const lotObj = lots.find((l) => l.id === selectedLotId);
+    const customerObj = clienteId ? customersById.get(String(clienteId)) : null;
+    const computedDueDate =
+      tipoTrabajo === 'tercero'
+        ? jobFechaVencimiento || (parsedPlazoDias !== null ? addDaysToIso(fecha, parsedPlazoDias) : '')
+        : '';
 
     setSaving(true);
     try {
@@ -835,7 +712,13 @@ export const MachineryView: React.FC<Props> = ({
         maquinariaNombre: machineObj?.nombre || '',
         trabajoTipoId: selectedJobTypeId || undefined,
         trabajoNombre: selectedJobNombre || undefined,
-        cliente: tipoTrabajo === 'tercero' ? cliente.trim() : undefined,
+        clienteId: tipoTrabajo === 'tercero' && customerObj ? customerObj.id : undefined,
+        clientePendiente: tipoTrabajo === 'tercero' ? Boolean(!customerObj || clientePendiente) : false,
+        cliente: tipoTrabajo === 'tercero' && customerObj ? customerObj.nombre : undefined,
+        plazoDias: tipoTrabajo === 'tercero' ? (parsedPlazoDias ?? undefined) : undefined,
+        fechaVencimiento: tipoTrabajo === 'tercero' && computedDueDate ? computedDueDate : undefined,
+        aplicarInteres: tipoTrabajo === 'tercero' ? jobAplicarInteres : false,
+        tasaInteresMensual: tipoTrabajo === 'tercero' && jobAplicarInteres ? (parsedTasa ?? undefined) : undefined,
         loteId: tipoTrabajo === 'propiedad' ? selectedLotId : undefined,
         loteNombre: tipoTrabajo === 'propiedad' ? lotObj?.nombre : undefined,
         cantidad: Number(cantidad),
@@ -849,31 +732,26 @@ export const MachineryView: React.FC<Props> = ({
 
       setSuccessMsg(
         tipoTrabajo === 'tercero'
-          ? 'Servicio para otros guardado exitosamente (+ Ingreso Maquinarias).'
-          : 'Trabajo en propiedad guardado (+ Ingreso Maquinarias y − Gasto en Lote).'
+          ? bi(
+              'Servicio para otros guardado exitosamente (+ Ingreso Maquinarias).',
+              'External service saved successfully (+ Machinery Income).'
+            )
+          : bi(
+              'Trabajo en propiedad guardado (+ Ingreso Maquinarias y − Gasto en Lote).',
+              'Farm job saved (+ Machinery Income and − Lot Expense).'
+            )
       );
 
-      setSelectedMachineId('');
-      setSelectedJobTypeId('');
-      setSelectedJobNombre('');
-      setSelectedLotId('');
-      setCantidad('');
-      setTarifa('');
-      setCliente('');
-      setObservacion('');
-      setJobTc(
-        exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
-          ? String(exchangeRate.tasaBobPerUsd)
-          : ''
-      );
+      resetNewServiceForm();
       setCurrentScreen('main');
       onRefreshData('jobs');
       if (tipoTrabajo === 'tercero') {
-        invalidateQueries(['cobros.']);
-        pendingCobrosQuery.refresh().catch(() => {});
+        invalidateQueries(['cobros.', 'ar.']);
       }
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al guardar el trabajo');
+      setErrorMsg(
+        err instanceof Error ? translateError(err.message) : bi('Error al guardar el trabajo', 'Error saving job')
+      );
     } finally {
       setSaving(false);
     }
@@ -885,23 +763,30 @@ export const MachineryView: React.FC<Props> = ({
     setSuccessMsg(null);
 
     if (!activeCampaign) {
-      setErrorMsg('Debes activar una campaña antes de registrar gastos.');
+      setErrorMsg(
+        bi(
+          'Debes activar una campaña antes de registrar gastos.',
+          'You must activate a campaign before recording expenses.'
+        )
+      );
       return;
     }
 
     if (!expItemGasto.trim()) {
-      setErrorMsg('Por favor selecciona un concepto de gasto.');
+      setErrorMsg(bi('Por favor selecciona un concepto de gasto.', 'Please select an expense concept.'));
       return;
     }
 
     if (!expPrecio || expPrecio <= 0) {
-      setErrorMsg('Ingresa un precio unitario válido.');
+      setErrorMsg(bi('Ingresa un precio unitario válido.', 'Enter a valid unit price.'));
       return;
     }
 
     const tcNum = parseDecimalNumber(expTc);
     if (tcNum <= 0) {
-      setErrorMsg('Ingresa un tipo de cambio válido mayor a 0.');
+      setErrorMsg(
+        bi('Ingresa un tipo de cambio válido mayor a 0.', 'Enter a valid exchange rate greater than 0.')
+      );
       return;
     }
 
@@ -925,7 +810,9 @@ export const MachineryView: React.FC<Props> = ({
         observacion: expObservacion.trim(),
       });
 
-      setSuccessMsg('Gasto de maquinaria registrado exitosamente.');
+      setSuccessMsg(
+        bi('Gasto de maquinaria registrado exitosamente.', 'Machinery expense recorded successfully.')
+      );
       setExpMachineId('');
       setExpItemGasto('');
       setExpCantidad(1);
@@ -940,7 +827,11 @@ export const MachineryView: React.FC<Props> = ({
       setCurrentScreen('main');
       onRefreshData('movements');
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al registrar el gasto');
+      setErrorMsg(
+        err instanceof Error
+          ? translateError(err.message)
+          : bi('Error al registrar el gasto', 'Error recording expense')
+      );
     } finally {
       setSaving(false);
     }
@@ -948,7 +839,12 @@ export const MachineryView: React.FC<Props> = ({
 
   const handleOpenEditJob = (j: MachineryJob, preloadedCuenta?: CobroCuenta | null) => {
     if (!effectiveIsAdmin) {
-      setErrorMsg('Solo el Administrador puede editar servicios guardados.');
+      setErrorMsg(
+        bi(
+          'Solo el Administrador puede editar servicios guardados.',
+          'Only the Administrator can edit saved services.'
+        )
+      );
       return;
     }
     editJobCurrencyAnchorRef.current = null;
@@ -979,7 +875,27 @@ export const MachineryView: React.FC<Props> = ({
 
     const dest = j.tipoTrabajo || (j.loteId ? 'propiedad' : 'tercero');
     setEditTipoTrabajo(dest);
-    setEditCliente(j.cliente || '');
+    const matchedCustById = j.clienteId ? customersById.get(String(j.clienteId)) : null;
+    const matchedCustByName =
+      !matchedCustById && j.cliente
+        ? customers.find((c) => c.nombre.trim().toLowerCase() === j.cliente!.trim().toLowerCase())
+        : null;
+    const resolvedCust = matchedCustById || matchedCustByName || null;
+    setEditClienteId(resolvedCust?.id || j.clienteId || '');
+    setEditClientePendiente(
+      dest === 'tercero' ? Boolean(j.clientePendiente || (!resolvedCust && !j.clienteId)) : false
+    );
+    setEditCliente(resolvedCust?.nombre || j.cliente || '');
+    setEditPlazoDias(
+      j.plazoDias !== null && j.plazoDias !== undefined ? String(j.plazoDias) : ''
+    );
+    setEditFechaVencimiento(j.fechaVencimiento ? toYYYYMMDD(j.fechaVencimiento) : '');
+    setEditAplicarInteres(Boolean(j.aplicarInteres));
+    setEditTasaInteres(
+      j.tasaInteresMensual !== null && j.tasaInteresMensual !== undefined
+        ? String(j.tasaInteresMensual)
+        : ''
+    );
     setEditLotId(j.loteId || '');
 
     const cantVal = typeof j.cantidad === 'number' ? j.cantidad : parseFloat(String(j.cantidad || 0));
@@ -1002,8 +918,7 @@ export const MachineryView: React.FC<Props> = ({
 
     // Load linked cobro account if external service (instant from SWR cache, then revalidate in background)
     const cachedEstado = j.id ? getQuerySnapshot<CobroCuenta>(cacheKeys.cobroEstado(j.id)).data : undefined;
-    const cachedCuenta =
-      cachedEstado || preloadedCuenta || cobros.find((c) => String(c.trabajoId) === String(j.id)) || null;
+    const cachedCuenta = cachedEstado || preloadedCuenta || null;
     setEditJobCobroCuenta(dest === 'tercero' ? cachedCuenta : null);
     if (dest === 'tercero' && j.id) {
       setLoadingEditJobCobro(!cachedCuenta);
@@ -1014,7 +929,6 @@ export const MachineryView: React.FC<Props> = ({
       )
         .then((fresh) => {
           setEditJobCobroCuenta(fresh);
-          patchCuentaAcrossCaches(j.id, fresh);
         })
         .catch(() => {
           // Keep cachedCuenta if cobros.estado fails
@@ -1027,40 +941,16 @@ export const MachineryView: React.FC<Props> = ({
     }
   };
 
-  const handleOpenEditJobFromCobro = (c: CobroCuenta) => {
-    const existingJob = jobs.find((j) => String(j.id) === String(c.trabajoId));
-    if (existingJob) {
-      handleOpenEditJob(existingJob, c);
-      return;
-    }
-    const rawU = String(c.unidad || 'hora').toLowerCase();
-    const synthJob: MachineryJob = {
-      id: c.trabajoId,
-      fecha: c.fecha,
-      campanaId: c.campanaId || activeCampaign?.id || '',
-      campanaNombre: c.campanaNombre,
-      maquinariaId: c.maquinariaId || '',
-      maquinariaNombre: c.maquinariaNombre || '',
-      trabajoTipoId: c.implementoId || '',
-      trabajoNombre: c.trabajoNombre || '',
-      tipoTrabajo: 'tercero',
-      cliente: c.cliente,
-      cantidad: c.cantidad ?? 1,
-      unidad: rawU.includes('ha') || rawU.includes('hect') ? 'hectarea' : 'hora',
-      tarifa: c.precioUnitario ?? c.tarifa ?? 0,
-      moneda: c.monedaOriginalServicio || c.moneda || 'USD',
-      tipoCambio: c.tcServicio || c.tipoCambio || exchangeRate?.tasaBobPerUsd,
-      total: c.importeOriginalServicio ?? c.importe ?? 0,
-      observacion: c.observacion || '',
-    };
-    handleOpenEditJob(synthJob, c);
-  };
-
   const handleSaveEditJob = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingJob) return;
     if (!effectiveIsAdmin) {
-      setEditJobError('Solo el Administrador puede modificar servicios guardados.');
+      setEditJobError(
+        bi(
+          'Solo el Administrador puede modificar servicios guardados.',
+          'Only the Administrator can edit saved services.'
+        )
+      );
       return;
     }
     setEditJobError(null);
@@ -1069,11 +959,11 @@ export const MachineryView: React.FC<Props> = ({
 
     const targetCampanaId = editCampanaId || editingJob.campanaId || activeCampaign?.id || '';
     if (!targetCampanaId) {
-      setEditJobError('Selecciona una campaña.');
+      setEditJobError(bi('Selecciona una campaña.', 'Select a campaign.'));
       return;
     }
     if (!editMachineId) {
-      setEditJobError('Selecciona una maquinaria.');
+      setEditJobError(bi('Selecciona una maquinaria.', 'Select a machine.'));
       return;
     }
     const hasRegisteredCobros =
@@ -1081,26 +971,68 @@ export const MachineryView: React.FC<Props> = ({
       ((editJobCobroCuenta?.cobrado ?? 0) > 0.005 || (editJobCobroCuenta?.pagos?.length ?? 0) > 0);
     if (hasRegisteredCobros && editTipoTrabajo !== 'tercero') {
       setEditJobError(
-        'Este servicio ya tiene cobros registrados y no puede cambiarse a Propiedad propia.'
+        bi(
+          'Este servicio ya tiene cobros registrados y no puede cambiarse a Propiedad propia.',
+          'This service already has recorded payments and cannot be switched to Own farm.'
+        )
       );
       return;
     }
     if (editTipoTrabajo === 'propiedad' && !editLotId) {
-      setEditJobError('Para trabajos en propiedad, el lote es obligatorio.');
+      setEditJobError(
+        bi('Para trabajos en propiedad, el lote es obligatorio.', 'For farm jobs, the lot is required.')
+      );
+      return;
+    }
+    if (editTipoTrabajo === 'tercero' && !editClienteId && !editClientePendiente) {
+      setEditJobError(
+        bi(
+          'Selecciona un cliente del catálogo o marca «Cliente pendiente».',
+          'Select a customer from the catalog or choose "Pending customer".'
+        )
+      );
       return;
     }
     if (!editCantidad || Number(editCantidad) <= 0) {
-      setEditJobError('La cantidad trabajada debe ser mayor a 0.');
+      setEditJobError(
+        bi('La cantidad trabajada debe ser mayor a 0.', 'Quantity worked must be greater than 0.')
+      );
       return;
     }
     const tcNum = parseDecimalNumber(editTc);
     if (tcNum <= 0) {
-      setEditJobError('Ingresa un tipo de cambio válido mayor a 0.');
+      setEditJobError(
+        bi('Ingresa un tipo de cambio válido mayor a 0.', 'Enter a valid exchange rate greater than 0.')
+      );
+      return;
+    }
+
+    const parsedEditPlazo =
+      editTipoTrabajo === 'tercero' && editPlazoDias.trim() !== ''
+        ? Math.max(0, Math.round(Number(editPlazoDias)))
+        : null;
+    const parsedEditTasa =
+      editTipoTrabajo === 'tercero' && editAplicarInteres && editTasaInteres.trim() !== ''
+        ? parseDecimalNumber(editTasaInteres)
+        : null;
+
+    if (editTipoTrabajo === 'tercero' && editAplicarInteres && (!parsedEditTasa || parsedEditTasa <= 0)) {
+      setEditJobError(
+        bi(
+          'Ingresa un porcentaje de interés mensual mayor a 0 o desactiva el interés por mora.',
+          'Enter a monthly interest percentage greater than 0 or disable late-payment interest.'
+        )
+      );
       return;
     }
 
     const machineObj = machines.find((m) => m.id === editMachineId);
     const lotObj = lots.find((l) => l.id === editLotId);
+    const editCustomerObj = editClienteId ? customersById.get(String(editClienteId)) : null;
+    const computedEditDue =
+      editTipoTrabajo === 'tercero'
+        ? editFechaVencimiento || (parsedEditPlazo !== null ? addDaysToIso(editFecha, parsedEditPlazo) : '')
+        : '';
     const cantNum = Number(editCantidad);
     const tarifaNum = Number(editTarifa) || 0;
     const totalNum = Number((cantNum * tarifaNum).toFixed(2));
@@ -1109,14 +1041,17 @@ export const MachineryView: React.FC<Props> = ({
 
     if (hasRegisteredCobros && editJobCobroCuenta && totalUsdNum + 0.005 < editJobCobroCuenta.cobrado) {
       setEditJobError(
-        `El nuevo importe total (USD ${totalUsdNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) no puede ser menor al monto ya cobrado (USD ${editJobCobroCuenta.cobrado.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}).`
+        bi(
+          `El nuevo importe total (USD ${totalUsdNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) no puede ser menor al monto ya cobrado (USD ${editJobCobroCuenta.cobrado.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}).`,
+          `The new total amount (USD ${totalUsdNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) cannot be less than the amount already collected (USD ${editJobCobroCuenta.cobrado.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}).`
+        )
       );
       return;
     }
 
     setSaving(true);
     try {
-      const updatedRes = await updateMachineryJob(editingJob.id, {
+      await updateMachineryJob(editingJob.id, {
         campanaId: targetCampanaId,
         fecha: editFecha,
         maquinariaId: editMachineId,
@@ -1124,7 +1059,13 @@ export const MachineryView: React.FC<Props> = ({
         trabajoTipoId: editJobTypeId,
         trabajoNombre: editJobNombre,
         tipoTrabajo: editTipoTrabajo,
-        cliente: editTipoTrabajo === 'tercero' ? editCliente.trim() : '',
+        clienteId: editTipoTrabajo === 'tercero' && editCustomerObj ? editCustomerObj.id : '',
+        clientePendiente: editTipoTrabajo === 'tercero' ? Boolean(!editCustomerObj || editClientePendiente) : false,
+        cliente: editTipoTrabajo === 'tercero' && editCustomerObj ? editCustomerObj.nombre : '',
+        plazoDias: editTipoTrabajo === 'tercero' ? (parsedEditPlazo ?? undefined) : undefined,
+        fechaVencimiento: editTipoTrabajo === 'tercero' ? computedEditDue : '',
+        aplicarInteres: editTipoTrabajo === 'tercero' ? editAplicarInteres : false,
+        tasaInteresMensual: editTipoTrabajo === 'tercero' && editAplicarInteres ? (parsedEditTasa ?? undefined) : undefined,
         loteId: editTipoTrabajo === 'propiedad' ? editLotId : '',
         loteNombre: editTipoTrabajo === 'propiedad' ? lotObj?.nombre : '',
         cantidad: cantNum,
@@ -1135,19 +1076,21 @@ export const MachineryView: React.FC<Props> = ({
         total: totalNum,
         observacion: editObservacion.trim(),
       });
-      if (updatedRes.cuenta) {
-        patchCuentaAcrossCaches(editingJob.id, updatedRes.cuenta);
-      }
-      setSuccessMsg('Servicio de maquinaria actualizado exitosamente.');
+      setSuccessMsg(
+        bi('Servicio de maquinaria actualizado exitosamente.', 'Machinery service updated successfully.')
+      );
       setEditingJob(null);
       setEditJobCobroCuenta(null);
       onRefreshData('jobs');
-      if (currentScreen === 'por_cobrar' || editTipoTrabajo === 'tercero' || editingJob.tipoTrabajo === 'tercero') {
-        invalidateQueries(['cobros.']);
-        await loadCobros();
+      if (editTipoTrabajo === 'tercero' || editingJob.tipoTrabajo === 'tercero') {
+        invalidateQueries(['cobros.', 'ar.']);
       }
     } catch (err: unknown) {
-      setEditJobError(err instanceof Error ? err.message : 'Error al actualizar el servicio');
+      setEditJobError(
+        err instanceof Error
+          ? translateError(err.message)
+          : bi('Error al actualizar el servicio', 'Error updating service')
+      );
     } finally {
       setSaving(false);
     }
@@ -1156,7 +1099,12 @@ export const MachineryView: React.FC<Props> = ({
   const handleConfirmDeleteJob = async () => {
     if (!jobToDelete) return;
     if (!effectiveIsAdmin) {
-      setErrorMsg('Solo el Administrador puede eliminar servicios guardados.');
+      setErrorMsg(
+        bi(
+          'Solo el Administrador puede eliminar servicios guardados.',
+          'Only the Administrator can delete saved services.'
+        )
+      );
       setJobToDelete(null);
       return;
     }
@@ -1165,15 +1113,18 @@ export const MachineryView: React.FC<Props> = ({
     setErrorMsg(null);
     try {
       await deleteMachineryJob(jobToDelete.id);
-      setSuccessMsg('Trabajo eliminado exitosamente.');
+      setSuccessMsg(bi('Trabajo eliminado exitosamente.', 'Job deleted successfully.'));
       setJobToDelete(null);
       onRefreshData('jobs');
       if (wasExternal) {
-        invalidateQueries(['cobros.']);
-        pendingCobrosQuery.refresh().catch(() => {});
+        invalidateQueries(['cobros.', 'ar.']);
       }
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar el trabajo');
+      setErrorMsg(
+        err instanceof Error
+          ? translateError(err.message)
+          : bi('Error al eliminar el trabajo', 'Error deleting job')
+      );
     } finally {
       setDeletingJob(false);
     }
@@ -1181,7 +1132,12 @@ export const MachineryView: React.FC<Props> = ({
 
   const handleRequestDeleteExpense = (exp: Expense) => {
     if (!effectiveIsAdmin) {
-      setErrorMsg('Solo el Administrador puede eliminar gastos guardados.');
+      setErrorMsg(
+        bi(
+          'Solo el Administrador puede eliminar gastos guardados.',
+          'Only the Administrator can delete saved expenses.'
+        )
+      );
       return;
     }
     setExpenseToDelete(exp);
@@ -1189,7 +1145,12 @@ export const MachineryView: React.FC<Props> = ({
 
   const handleOpenEditExpense = (exp: Expense) => {
     if (!effectiveIsAdmin) {
-      setErrorMsg('Solo el Administrador puede editar gastos guardados.');
+      setErrorMsg(
+        bi(
+          'Solo el Administrador puede editar gastos guardados.',
+          'Only the Administrator can edit saved expenses.'
+        )
+      );
       return;
     }
     editExpCurrencyAnchorRef.current = null;
@@ -1214,7 +1175,12 @@ export const MachineryView: React.FC<Props> = ({
     e.preventDefault();
     if (!editingExpense) return;
     if (!effectiveIsAdmin) {
-      setEditExpError('Solo el Administrador puede modificar gastos guardados.');
+      setEditExpError(
+        bi(
+          'Solo el Administrador puede modificar gastos guardados.',
+          'Only the Administrator can edit saved expenses.'
+        )
+      );
       return;
     }
     setEditExpError(null);
@@ -1222,12 +1188,14 @@ export const MachineryView: React.FC<Props> = ({
     setSuccessMsg(null);
 
     if (!editExpPrecio || Number(editExpPrecio) <= 0) {
-      setEditExpError('Ingresa un precio unitario válido.');
+      setEditExpError(bi('Ingresa un precio unitario válido.', 'Enter a valid unit price.'));
       return;
     }
     const tcNum = parseDecimalNumber(editExpTc);
     if (tcNum <= 0) {
-      setEditExpError('Ingresa un tipo de cambio válido mayor a 0.');
+      setEditExpError(
+        bi('Ingresa un tipo de cambio válido mayor a 0.', 'Enter a valid exchange rate greater than 0.')
+      );
       return;
     }
 
@@ -1252,11 +1220,17 @@ export const MachineryView: React.FC<Props> = ({
         total: totalNum,
         observacion: editExpObservacion.trim(),
       });
-      setSuccessMsg('Gasto de maquinaria actualizado exitosamente.');
+      setSuccessMsg(
+        bi('Gasto de maquinaria actualizado exitosamente.', 'Machinery expense updated successfully.')
+      );
       setEditingExpense(null);
       onRefreshData('movements');
     } catch (err: unknown) {
-      setEditExpError(err instanceof Error ? err.message : 'Error al actualizar el gasto');
+      setEditExpError(
+        err instanceof Error
+          ? translateError(err.message)
+          : bi('Error al actualizar el gasto', 'Error updating expense')
+      );
     } finally {
       setSaving(false);
     }
@@ -1322,25 +1296,27 @@ export const MachineryView: React.FC<Props> = ({
   const allMachineryMovements: MachineryMovementItem[] = [
     ...jobs.map((j) => {
       const machineObj = j.maquinariaId ? machines.find((m) => m.id === j.maquinariaId || m.nombre.toLowerCase() === j.maquinariaId.toLowerCase()) : null;
-      const resolvedMachineName = j.maquinariaNombre || machineObj?.nombre || 'Maquinaria';
+      const resolvedMachineName = j.maquinariaNombre || machineObj?.nombre || bi('Maquinaria', 'Machinery');
 
       const lotObj = j.loteId ? lots.find((l) => l.id === j.loteId || (l.nombre && j.loteId && l.nombre.toLowerCase() === j.loteId.toLowerCase())) : null;
-      const rawLot = j.loteNombre || lotObj?.nombre || (j.loteId ? `Lote ${j.loteId}` : null);
+      const rawLot = j.loteNombre || lotObj?.nombre || (j.loteId ? `${bi('Lote', 'Lot')} ${j.loteId}` : null);
       const formattedLot = rawLot
-        ? (String(rawLot).toLowerCase().startsWith('lote') ? String(rawLot) : `Lote ${rawLot}`)
-        : 'Lote propio';
+        ? (String(rawLot).toLowerCase().startsWith('lote') || String(rawLot).toLowerCase().startsWith('lot ')
+            ? String(rawLot)
+            : `${bi('Lote', 'Lot')} ${rawLot}`)
+        : bi('Lote propio', 'Own lot');
 
       return {
         id: j.id,
         kind: 'servicio' as const,
         tipoTrabajo: j.tipoTrabajo,
         fecha: j.fecha,
-        titulo: formatConcept(j.trabajoNombre || 'Labor de maquinaria'),
+        titulo: formatConcept(j.trabajoNombre || bi('Labor de maquinaria', 'Machinery job')),
         maquinariaNombre: resolvedMachineName,
         destinoOCliente:
           j.tipoTrabajo === 'propiedad'
             ? formattedLot
-            : (j.cliente ? `Cliente: ${j.cliente}` : 'Cliente externo'),
+            : `${bi('Cliente', 'Client')}: ${resolveJobCustomerLabel(j)}`,
         cantidadTexto: `${j.cantidad} ${j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'h'}`,
         total: j.total,
         moneda: (j.moneda || 'BOB') as Currency,
@@ -1355,15 +1331,15 @@ export const MachineryView: React.FC<Props> = ({
     }),
     ...machineryExpenses.map((e) => {
       const machineObj = e.maquinariaId ? machines.find((m) => m.id === e.maquinariaId) : null;
-      const resolvedMachineName = e.maquinariaNombre || machineObj?.nombre || 'General';
+      const resolvedMachineName = e.maquinariaNombre || machineObj?.nombre || bi('General', 'General');
       return {
         id: e.id,
         kind: 'gasto' as const,
         fecha: e.fecha,
-        titulo: formatConcept(e.itemGasto || 'Gasto'),
+        titulo: formatConcept(e.itemGasto || bi('Gasto', 'Expense')),
         maquinariaNombre: resolvedMachineName,
         destinoOCliente: resolvedMachineName,
-        cantidadTexto: e.cantidad ? `${e.cantidad} ${e.unidad || ''}`.trim() : undefined,
+        cantidadTexto: e.cantidad ? `${e.cantidad} ${translateUnit(e.unidad) || ''}`.trim() : undefined,
         total: e.total,
         moneda: ((e.moneda as Currency) || 'BOB') as Currency,
         tipoCambio: e.tipoCambio,
@@ -1409,22 +1385,21 @@ export const MachineryView: React.FC<Props> = ({
           <button
             type="button"
             onClick={() => setCurrentScreen('main')}
-            aria-label="Volver a Maquinarias"
+            aria-label={bi('Volver a Maquinarias', 'Back to Machinery')}
             className="min-h-[44px] min-w-[44px] px-3 rounded-xl bg-white border border-slate-200 flex items-center justify-center gap-1.5 text-slate-800 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer shrink-0"
           >
             <ArrowLeft className="h-4 w-4 text-slate-800 shrink-0" />
-            <span className="text-sm font-semibold text-slate-800">Volver</span>
+            <span className="text-sm font-semibold text-slate-800">{t('common.back')}</span>
           </button>
           <h2 className="text-lg sm:text-xl font-bold text-slate-900 truncate">
-            {currentScreen === 'historial' && 'Historial'}
-            {currentScreen === 'resumen' && 'Mis máquinas'}
-            {currentScreen === 'por_cobrar' && 'Por cobrar'}
-            {currentScreen === 'gasto' && 'Registrar gasto'}
+            {currentScreen === 'historial' && bi('Historial', 'History')}
+            {currentScreen === 'resumen' && bi('Mis máquinas', 'My machinery')}
+            {currentScreen === 'gasto' && bi('Registrar gasto', 'Record expense')}
             {(currentScreen === 'servicio' ||
               currentScreen === 'ingreso_opciones' ||
               currentScreen === 'servicio_otros' ||
               currentScreen === 'trabajo_propiedad') &&
-              'Registrar servicio'}
+              bi('Registrar servicio', 'Record service')}
           </h2>
         </div>
       )}
@@ -1468,9 +1443,9 @@ export const MachineryView: React.FC<Props> = ({
       {currentScreen === 'main' && (
         <div className="space-y-6">
           {/* SECCIÓN A: REGISTRAR */}
-          <section className="space-y-2.5" aria-label="Registrar movimiento de maquinarias">
+          <section className="space-y-2.5" aria-label={bi('Registrar movimiento de maquinarias', 'Record machinery movement')}>
             <h2 className="text-sm font-bold text-slate-600 px-0.5">
-              Registrar
+              {bi('Registrar', 'Record')}
             </h2>
 
             <div className="grid grid-cols-2 gap-3 w-full">
@@ -1487,11 +1462,11 @@ export const MachineryView: React.FC<Props> = ({
                 <div className="flex items-center justify-center gap-2">
                   <Tractor className="h-5 w-5 text-white shrink-0" strokeWidth={2.2} />
                   <span className="text-sm sm:text-base font-bold tracking-tight text-white leading-tight">
-                    Servicio
+                    {bi('Servicio', 'Service')}
                   </span>
                 </div>
                 <span className="text-[11px] text-white/90 font-medium text-center leading-tight">
-                  Servicio o labor
+                  {bi('Servicio o labor', 'Service or job')}
                 </span>
               </button>
 
@@ -1507,20 +1482,20 @@ export const MachineryView: React.FC<Props> = ({
                 <div className="flex items-center justify-center gap-2">
                   <CircleMinus className="h-5 w-5 text-white shrink-0" strokeWidth={2.2} />
                   <span className="text-sm sm:text-base font-bold tracking-tight text-white leading-tight">
-                    Gasto
+                    {bi('Gasto', 'Expense')}
                   </span>
                 </div>
                 <span className="text-[11px] text-white/90 font-medium text-center leading-tight">
-                  Combustible y repuestos
+                  {bi('Combustible y repuestos', 'Fuel and spare parts')}
                 </span>
               </button>
             </div>
           </section>
 
           {/* SECCIÓN B: CONSULTAR */}
-          <section className="space-y-2.5" aria-label="Consultar registros de maquinarias">
+          <section className="space-y-2.5" aria-label={bi('Consultar registros de maquinarias', 'View machinery records')}>
             <h2 className="text-sm font-bold text-slate-600 px-0.5">
-              Consultar
+              {bi('Consultar', 'Browse')}
             </h2>
 
             <div className="rounded-2xl border border-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
@@ -1536,11 +1511,13 @@ export const MachineryView: React.FC<Props> = ({
                   </div>
                   <div className="min-w-0 flex-1">
                     <h3 className="text-base font-bold text-slate-900 leading-snug">
-                      Historial
+                      {bi('Historial', 'History')}
                     </h3>
                     <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
                       {allMachineryMovements.length}{' '}
-                      {allMachineryMovements.length === 1 ? 'movimiento' : 'movimientos'}
+                      {allMachineryMovements.length === 1
+                        ? bi('movimiento', 'movement')
+                        : bi('movimientos', 'movements')}
                     </p>
                   </div>
                 </div>
@@ -1559,17 +1536,18 @@ export const MachineryView: React.FC<Props> = ({
                   </div>
                   <div className="min-w-0 flex-1">
                     <h3 className="text-base font-bold text-slate-900 leading-snug">
-                      Mis máquinas
+                      {bi('Mis máquinas', 'My machinery')}
                     </h3>
                     <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
-                      {machines.length} {machines.length === 1 ? 'máquina' : 'máquinas'}
+                      {machines.length}{' '}
+                      {machines.length === 1 ? bi('máquina', 'machine') : bi('máquinas', 'machines')}
                       {machineJobTypes.filter((j) => !isVirtualMachineOnlyImplement(j.nombre)).length > 0 && (
                         <>
                           {' · '}
                           {machineJobTypes.filter((j) => !isVirtualMachineOnlyImplement(j.nombre)).length}{' '}
                           {machineJobTypes.filter((j) => !isVirtualMachineOnlyImplement(j.nombre)).length === 1
-                            ? 'implemento'
-                            : 'implementos'}
+                            ? bi('implemento', 'implement')
+                            : bi('implementos', 'implements')}
                         </>
                       )}
                     </p>
@@ -1578,503 +1556,10 @@ export const MachineryView: React.FC<Props> = ({
                 <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
               </button>
 
-              {/* 3. Por cobrar */}
-              <button
-                type="button"
-                onClick={() => setCurrentScreen('por_cobrar')}
-                className="w-full px-4 py-4 flex items-center justify-between gap-3 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[72px]"
-              >
-                <div className="flex items-center gap-3.5 min-w-0">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-amber-50 border border-amber-200/80 text-amber-700 shrink-0">
-                    <Wallet className="h-5 w-5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <h3 className="text-base font-bold text-slate-900 leading-snug">
-                        Por cobrar
-                      </h3>
-                      <span className="text-sm font-bold text-slate-600 tabular-nums shrink-0">
-                        {pendingCobrosCount !== null ? pendingCobrosCount : '—'}
-                      </span>
-                    </div>
-                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
-                      {pendingCobrosCount !== null
-                        ? `${pendingCobrosCount} ${pendingCobrosCount === 1 ? 'cuenta pendiente de cobro' : 'cuentas pendientes de cobro'}`
-                        : 'Cuentas por cobrar de servicios externos'}
-                    </p>
-                  </div>
-                </div>
-                <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
-              </button>
             </div>
           </section>
         </div>
       )}
-
-      {/* ============================================================ */}
-      {/* SUB-VISTA: POR COBRAR (COBROS REALES: cobros.list/estado/registrar) */}
-      {/* ============================================================ */}
-      {currentScreen === 'por_cobrar' && (() => {
-        const selectedCamp =
-          porCobrarCampaignId === 'all'
-            ? null
-            : campaigns.find((c) => String(c.id) === String(porCobrarCampaignId)) || null;
-
-        const jobById = new Map(jobs.map((j) => [String(j.id), j]));
-        const qCobro = porCobrarSearch.trim().toLowerCase();
-
-        const enrichedCobros = cobros.map((c) => {
-          const linkedJob = jobById.get(String(c.trabajoId));
-          const campId = c.campanaId || linkedJob?.campanaId || '';
-          const campName =
-            c.campanaNombre ||
-            linkedJob?.campanaNombre ||
-            campaigns.find((cp) => String(cp.id) === String(campId))?.nombre ||
-            'Sin campaña';
-          const machName =
-            c.maquinariaNombre ||
-            linkedJob?.maquinariaNombre ||
-            machines.find((m) => String(m.id) === String(c.maquinariaId || linkedJob?.maquinariaId))?.nombre ||
-            'Maquinaria';
-          const workName = c.trabajoNombre || linkedJob?.trabajoNombre || machName;
-          const clientName =
-            c.cliente && c.cliente !== 'Cliente externo'
-              ? c.cliente
-              : linkedJob?.cliente || c.cliente || 'Cliente externo';
-          const fechaVal = c.fecha || linkedJob?.fecha || '';
-          const tcVal = c.tipoCambio || linkedJob?.tipoCambio || linkedJob?.tc;
-
-          return {
-            ...c,
-            cliente: clientName,
-            fecha: fechaVal,
-            campanaId: campId,
-            campanaNombre: campName,
-            maquinariaNombre: machName,
-            trabajoNombre: workName,
-            cantidad: c.cantidad ?? linkedJob?.cantidad,
-            unidad: c.unidad ?? linkedJob?.unidad,
-            tarifa: c.tarifa ?? linkedJob?.tarifa,
-            tipoCambio: tcVal,
-            icono: linkedJob?.icono || 'tractor',
-          };
-        });
-
-        const filteredCobros = enrichedCobros
-          .filter((c) => {
-            if (porCobrarEstadoFilter === 'pendientes' && (c.estado === 'PAGADO' || c.saldo <= 0.005)) {
-              return false;
-            }
-            if (porCobrarEstadoFilter === 'PAGADO' && c.estado !== 'PAGADO') {
-              return false;
-            }
-            if (selectedCamp && c.campanaId && String(c.campanaId) !== String(selectedCamp.id)) {
-              return false;
-            }
-            if (!qCobro) return true;
-            return `${c.cliente} ${c.trabajoNombre || ''} ${c.maquinariaNombre || ''} ${c.campanaNombre || ''} ${c.estado} ${formatDateDDMMAAAA(c.fecha)}`
-              .toLowerCase()
-              .includes(qCobro);
-          })
-          .sort(compareChronologicalDesc);
-
-        const totalSaldoPendienteView = filteredCobros.reduce(
-          (sum, c) =>
-            sum +
-            convertHistoricalAmount(
-              Number(c.saldo) || 0,
-              c.moneda || 'BOB',
-              currency,
-              c.tipoCambio,
-              exchangeRate
-            ),
-          0
-        );
-
-        const totalCobradoView = filteredCobros.reduce(
-          (sum, c) =>
-            sum +
-            convertHistoricalAmount(
-              Number(c.cobrado) || 0,
-              c.moneda || 'BOB',
-              currency,
-              c.tipoCambio,
-              exchangeRate
-            ),
-          0
-        );
-
-        const estadoBadgeClass = (estado: string) => {
-          if (estado === 'PAGADO') {
-            return 'bg-[#EAF5EE] text-[#1D5C3F] border border-[#BFE0CD]';
-          }
-          if (estado === 'PARCIAL') {
-            return 'bg-sky-50 text-sky-800 border border-sky-200';
-          }
-          return 'bg-amber-50 text-amber-800 border border-amber-200';
-        };
-
-        return (
-          <div className="space-y-3.5">
-            {/* Resumen simplificado de cuentas por cobrar */}
-            <div className="rounded-2xl border border-[#E2E7E3] bg-white p-4 space-y-2">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <p className="text-xs font-semibold text-[#5E6D64]">
-                      Total pendiente · {filteredCobros.length} cuentas
-                    </p>
-                    {cobrosRevalidating && (
-                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#24875B]">
-                        <RefreshCw className="h-3 w-3 animate-spin" />
-                        <span>Actualizando...</span>
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-xl sm:text-2xl font-extrabold text-[#24875B] tabular-nums mt-0.5">
-                    {formatCurrencyAmount(totalSaldoPendienteView, currency)}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => loadCobros()}
-                  disabled={cobrosLoading}
-                  title="Actualizar cuentas por cobrar"
-                  className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EAF5EE] text-[#24875B] hover:bg-[#DCEFE4] transition cursor-pointer shrink-0 disabled:opacity-50"
-                >
-                  <RefreshCw className={`h-4 w-4 ${cobrosLoading ? 'animate-spin' : ''}`} />
-                </button>
-              </div>
-            </div>
-
-            {/* Aviso discreto de error sin ocultar los datos previos cargados */}
-            {cobrosError && (
-              <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 flex items-start justify-between gap-2.5">
-                <div className="flex items-start gap-2 min-w-0 flex-1">
-                  <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
-                  <div className="text-xs text-red-900 space-y-0.5 min-w-0 flex-1">
-                    <p className="font-bold">
-                      {cobrosHasLoaded
-                        ? 'No se pudo actualizar. Mostrando los últimos datos cargados.'
-                        : 'Error al consultar cobros en Google Apps Script'}
-                    </p>
-                    <p className="break-words text-red-800/90">{cobrosError}</p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => loadCobros()}
-                  disabled={cobrosLoading}
-                  className="text-xs font-bold text-red-700 hover:text-red-900 underline shrink-0 cursor-pointer disabled:opacity-50"
-                >
-                  Reintentar
-                </button>
-              </div>
-            )}
-
-            <ListToolbar
-              title="Cuentas"
-              countLabel={`${filteredCobros.length} reg.`}
-              searchValue={porCobrarSearch}
-              onSearchChange={setPorCobrarSearch}
-              searchPlaceholder="Buscar cliente, servicio o fecha..."
-              filters={
-                <div className="flex items-center gap-1.5">
-                  <CompactFilter
-                    value={porCobrarEstadoFilter}
-                    onChange={(val) =>
-                      setPorCobrarEstadoFilter(val as 'pendientes' | 'todos' | 'PAGADO')
-                    }
-                    ariaLabel="Filtrar estado de cobro"
-                    options={[
-                      { value: 'pendientes', label: 'Pendientes' },
-                      { value: 'todos', label: 'Todos' },
-                      { value: 'PAGADO', label: 'Pagados' },
-                    ]}
-                  />
-                  {campaigns.length > 0 && (
-                    <CompactFilter
-                      value={porCobrarCampaignId}
-                      onChange={(val) => setPorCobrarCampaignId(val)}
-                      ariaLabel="Filtrar por campaña"
-                      options={[
-                        { value: 'all', label: 'Todas las campañas' },
-                        ...campaigns.map((c) => ({
-                          value: String(c.id),
-                          label: c.activa ? `${c.nombre} (Activa)` : c.nombre,
-                        })),
-                      ]}
-                    />
-                  )}
-                </div>
-              }
-            />
-
-            {cobrosInitialLoading || (!cobrosHasLoaded && !cobrosError) ? (
-              <div className="rounded-2xl border border-[#E2E7E3] bg-white p-8 text-center text-xs text-[#5E6D64] flex items-center justify-center gap-2">
-                <RefreshCw className="h-4 w-4 animate-spin text-[#24875B]" />
-                <span>Consultando cuentas por cobrar...</span>
-              </div>
-            ) : (
-              <CompactList
-                isEmpty={filteredCobros.length === 0}
-                emptyMessage={
-                  !cobrosHasLoaded && cobrosError
-                    ? 'No se pudieron cargar las cuentas por cobrar.'
-                    : qCobro
-                    ? 'No se encontraron cuentas con esa búsqueda.'
-                    : porCobrarEstadoFilter === 'pendientes'
-                    ? 'No hay cuentas pendientes de cobro.'
-                    : 'No hay cuentas registradas para este filtro.'
-                }
-              >
-                {filteredCobros.map((c) => {
-                  const rowKey = c.trabajoId || c.id || '';
-                  const isExpanded = expandedPorCobrarId === rowKey;
-                  const isLoadingDetail = loadingCobroEstadoId === rowKey;
-                  const detailErr = cobroEstadoErrors[rowKey];
-                  const curLabel = c.moneda === 'USD' ? 'USD' : 'Bs';
-                  const unitShort =
-                    c.unidad === 'hectarea' || (c.unidad as string) === 'ha' ? 'ha' : 'h';
-                  const canRegisterPayment = c.estado !== 'PAGADO' && c.saldo > 0.005;
-
-                  return (
-                    <CompactListRow
-                      key={rowKey}
-                      icon={
-                        <div className="w-8 h-8 rounded-lg bg-[#EAF5EE] border border-[#BFE0CD]/70 flex items-center justify-center">
-                          <VisualIcon name={getMachineIcon(c.maquinariaId, machines, c.icono)} size="xs" />
-                        </div>
-                      }
-                      title={
-                        <span className="flex items-center gap-1.5 flex-wrap">
-                          <span className="truncate">{c.cliente}</span>
-                          <span
-                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md uppercase tracking-wide ${estadoBadgeClass(
-                              c.estado
-                            )}`}
-                          >
-                            {c.estado}
-                          </span>
-                        </span>
-                      }
-                      subtitle={
-                        <span>
-                          {formatDateDDMMAAAA(c.fecha)} · {formatConcept(c.trabajoNombre || c.maquinariaNombre)} · {c.campanaNombre}
-                        </span>
-                      }
-                      rightPrimary={
-                        <span
-                          className={`font-mono ${
-                            c.saldo > 0.005 ? 'text-[#26352D]' : 'text-[#24875B]'
-                          }`}
-                        >
-                          {curLabel}{' '}
-                          {Number(c.saldo > 0.005 ? c.saldo : c.importe).toLocaleString('es-BO', {
-                            minimumFractionDigits: 2,
-                            maximumFractionDigits: 2,
-                          })}
-                        </span>
-                      }
-                      rightSecondary={
-                        c.saldo > 0.005
-                          ? `Saldo · Orig. ${curLabel} ${Number(c.importe || 0).toLocaleString('es-BO', {
-                              minimumFractionDigits: 2,
-                              maximumFractionDigits: 2,
-                            })}`
-                          : 'Pagado'
-                      }
-                      isExpanded={isExpanded}
-                      onClick={() => handleToggleCobroRow(c)}
-                      expandedContent={
-                        <div className="space-y-3 text-xs">
-                          {/* 3 filas compactas: Total del servicio, Cobrado, Saldo pendiente (destacado en USD) */}
-                          <div className="rounded-xl border border-[#E2E7E3] bg-white divide-y divide-[#EFF2EF] overflow-hidden">
-                            <div className="px-3 py-2 flex items-center justify-between gap-2">
-                              <div className="min-w-0">
-                                <span className="text-[#5E6D64] font-medium block">Total del servicio</span>
-                                {c.monedaOriginalServicio === 'BOB' && c.importeOriginalServicio ? (
-                                  <span className="text-[10px] text-[#7A8780] font-mono">
-                                    Orig.: Bs {c.importeOriginalServicio.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                    {c.tcServicio ? ` · TC ${c.tcServicio}` : ''}
-                                  </span>
-                                ) : null}
-                              </div>
-                              <span className="font-mono font-semibold text-[#26352D] shrink-0">
-                                {curLabel} {Number(c.importe || 0).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                              </span>
-                            </div>
-                            <div className="px-3 py-2 flex items-center justify-between gap-2">
-                              <span className="text-[#5E6D64] font-medium">Cobrado</span>
-                              <span className="font-mono font-semibold text-[#24875B]">
-                                {curLabel} {Number(c.cobrado || 0).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                              </span>
-                            </div>
-                            <div className="px-3 py-2.5 flex items-center justify-between gap-2 bg-[#FAFBF8]">
-                              <span className="font-bold text-[#26352D]">Saldo pendiente</span>
-                              <span className={`font-mono font-black text-sm ${c.saldo > 0.005 ? 'text-amber-700' : 'text-[#24875B]'}`}>
-                                {curLabel} {Number(c.saldo || 0).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                              </span>
-                            </div>
-                          </div>
-
-                          {/* Error puntual al consultar cobros.estado */}
-                          {detailErr && (
-                            <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-800 flex items-center gap-1.5">
-                              <AlertCircle className="h-3.5 w-3.5 shrink-0 text-red-600" />
-                              <span className="break-words">{detailErr}</span>
-                            </div>
-                          )}
-
-                          {/* Acciones: Registrar cobro + Editar servicio (solo admin) */}
-                          <div className={`flex items-center gap-2 ${canRegisterPayment && effectiveIsAdmin ? 'flex-wrap sm:flex-nowrap' : ''}`}>
-                            {canRegisterPayment && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleOpenCobroModal(c);
-                                }}
-                                className="flex-1 min-h-[42px] px-4 py-2.5 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer shadow-2xs"
-                              >
-                                <HandCoins className="h-4 w-4 shrink-0" />
-                                <span>Registrar cobro</span>
-                              </button>
-                            )}
-                            {effectiveIsAdmin && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleOpenEditJobFromCobro(c);
-                                }}
-                                className={`${canRegisterPayment ? 'px-3.5' : 'w-full px-4'} min-h-[42px] py-2.5 rounded-xl bg-white hover:bg-[#F2F5F3] text-[#26352D] border border-[#D4DDD6] text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer`}
-                              >
-                                <Edit3 className="h-3.5 w-3.5 shrink-0" />
-                                <span>Editar servicio</span>
-                              </button>
-                            )}
-                          </div>
-
-                          {/* Historial de pagos: muestra moneda original, TC y equivalente USD */}
-                          {c.pagos && c.pagos.length > 0 && (
-                            <div className="rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
-                              <div className="px-3 py-2 bg-[#F8FAF8] border-b border-[#EFF2EF] flex items-center justify-between">
-                                <span className="text-[11px] font-bold text-[#26352D]">
-                                  Historial de pagos ({c.pagos.length})
-                                </span>
-                                {isLoadingDetail && (
-                                  <RefreshCw className="h-3.5 w-3.5 animate-spin text-[#24875B]" />
-                                )}
-                              </div>
-                              <div className="divide-y divide-[#EFF2EF]">
-                                {c.pagos.map((p) => {
-                                  const isBobPay = p.monedaCobro === 'BOB';
-                                  const usdAmt = Number(p.importeUsd ?? p.importe ?? 0);
-                                  const origAmt = Number(p.importeOriginal ?? usdAmt);
-                                  return (
-                                    <div
-                                      key={p.id}
-                                      className="px-3 py-2.5 flex items-start justify-between gap-2"
-                                    >
-                                      <div className="min-w-0 space-y-0.5">
-                                        <div className="flex items-center gap-1.5 flex-wrap">
-                                          <span className="text-xs font-semibold text-[#26352D]">
-                                            {formatDateDDMMAAAA(p.fecha)}
-                                          </span>
-                                          <span
-                                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md ${
-                                              isBobPay
-                                                ? 'bg-sky-50 text-sky-800 border border-sky-200'
-                                                : 'bg-[#EAF5EE] text-[#1D5C3F] border border-[#BFE0CD]'
-                                            }`}
-                                          >
-                                            {isBobPay ? 'Bs' : 'USD'}
-                                          </span>
-                                        </div>
-                                        {isBobPay ? (
-                                          <p className="text-[11px] text-[#5E6D64] font-mono tabular-nums">
-                                            Bs {origAmt.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                            {p.tc && p.tc > 0 ? ` · TC ${p.tc}` : ''}
-                                          </p>
-                                        ) : p.tc && p.tc > 0 ? (
-                                          <p className="text-[11px] text-[#7A8780] font-mono tabular-nums">
-                                            TC ref.: {p.tc}
-                                          </p>
-                                        ) : null}
-                                        {p.observacion && (
-                                          <p className="text-[11px] text-[#5E6D64] italic break-words">
-                                            {p.observacion}
-                                          </p>
-                                        )}
-                                      </div>
-                                      <span className="font-mono font-bold text-[#24875B] shrink-0 tabular-nums">
-                                        +USD{' '}
-                                        {usdAmt.toLocaleString('es-BO', {
-                                          minimumFractionDigits: 2,
-                                          maximumFractionDigits: 2,
-                                        })}
-                                      </span>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Sección colapsable "Más detalles" */}
-                          <details className="group rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
-                            <summary className="px-3 py-2.5 bg-[#F8FAF8] text-xs font-bold text-[#26352D] cursor-pointer flex items-center justify-between select-none">
-                              <span>Más detalles</span>
-                              <ChevronDown className="h-3.5 w-3.5 text-[#7A8780] group-open:rotate-180 transition" />
-                            </summary>
-                            <div className="p-3 space-y-1.5 divide-y divide-[#EFF2EF] text-xs">
-                              <div className="pt-1.5 flex items-center justify-between gap-2">
-                                <span className="text-[#5E6D64]">Máquina / Labor</span>
-                                <span className="font-semibold text-[#26352D] text-right">
-                                  {c.maquinariaNombre}
-                                  {c.trabajoNombre && c.trabajoNombre !== c.maquinariaNombre
-                                    ? ` · ${formatConcept(c.trabajoNombre)}`
-                                    : ''}
-                                </span>
-                              </div>
-                              <div className="pt-1.5 flex items-center justify-between gap-2">
-                                <span className="text-[#5E6D64]">Campaña</span>
-                                <span className="font-semibold text-[#26352D]">{c.campanaNombre}</span>
-                              </div>
-                              {c.cantidad && (c.precioUnitario || c.tarifa) ? (
-                                <div className="pt-1.5 flex items-center justify-between gap-2">
-                                  <span className="text-[#5E6D64]">Trabajo / Tarifa</span>
-                                  <span className="font-semibold text-[#26352D] tabular-nums">
-                                    {c.cantidad} {unitShort} ×{' '}
-                                    {(c.monedaOriginalServicio || c.moneda) === 'USD' ? 'USD' : 'Bs'}{' '}
-                                    {Number(c.precioUnitario ?? c.tarifa ?? 0).toLocaleString('es-BO', {
-                                      minimumFractionDigits: 2,
-                                      maximumFractionDigits: 2,
-                                    })}
-                                  </span>
-                                </div>
-                              ) : null}
-                              {getCleanObservation(c.observacion, c.trabajoNombre || '') && (
-                                <div className="pt-1.5 flex items-center justify-between gap-2">
-                                  <span className="text-[#5E6D64]">Observación</span>
-                                  <span className="italic text-[#26352D] text-right">
-                                    {getCleanObservation(c.observacion, c.trabajoNombre || '')}
-                                  </span>
-                                </div>
-                              )}
-                            </div>
-                          </details>
-                        </div>
-                      }
-                    />
-                  );
-                })}
-              </CompactList>
-            )}
-          </div>
-        );
-      })()}
 
       {/* ============================================================ */}
       {/* FORMULARIO UNIFICADO: REGISTRAR SERVICIO                     */}
@@ -2095,7 +1580,7 @@ export const MachineryView: React.FC<Props> = ({
                 {/* 1. Fecha */}
                 <div>
                   <label className={FORM_LABEL_CLASS}>
-                    Fecha <span className="text-[#C44545]">*</span>
+                    {bi('Fecha', 'Date')} <span className="text-[#C44545]">*</span>
                   </label>
                   <div className="relative">
                     <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 h-[17px] w-[17px] text-[#64746B] pointer-events-none" />
@@ -2103,7 +1588,13 @@ export const MachineryView: React.FC<Props> = ({
                       type="date"
                       required
                       value={fecha}
-                      onChange={(e) => setFecha(e.target.value)}
+                      onChange={(e) => {
+                        const nextDate = e.target.value;
+                        setFecha(nextDate);
+                        if (jobPlazoDias.trim() !== '' && !isNaN(Number(jobPlazoDias))) {
+                          setJobFechaVencimiento(addDaysToIso(nextDate, Number(jobPlazoDias)));
+                        }
+                      }}
                       className={`${FORM_INPUT_CLASS} pl-9`}
                     />
                   </div>
@@ -2111,7 +1602,7 @@ export const MachineryView: React.FC<Props> = ({
 
                 {/* 2. Máquina (obligatoria) */}
                 <VisualMachinePicker
-                  label="Máquina"
+                  label={bi('Máquina', 'Machine')}
                   machines={activeMachines}
                   selectedMachineId={selectedMachineId}
                   onSelectMachine={(m) => handleMachineChange(m.id)}
@@ -2121,58 +1612,46 @@ export const MachineryView: React.FC<Props> = ({
                 {/* 3. Implemento agrícola (opcional, filtrado por tipo de máquina) */}
                 {selectedMachineId && (
                   <VisualJobTypePicker
-                    label="Implemento agrícola"
-                    optionalText="(opcional)"
+                    label={bi('Implemento agrícola', 'Agricultural implement')}
+                    optionalText={t('common.optional')}
                     jobTypes={compatibleImplements}
                     selectedJobTypeId={selectedJobTypeId}
                     onSelectJobType={(j) => handleImplementSelect(j)}
                     allowNone
                     noneLabel={
                       selectedMachineObj
-                        ? `Sin implemento (tarifa de ${selectedMachineObj.nombre})`
-                        : 'Sin implemento'
+                        ? bi(
+                            `Sin implemento (tarifa de ${selectedMachineObj.nombre})`,
+                            `No implement (${selectedMachineObj.nombre} rate)`
+                          )
+                        : bi('Sin implemento', 'No implement')
                     }
                   />
                 )}
 
                 {/* 4. Destino (Propiedad propia / Cliente externo) */}
-                <div>
-                  <label className={FORM_LABEL_CLASS}>
-                    Destino <span className="text-[#C44545]">*</span>
-                  </label>
-                  <div className="flex p-1 bg-[#F2F5F3] rounded-xl gap-1 border border-[#E2E7E3]">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setServiceDestino('propiedad');
-                        if (selectedLotId && isHectareUnit(unidad)) {
-                          const ha = getLotSurfaceHa(lots, selectedLotId);
-                          if (ha !== null) setCantidad(ha);
-                        }
-                      }}
-                      className={`flex-1 h-[36px] text-xs font-semibold rounded-lg transition cursor-pointer ${
-                        serviceDestino === 'propiedad'
-                          ? 'bg-white text-[#24875B] shadow-xs border border-[#BFE0CD]'
-                          : 'text-[#5E6D64] hover:text-[#26352D]'
-                      }`}
-                    >
-                      Propiedad propia
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setServiceDestino('tercero')}
-                      className={`flex-1 h-[36px] text-xs font-semibold rounded-lg transition cursor-pointer ${
-                        serviceDestino === 'tercero'
-                          ? 'bg-white text-[#26352D] shadow-xs border border-[#D4DDD6]'
-                          : 'text-[#5E6D64] hover:text-[#26352D]'
-                      }`}
-                    >
-                      Cliente externo
-                    </button>
-                  </div>
-                </div>
+                <Switch<'propiedad' | 'tercero'>
+                  label={bi('Destino', 'Destination')}
+                  required
+                  value={serviceDestino}
+                  onChange={(nextDest) => {
+                    setServiceDestino(nextDest);
+                    if (nextDest === 'propiedad') {
+                      if (selectedLotId && isHectareUnit(unidad)) {
+                        const ha = getLotSurfaceHa(lots, selectedLotId);
+                        if (ha !== null) setCantidad(ha);
+                      }
+                    } else {
+                      if (!jobPlazoDias && !jobFechaVencimiento && !jobAplicarInteres && !jobTasaInteres) {
+                        preloadPaymentDefaultsForNewService(fecha);
+                      }
+                    }
+                  }}
+                  leftOption={{ value: 'propiedad', label: bi('Propiedad propia', 'Own farm') }}
+                  rightOption={{ value: 'tercero', label: bi('Cliente externo', 'External client') }}
+                />
 
-                {/* 5. Lote (si Propiedad) o Cliente (si Externo) */}
+                {/* 5. Lote (si Propiedad) o Cliente del catálogo (si Externo) */}
                 {serviceDestino === 'propiedad' ? (
                   <VisualLotPicker
                     lots={lots}
@@ -2184,32 +1663,107 @@ export const MachineryView: React.FC<Props> = ({
                         if (ha !== null) setCantidad(ha);
                       }
                     }}
-                    label="Lote"
+                    label={bi('Lote', 'Lot')}
                     required
                   />
                 ) : (
-                  <div>
-                    <label className={FORM_LABEL_CLASS}>
-                      Cliente <span className="text-[#7A8780] font-normal">(opcional)</span>
-                    </label>
-                    <div className="relative">
-                      <User className="absolute left-3 top-1/2 -translate-y-1/2 h-[17px] w-[17px] text-[#64746B] pointer-events-none" />
-                      <input
-                        type="text"
-                        value={cliente}
-                        onChange={(e) => setCliente(e.target.value)}
-                        placeholder="Nombre del cliente"
-                        className={`${FORM_INPUT_CLASS} pl-9`}
-                      />
+                  <div className="space-y-3">
+                    <CustomerPicker
+                      label={bi('Cliente', 'Customer')}
+                      customers={customers}
+                      selectedCustomerId={clienteId}
+                      isPending={clientePendiente}
+                      allowPending
+                      pendingLabel={t('customers.pendingClient')}
+                      required
+                      onSelectCustomer={(c) => {
+                        setClienteId(c.id);
+                        setCliente(c.nombre);
+                        setClientePendiente(false);
+                      }}
+                      onSelectPending={() => {
+                        setClienteId('');
+                        setCliente('');
+                        setClientePendiente(true);
+                      }}
+                    />
+
+                    {/* Condiciones de cobro (precargadas de Configuración de cobros, editables individualmente) */}
+                    <div className="rounded-xl border border-[#E2E7E3] bg-[#F8FAF8] p-3 space-y-2.5">
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-[#5E6D64]">
+                        {bi('Condiciones de cobro', 'Payment terms')}
+                      </p>
+                      <div className="grid grid-cols-2 gap-2.5 items-end">
+                        <div>
+                          <label className={FORM_LABEL_CLASS}>
+                            {bi('Plazo (días)', 'Term (days)')}
+                          </label>
+                          <input
+                            type="number"
+                            inputMode="numeric"
+                            min="0"
+                            placeholder="0"
+                            value={jobPlazoDias}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setJobPlazoDias(val);
+                              if (val.trim() !== '' && !isNaN(Number(val))) {
+                                setJobFechaVencimiento(addDaysToIso(fecha, Number(val)));
+                              } else {
+                                setJobFechaVencimiento('');
+                              }
+                            }}
+                            className={`${FORM_INPUT_CLASS} tabular-nums`}
+                          />
+                        </div>
+                        <div>
+                          <label className={FORM_LABEL_CLASS}>
+                            {bi('Vencimiento', 'Due date')}
+                          </label>
+                          <input
+                            type="date"
+                            value={jobFechaVencimiento}
+                            onChange={(e) => setJobFechaVencimiento(e.target.value)}
+                            className={FORM_INPUT_CLASS}
+                          />
+                        </div>
+                      </div>
+                      <div className="pt-1 border-t border-[#E2E7E3] space-y-2.5">
+                        <Switch<boolean>
+                          inline
+                          label={bi('Aplicar interés por mora', 'Apply late interest')}
+                          value={jobAplicarInteres}
+                          onChange={setJobAplicarInteres}
+                        />
+                        {jobAplicarInteres && (
+                          <div>
+                            <label className={`${FORM_LABEL_CLASS} whitespace-nowrap truncate`}>
+                              {bi('Interés mensual (%)', 'Monthly interest (%)')}
+                              <span className="text-[#C44545] ml-0.5">*</span>
+                            </label>
+                            <input
+                              type="number"
+                              inputMode="decimal"
+                              step="any"
+                              min="0.01"
+                              placeholder="0.00"
+                              value={jobTasaInteres}
+                              onChange={(e) => setJobTasaInteres(e.target.value)}
+                              className={`${FORM_INPUT_CLASS} tabular-nums`}
+                            />
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}
 
                 {/* 6. Cantidad y Unidad */}
                 <div className="grid grid-cols-2 gap-2.5 items-end">
-                  <div>
-                    <label className={FORM_LABEL_CLASS}>
-                      Cantidad <span className="text-[#C44545]">*</span>
+                  <div className="min-w-0">
+                    <label className={`${FORM_LABEL_CLASS} whitespace-nowrap truncate`}>
+                      {bi('Cantidad', 'Quantity')}
+                      <span className="text-[#C44545] ml-0.5">*</span>
                     </label>
                     <input
                       type="number"
@@ -2224,7 +1778,7 @@ export const MachineryView: React.FC<Props> = ({
                     />
                   </div>
                   <AppSelect
-                    label="Unidad"
+                    label={bi('Unidad', 'Unit')}
                     required
                     icon={<Wrench className="h-[17px] w-[17px]" />}
                     value={unidad}
@@ -2237,17 +1791,19 @@ export const MachineryView: React.FC<Props> = ({
                       }
                     }}
                   >
-                    <option value="hora">Horas</option>
-                    <option value="hectarea">Hectáreas</option>
+                    <option value="hora">{bi('Horas', 'Hours')}</option>
+                    <option value="hectarea">{bi('Hectáreas', 'Hectares')}</option>
                   </AppSelect>
                 </div>
 
                 {/* 7. Tarifa y Moneda */}
                 <div className="grid grid-cols-2 gap-2.5 items-end">
-                  <div>
-                    <label className={FORM_LABEL_CLASS}>
-                      Tarifa por {unidad === 'hectarea' ? 'ha' : 'hora'}{' '}
-                      <span className="text-[#C44545]">*</span>
+                  <div className="min-w-0">
+                    <label className={`${FORM_LABEL_CLASS} whitespace-nowrap truncate`}>
+                      {unidad === 'hectarea'
+                        ? bi('Tarifa / ha', 'Rate / ha')
+                        : bi('Tarifa / hora', 'Rate / hour')}
+                      <span className="text-[#C44545] ml-0.5">*</span>
                     </label>
                     <input
                       type="number"
@@ -2265,7 +1821,7 @@ export const MachineryView: React.FC<Props> = ({
                     />
                   </div>
                   <CurrencySelect
-                    label="Moneda"
+                    label={bi('Moneda', 'Currency')}
                     required
                     value={jobMoneda}
                     onChange={handleJobCurrencyChange}
@@ -2275,7 +1831,8 @@ export const MachineryView: React.FC<Props> = ({
                 {/* Tipo de cambio editable */}
                 <div>
                   <label className={FORM_LABEL_CLASS}>
-                    Tipo de cambio (Bs/USD) <span className="text-[#C44545]">*</span>
+                    {bi('Tipo de cambio (Bs/USD)', 'Exchange rate (Bs/USD)')}{' '}
+                    <span className="text-[#C44545]">*</span>
                   </label>
                   <input
                     type="number"
@@ -2292,26 +1849,22 @@ export const MachineryView: React.FC<Props> = ({
 
                 {/* 8. Importe total */}
                 <div className="bg-[#EAF5EE] px-3.5 py-2.5 rounded-xl border border-[#BFE0CD] flex items-center justify-between">
-                  <span className="text-[13px] font-bold text-[#175B3D]">Importe total</span>
-                  <span className="text-base font-extrabold text-[#175B3D] font-mono tabular-nums">
+                  <span className="text-[13px] font-bold text-[#175B3D]">
+                    {bi('Importe total', 'Total amount')}
+                  </span>
+                  <span className="text-base font-extrabold text-[#175B3D] tabular-nums">
                     {jobMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
                     {calculatedTotal.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </span>
                 </div>
 
-                {/* 9. Observación (opcional) */}
-                <div>
-                  <label className={FORM_LABEL_CLASS}>
-                    Observación <span className="text-[#7A8780] font-normal">(opcional)</span>
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={observacion}
-                    onChange={(e) => setObservacion(e.target.value)}
-                    placeholder="Notas del servicio..."
-                    className={FORM_TEXTAREA_CLASS}
-                  />
-                </div>
+                {/* 9. Observación (opcional) con dictado por voz */}
+                <ObservationField
+                  value={observacion}
+                  onChange={setObservacion}
+                  optional
+                  placeholder={bi('Notas del servicio...', 'Service notes...')}
+                />
 
                 {/* Botón Guardar */}
                 <button
@@ -2320,7 +1873,7 @@ export const MachineryView: React.FC<Props> = ({
                   className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#24875B] hover:bg-[#1D704B] active:bg-[#175B3D] text-white font-bold h-[42px] text-sm shadow-xs transition active:scale-[0.99] disabled:opacity-50 cursor-pointer"
                 >
                   <Save className="h-4 w-4 shrink-0" />
-                  <span>{saving ? 'Guardando...' : 'Guardar servicio'}</span>
+                  <span>{saving ? t('common.saving') : bi('Guardar servicio', 'Save service')}</span>
                 </button>
               </form>
             </div>
@@ -2337,18 +1890,18 @@ export const MachineryView: React.FC<Props> = ({
             <form onSubmit={handleExpenseSubmit} className="space-y-3">
               {/* Maquinaria Asignada */}
               <VisualMachinePicker
-                label="Máquina"
-                optionalText="(opcional)"
+                label={bi('Máquina', 'Machine')}
+                optionalText={t('common.optional')}
                 machines={machines}
                 selectedMachineId={expMachineId}
                 onSelectMachine={(m) => setExpMachineId(m.id)}
                 allowNone
-                noneLabel="Gasto general (sin máquina)"
+                noneLabel={bi('Gasto general (sin máquina)', 'General expense (no machine)')}
               />
 
               {/* Concepto de Gasto */}
               <VisualExpenseItemPicker
-                label="Concepto de gasto"
+                label={bi('Concepto de gasto', 'Expense concept')}
                 items={machineryExpenseItems}
                 selectedItemName={expItemGasto}
                 onSelectItem={(item) => {
@@ -2364,7 +1917,7 @@ export const MachineryView: React.FC<Props> = ({
               {/* Fecha */}
               <div>
                 <label className={FORM_LABEL_CLASS}>
-                  Fecha <span className="text-[#C44545]">*</span>
+                  {bi('Fecha', 'Date')} <span className="text-[#C44545]">*</span>
                 </label>
                 <div className="relative">
                   <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 h-[17px] w-[17px] text-[#64746B] pointer-events-none" />
@@ -2382,7 +1935,7 @@ export const MachineryView: React.FC<Props> = ({
               <div className="grid grid-cols-2 gap-2.5 items-end">
                 <div>
                   <label className={FORM_LABEL_CLASS}>
-                    Cantidad <span className="text-[#C44545]">*</span>
+                    {bi('Cantidad', 'Quantity')} <span className="text-[#C44545]">*</span>
                   </label>
                   <input
                     type="number"
@@ -2397,12 +1950,12 @@ export const MachineryView: React.FC<Props> = ({
                   />
                 </div>
                 <div>
-                  <label className={FORM_LABEL_CLASS}>Unidad</label>
+                  <label className={FORM_LABEL_CLASS}>{bi('Unidad', 'Unit')}</label>
                   <input
                     type="text"
                     value={expUnidad}
                     onChange={(e) => setExpUnidad(e.target.value)}
-                    placeholder="litros, piezas, horas"
+                    placeholder={bi('litros, piezas, horas', 'liters, parts, hours')}
                     className={FORM_INPUT_CLASS}
                   />
                 </div>
@@ -2412,7 +1965,7 @@ export const MachineryView: React.FC<Props> = ({
               <div className="grid grid-cols-2 gap-2.5 items-end">
                 <div>
                   <label className={FORM_LABEL_CLASS}>
-                    Precio unitario <span className="text-[#C44545]">*</span>
+                    {bi('Precio unitario', 'Unit price')} <span className="text-[#C44545]">*</span>
                   </label>
                   <input
                     type="number"
@@ -2430,7 +1983,7 @@ export const MachineryView: React.FC<Props> = ({
                   />
                 </div>
                 <CurrencySelect
-                  label="Moneda"
+                  label={bi('Moneda', 'Currency')}
                   required
                   value={expMoneda}
                   onChange={handleExpCurrencyChange}
@@ -2440,7 +1993,8 @@ export const MachineryView: React.FC<Props> = ({
               {/* Tipo de cambio editable */}
               <div>
                 <label className={FORM_LABEL_CLASS}>
-                  Tipo de cambio (Bs/USD) <span className="text-[#C44545]">*</span>
+                  {bi('Tipo de cambio (Bs/USD)', 'Exchange rate (Bs/USD)')}{' '}
+                  <span className="text-[#C44545]">*</span>
                 </label>
                 <input
                   type="number"
@@ -2457,26 +2011,22 @@ export const MachineryView: React.FC<Props> = ({
 
               {/* Importe total */}
               <div className="bg-[#FCECEC] px-3.5 py-2.5 rounded-xl border border-[#F2C6C6] flex items-center justify-between">
-                <span className="text-[13px] font-bold text-[#9F2D2D]">Importe total</span>
-                <span className="text-base font-extrabold text-[#9F2D2D] font-mono tabular-nums">
+                <span className="text-[13px] font-bold text-[#9F2D2D]">
+                  {bi('Importe total', 'Total amount')}
+                </span>
+                <span className="text-base font-extrabold text-[#9F2D2D] tabular-nums">
                   {expMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
                   {expCalculatedTotal.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
 
-              {/* Observación */}
-              <div>
-                <label className={FORM_LABEL_CLASS}>
-                  Observación <span className="text-[#7A8780] font-normal">(opcional)</span>
-                </label>
-                <textarea
-                  rows={2}
-                  value={expObservacion}
-                  onChange={(e) => setExpObservacion(e.target.value)}
-                  placeholder="Factura, proveedor, detalle..."
-                  className={FORM_TEXTAREA_CLASS}
-                />
-              </div>
+              {/* Observación con dictado por voz */}
+              <ObservationField
+                value={expObservacion}
+                onChange={setExpObservacion}
+                optional
+                placeholder={bi('Factura, proveedor, detalle...', 'Invoice, supplier, details...')}
+              />
 
               {/* Botón Guardar */}
               <button
@@ -2485,7 +2035,7 @@ export const MachineryView: React.FC<Props> = ({
                 className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#C44545] hover:bg-[#A93838] active:bg-[#8E2D2D] text-white font-bold h-[42px] text-sm shadow-xs transition active:scale-[0.99] disabled:opacity-50 cursor-pointer"
               >
                 <Save className="h-4 w-4 shrink-0" />
-                <span>{saving ? 'Guardando...' : 'Guardar gasto'}</span>
+                <span>{saving ? t('common.saving') : bi('Guardar gasto', 'Save expense')}</span>
               </button>
             </form>
           </div>
@@ -2493,13 +2043,16 @@ export const MachineryView: React.FC<Props> = ({
           {/* Lista de gastos recientes */}
           <div className="space-y-2.5">
             <ListToolbar
-              title="Gastos de Maquinarias"
-              countLabel={`${machineryExpenses.length} reg.`}
+              title={bi('Gastos de Maquinarias', 'Machinery Expenses')}
+              countLabel={`${machineryExpenses.length} ${bi('reg.', 'rec.')}`}
             />
 
             <CompactList
               isEmpty={machineryExpenses.length === 0}
-              emptyMessage="No hay gastos de maquinaria registrados en esta campaña."
+              emptyMessage={bi(
+                'No hay gastos de maquinaria registrados en esta campaña.',
+                'No machinery expenses recorded in this campaign.'
+              )}
             >
               {machineryExpenses.map((exp) => (
                 <CompactListRow
@@ -2512,12 +2065,12 @@ export const MachineryView: React.FC<Props> = ({
                   title={exp.itemGasto}
                   subtitle={
                     <span>
-                      {formatDateDDMMAAAA(exp.fecha)} · {exp.maquinariaNombre || 'Gasto general'} · {exp.cantidad} {exp.unidad}
+                      {formatDateDDMMAAAA(exp.fecha)} · {exp.maquinariaNombre || bi('Gasto general', 'General expense')} · {exp.cantidad} {translateUnit(exp.unidad)}
                       {exp.observacion ? ` · ${exp.observacion}` : ''}
                     </span>
                   }
                   rightPrimary={
-                    <span className="text-[#C44545] font-mono">
+                    <span className="text-[#C44545] tabular-nums">
                       - {formatMoney(exp.total, exp.moneda)}
                     </span>
                   }
@@ -2528,7 +2081,7 @@ export const MachineryView: React.FC<Props> = ({
                           type="button"
                           onClick={() => handleOpenEditExpense(exp)}
                           className="p-1.5 text-[#7A8780] hover:text-[#26352D] hover:bg-[#EFF2EF] rounded-lg transition cursor-pointer"
-                          title="Editar gasto"
+                          title={bi('Editar gasto', 'Edit expense')}
                         >
                           <Edit3 className="h-3.5 w-3.5" />
                         </button>
@@ -2536,7 +2089,7 @@ export const MachineryView: React.FC<Props> = ({
                           type="button"
                           onClick={() => handleRequestDeleteExpense(exp)}
                           className="p-1.5 text-[#7A8780] hover:text-[#C44545] hover:bg-[#FCECEC] rounded-lg transition cursor-pointer"
-                          title="Eliminar gasto"
+                          title={bi('Eliminar gasto', 'Delete expense')}
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
@@ -2556,11 +2109,11 @@ export const MachineryView: React.FC<Props> = ({
       {currentScreen === 'historial' && (
         <div className="space-y-3">
           <ListToolbar
-            title="Historial"
-            countLabel={`${filteredMachineryMovements.length} reg.`}
+            title={bi('Historial', 'History')}
+            countLabel={`${filteredMachineryMovements.length} ${bi('reg.', 'rec.')}`}
             searchValue={searchTerm}
             onSearchChange={setSearchTerm}
-            searchPlaceholder="Buscar por labor, cliente, lote o máquina..."
+            searchPlaceholder={bi('Buscar por labor, cliente, lote o máquina...', 'Search by job, client, lot, or machine...')}
             filters={
               <CompactFilter
                 value={historialFilter}
@@ -2575,11 +2128,11 @@ export const MachineryView: React.FC<Props> = ({
                     ? 'red'
                     : 'neutral'
                 }
-                ariaLabel="Filtrar movimientos por tipo"
+                ariaLabel={bi('Filtrar movimientos por tipo', 'Filter movements by type')}
                 options={[
-                  { value: 'todos', label: 'Todos' },
-                  { value: 'ingresos', label: 'Ingresos' },
-                  { value: 'gastos', label: 'Gastos' },
+                  { value: 'todos', label: bi('Todos', 'All') },
+                  { value: 'ingresos', label: bi('Ingresos', 'Income') },
+                  { value: 'gastos', label: bi('Gastos', 'Expenses') },
                 ]}
               />
             }
@@ -2587,7 +2140,7 @@ export const MachineryView: React.FC<Props> = ({
 
           <CompactList
             isEmpty={filteredMachineryMovements.length === 0}
-            emptyMessage="No hay movimientos registrados."
+            emptyMessage={bi('No hay movimientos registrados.', 'No movements recorded.')}
           >
             {filteredMachineryMovements.map((m) => {
               const isExpanded = expandedMovementId === m.id;
@@ -2624,13 +2177,13 @@ export const MachineryView: React.FC<Props> = ({
                       ) : (
                         <span className="truncate">
                           {m.destinoOCliente || m.maquinariaNombre}
-                          {isService ? ' · Terceros' : ''}
+                          {isService ? ` · ${bi('Terceros', 'External')}` : ''}
                         </span>
                       )}
                     </span>
                   }
                   rightPrimary={
-                    <span className={`font-mono ${isService ? 'text-[#24875B]' : 'text-[#C44545]'}`}>
+                    <span className={`tabular-nums ${isService ? 'text-[#24875B]' : 'text-[#C44545]'}`}>
                       {isService ? '+ ' : '- '}
                       {m.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
                       {m.total.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -2642,21 +2195,23 @@ export const MachineryView: React.FC<Props> = ({
                     <div className="space-y-2 text-xs">
                       <div className="divide-y divide-[#EFF2EF]">
                         <div className="py-1.5 flex items-center justify-between gap-2">
-                          <span className="text-[#5E6D64] font-medium">Maquinaria</span>
+                          <span className="text-[#5E6D64] font-medium">{bi('Maquinaria', 'Machinery')}</span>
                           <span className="font-semibold text-[#26352D] text-right">
                             {m.maquinariaNombre || '—'}
                           </span>
                         </div>
                         {m.tipoTrabajo === 'propiedad' ? (
                           <div className="py-1.5 flex items-center justify-between gap-2">
-                            <span className="text-[#5E6D64] font-medium">Lote</span>
+                            <span className="text-[#5E6D64] font-medium">{bi('Lote', 'Lot')}</span>
                             <span className="font-semibold text-[#24875B] text-right">
                               {m.destinoOCliente || '—'}
                             </span>
                           </div>
                         ) : (
                           <div className="py-1.5 flex items-center justify-between gap-2">
-                            <span className="text-[#5E6D64] font-medium">Destino / Cliente</span>
+                            <span className="text-[#5E6D64] font-medium">
+                              {bi('Destino / Cliente', 'Destination / Client')}
+                            </span>
                             <span className="font-semibold text-[#26352D] text-right">
                               {m.destinoOCliente || '—'}
                             </span>
@@ -2664,27 +2219,29 @@ export const MachineryView: React.FC<Props> = ({
                         )}
                         <div className="py-1.5 flex items-center justify-between gap-2">
                           <span className="text-[#5E6D64] font-medium">
-                            {isService ? 'Tarifa' : 'Precio'}
+                            {isService ? bi('Tarifa', 'Rate') : bi('Precio', 'Price')}
                           </span>
                           <span className="font-semibold text-[#26352D] tabular-nums text-right">
                             {m.tarifaOPrecio !== undefined && m.tarifaOPrecio !== null
-                              ? `${m.moneda === 'USD' ? 'USD' : 'Bs'} ${m.tarifaOPrecio.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} / ${m.unidad || 'unidad'}`
+                              ? `${m.moneda === 'USD' ? 'USD' : 'Bs'} ${m.tarifaOPrecio.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} / ${translateUnit(m.unidad) || bi('unidad', 'unit')}`
                               : '—'}
                           </span>
                         </div>
                         <div className="py-1.5 flex items-center justify-between gap-2">
-                          <span className="text-[#5E6D64] font-medium">Equivalencia</span>
-                          <span className="font-mono font-semibold text-[#26352D] text-right">
+                          <span className="text-[#5E6D64] font-medium">{bi('Equivalencia', 'Equivalent')}</span>
+                          <span className="tabular-nums font-semibold text-[#26352D] text-right">
                             {m.tipoCambio && m.tipoCambio > 0
                               ? m.moneda === 'USD'
-                                ? `Bs ${(m.total * m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(m.tipoCambio)})`
-                                : `USD ${(m.total / m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(m.tipoCambio)})`
+                                ? `Bs ${(m.total * m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${bi('TC', 'FX')}: ${formatTC(m.tipoCambio)})`
+                                : `USD ${(m.total / m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${bi('TC', 'FX')}: ${formatTC(m.tipoCambio)})`
                               : '—'}
                           </span>
                         </div>
                         {getCleanObservation(m.observacion, m.titulo) && (
                           <div className="py-1.5 flex items-center justify-between gap-2">
-                            <span className="text-[#5E6D64] font-medium shrink-0">Observación</span>
+                            <span className="text-[#5E6D64] font-medium shrink-0">
+                              {bi('Observación', 'Observation')}
+                            </span>
                             <span className="font-normal text-[#26352D] text-right italic">
                               {getCleanObservation(m.observacion, m.titulo)}
                             </span>
@@ -2701,14 +2258,14 @@ export const MachineryView: React.FC<Props> = ({
                                 onClick={() => handleOpenEditJob(m.rawJob!)}
                                 className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px]"
                               >
-                                Editar
+                                {t('common.edit')}
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setJobToDelete(m.rawJob!)}
                                 className="px-3.5 py-1.5 rounded-xl bg-[#FCECEC] hover:bg-[#F7DCDC] text-[#C44545] font-semibold text-xs transition cursor-pointer border border-[#F2C6C6] min-h-[34px]"
                               >
-                                Eliminar
+                                {t('common.delete')}
                               </button>
                             </>
                           )}
@@ -2719,14 +2276,14 @@ export const MachineryView: React.FC<Props> = ({
                                 onClick={() => handleOpenEditExpense(m.rawExpense!)}
                                 className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px]"
                               >
-                                Editar
+                                {t('common.edit')}
                               </button>
                               <button
                                 type="button"
                                 onClick={() => handleRequestDeleteExpense(m.rawExpense!)}
                                 className="px-3.5 py-1.5 rounded-xl bg-[#FCECEC] hover:bg-[#F7DCDC] text-[#C44545] font-semibold text-xs transition cursor-pointer border border-[#F2C6C6] min-h-[34px]"
                               >
-                                Eliminar
+                                {t('common.delete')}
                               </button>
                             </>
                           )}
@@ -2734,7 +2291,12 @@ export const MachineryView: React.FC<Props> = ({
                       ) : (
                         <div className="flex items-center gap-1.5 pt-2 border-t border-[#E6EBE7] text-[11px] text-[#7A8780]">
                           <Lock className="h-3.5 w-3.5 shrink-0" />
-                          <span>Solo el Administrador puede editar o eliminar registros guardados.</span>
+                          <span>
+                            {bi(
+                              'Solo el Administrador puede editar o eliminar registros guardados.',
+                              'Only the Administrator can edit or delete saved records.'
+                            )}
+                          </span>
                         </div>
                       )}
                     </div>
@@ -2778,22 +2340,22 @@ export const MachineryView: React.FC<Props> = ({
         return (
           <div className="space-y-3">
             <ListToolbar
-              title="Mis máquinas"
+              title={bi('Mis máquinas', 'My machinery')}
               countLabel={`${filteredSummaryMachines.length + filteredImplements.length}`}
               searchValue={machinesSearch}
               onSearchChange={setMachinesSearch}
-              searchPlaceholder="Buscar máquina o implemento..."
+              searchPlaceholder={bi('Buscar máquina o implemento...', 'Search machine or implement...')}
               filters={
                 <CompactFilter
                   value={machinesStatusFilter}
                   onChange={(val) =>
                     setMachinesStatusFilter(val as 'activos' | 'desactivados' | 'todos')
                   }
-                  ariaLabel="Filtrar estado"
+                  ariaLabel={bi('Filtrar estado', 'Filter status')}
                   options={[
-                    { value: 'activos', label: 'Activos' },
-                    { value: 'desactivados', label: 'Desactivados' },
-                    { value: 'todos', label: 'Todos' },
+                    { value: 'activos', label: bi('Activos', 'Active') },
+                    { value: 'desactivados', label: bi('Desactivados', 'Inactive') },
+                    { value: 'todos', label: bi('Todos', 'All') },
                   ]}
                 />
               }
@@ -2809,7 +2371,7 @@ export const MachineryView: React.FC<Props> = ({
                 <div className="flex items-center gap-2 min-w-0">
                   <Tractor className="h-4 w-4 text-[#24875B] shrink-0" />
                   <span className="text-sm font-bold text-[#26352D] truncate">
-                    Máquinas ({filteredSummaryMachines.length})
+                    {bi('Máquinas', 'Machines')} ({filteredSummaryMachines.length})
                   </span>
                 </div>
                 {showMachinesOpen ? (
@@ -2824,10 +2386,10 @@ export const MachineryView: React.FC<Props> = ({
                   isEmpty={filteredSummaryMachines.length === 0}
                   emptyMessage={
                     searchNorm
-                      ? 'No se encontraron máquinas con esa búsqueda.'
+                      ? bi('No se encontraron máquinas con esa búsqueda.', 'No machines found for that search.')
                       : machinesStatusFilter === 'desactivados'
-                      ? 'No hay máquinas desactivadas.'
-                      : 'No hay máquinas registradas.'
+                      ? bi('No hay máquinas desactivadas.', 'No inactive machines.')
+                      : bi('No hay máquinas registradas.', 'No machines registered.')
                   }
                 >
                   {filteredSummaryMachines.map((m) => {
@@ -2863,7 +2425,7 @@ export const MachineryView: React.FC<Props> = ({
                           </span>
                         }
                         rightPrimary={
-                          <span className="text-[#26352D] font-mono">
+                          <span className="text-[#26352D] tabular-nums">
                             {m.moneda === 'USD' ? 'USD' : 'Bs'} {m.tarifa}/{unitLabel}
                           </span>
                         }
@@ -2877,7 +2439,11 @@ export const MachineryView: React.FC<Props> = ({
                                 : 'text-[#24875B] font-semibold'
                             }
                           >
-                            {!isActive ? 'Inactivo' : isMaintenance ? 'Mantenim.' : 'Operativo'}
+                            {!isActive
+                              ? bi('Inactivo', 'Inactive')
+                              : isMaintenance
+                              ? bi('Mantenim.', 'Maint.')
+                              : bi('Operativo', 'Operational')}
                           </span>
                         }
                         isExpanded={isExpanded}
@@ -2888,25 +2454,25 @@ export const MachineryView: React.FC<Props> = ({
                             <div className="grid grid-cols-3 divide-x divide-[#E6EBE7] bg-white py-2 rounded-xl border border-[#E2E7E3] text-center">
                               <div className="px-1">
                                 <span className="text-[10px] text-[#7A8780] font-semibold block uppercase">
-                                  Horas
+                                  {bi('Horas', 'Hours')}
                                 </span>
-                                <span className="text-xs font-bold text-[#26352D] font-mono">
+                                <span className="text-xs font-bold text-[#26352D] tabular-nums">
                                   {hrs.toFixed(1)} h
                                 </span>
                               </div>
                               <div className="px-1">
                                 <span className="text-[10px] text-[#7A8780] font-semibold block uppercase">
-                                  Hectáreas
+                                  {bi('Hectáreas', 'Hectares')}
                                 </span>
-                                <span className="text-xs font-bold text-[#26352D] font-mono">
+                                <span className="text-xs font-bold text-[#26352D] tabular-nums">
                                   {ha.toFixed(1)} ha
                                 </span>
                               </div>
                               <div className="px-1">
                                 <span className="text-[10px] text-[#7A8780] font-semibold block uppercase">
-                                  Servicios
+                                  {bi('Servicios', 'Services')}
                                 </span>
-                                <span className="text-xs font-bold text-[#26352D] font-mono">
+                                <span className="text-xs font-bold text-[#26352D] tabular-nums">
                                   {machineJobs.length}
                                 </span>
                               </div>
@@ -2915,8 +2481,10 @@ export const MachineryView: React.FC<Props> = ({
                             {/* Ficha de máquina */}
                             <div className="rounded-xl border border-[#E2E7E3] bg-white divide-y divide-[#EFF2EF]">
                               <div className="px-3 py-2 flex items-center justify-between gap-2">
-                                <span className="text-[#5E6D64] font-medium">Tarifa propia</span>
-                                <span className="font-mono font-semibold text-[#26352D]">
+                                <span className="text-[#5E6D64] font-medium">
+                                  {bi('Tarifa propia', 'Own rate')}
+                                </span>
+                                <span className="tabular-nums font-semibold text-[#26352D]">
                                   {m.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
                                   {Number(m.tarifa || 0).toLocaleString('es-BO', {
                                     minimumFractionDigits: 2,
@@ -2926,20 +2494,26 @@ export const MachineryView: React.FC<Props> = ({
                                 </span>
                               </div>
                               <div className="px-3 py-2 flex items-center justify-between gap-2">
-                                <span className="text-[#5E6D64] font-medium">Valor patrimonial</span>
-                                <span className="font-mono font-semibold text-[#26352D]">
+                                <span className="text-[#5E6D64] font-medium">
+                                  {bi('Valor patrimonial', 'Asset value')}
+                                </span>
+                                <span className="tabular-nums font-semibold text-[#26352D]">
                                   {assetInfo
                                     ? `${assetInfo.moneda === 'USD' ? 'USD' : 'Bs'} ${assetInfo.valor.toLocaleString('es-BO', {
                                         minimumFractionDigits: 2,
                                         maximumFractionDigits: 2,
                                       })}`
-                                    : 'No registrado'}
+                                    : bi('No registrado', 'Not registered')}
                                 </span>
                               </div>
                               <div className="px-3 py-2 flex items-center justify-between gap-2">
-                                <span className="text-[#5E6D64] font-medium">Estado</span>
+                                <span className="text-[#5E6D64] font-medium">{bi('Estado', 'Status')}</span>
                                 <span className="font-semibold text-[#26352D]">
-                                  {!isActive ? 'Inactivo' : isMaintenance ? 'En mantenimiento' : 'Operativo'}
+                                  {!isActive
+                                    ? bi('Inactivo', 'Inactive')
+                                    : isMaintenance
+                                    ? bi('En mantenimiento', 'In maintenance')
+                                    : bi('Operativo', 'Operational')}
                                 </span>
                               </div>
                             </div>
@@ -2947,7 +2521,7 @@ export const MachineryView: React.FC<Props> = ({
                             {/* Historial de trabajos realizados */}
                             <div className="space-y-1.5">
                               <p className="text-[11px] font-semibold text-[#5E6D64]">
-                                Historial de trabajos realizados ({machineJobs.length})
+                                {bi('Historial de trabajos realizados', 'Completed jobs history')} ({machineJobs.length})
                               </p>
                               {machineJobs.length > 0 ? (
                                 <div className="rounded-xl border border-[#E2E7E3] bg-white divide-y divide-[#EFF2EF] overflow-hidden">
@@ -2957,8 +2531,8 @@ export const MachineryView: React.FC<Props> = ({
                                       : null;
                                     const destLabel =
                                       j.tipoTrabajo === 'propiedad'
-                                        ? j.loteNombre || lotObj?.nombre || 'Lote propio'
-                                        : j.cliente || 'Cliente externo';
+                                        ? j.loteNombre || lotObj?.nombre || bi('Lote propio', 'Own lot')
+                                        : j.cliente || bi('Cliente externo', 'External client');
                                     const uStr =
                                       j.unidad === 'hectarea' || (j.unidad as string) === 'ha'
                                         ? 'ha'
@@ -2976,7 +2550,7 @@ export const MachineryView: React.FC<Props> = ({
                                             {formatDateDDMMAAAA(j.fecha)} · {destLabel} · {j.cantidad} {uStr}
                                           </p>
                                         </div>
-                                        <span className="text-xs font-bold text-[#24875B] font-mono shrink-0">
+                                        <span className="text-xs font-bold text-[#24875B] tabular-nums shrink-0">
                                           {formatMoney(j.total, (j.moneda as Currency) || 'BOB')}
                                         </span>
                                       </div>
@@ -2985,7 +2559,10 @@ export const MachineryView: React.FC<Props> = ({
                                 </div>
                               ) : (
                                 <div className="px-3 py-2.5 text-xs text-[#7A8780] bg-white rounded-xl border border-[#E2E7E3]">
-                                  Sin trabajos registrados en esta campaña.
+                                  {bi(
+                                    'Sin trabajos registrados en esta campaña.',
+                                    'No jobs recorded in this campaign.'
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -3008,7 +2585,7 @@ export const MachineryView: React.FC<Props> = ({
                 <div className="flex items-center gap-2 min-w-0">
                   <Wrench className="h-4 w-4 text-[#24875B] shrink-0" />
                   <span className="text-sm font-bold text-[#26352D] truncate">
-                    Implementos agrícolas ({filteredImplements.length})
+                    {bi('Implementos agrícolas', 'Agricultural implements')} ({filteredImplements.length})
                   </span>
                 </div>
                 {showImplementsOpen ? (
@@ -3023,10 +2600,10 @@ export const MachineryView: React.FC<Props> = ({
                   isEmpty={filteredImplements.length === 0}
                   emptyMessage={
                     searchNorm
-                      ? 'No se encontraron implementos con esa búsqueda.'
+                      ? bi('No se encontraron implementos con esa búsqueda.', 'No implements found for that search.')
                       : machinesStatusFilter === 'desactivados'
-                      ? 'No hay implementos desactivados.'
-                      : 'No hay implementos agrícolas registrados.'
+                      ? bi('No hay implementos desactivados.', 'No inactive implements.')
+                      : bi('No hay implementos agrícolas registrados.', 'No agricultural implements registered.')
                   }
                 >
                   {filteredImplements.map((jt) => {
@@ -3055,15 +2632,15 @@ export const MachineryView: React.FC<Props> = ({
                           </div>
                         }
                         title={jt.nombre}
-                        subtitle={<span>Compatible: {compatType}</span>}
+                        subtitle={<span>{bi('Compatible', 'Compatible')}: {compatType}</span>}
                         rightPrimary={
-                          <span className="text-[#24875B] font-mono">
+                          <span className="text-[#24875B] tabular-nums">
                             {jt.moneda === 'USD' ? 'USD' : 'Bs'} {jt.tarifa}/{uLabel}
                           </span>
                         }
                         rightSecondary={
                           <span className={isActive ? 'text-[#24875B] font-semibold' : 'text-[#7A8780]'}>
-                            {isActive ? 'Activo' : 'Inactivo'}
+                            {isActive ? bi('Activo', 'Active') : bi('Inactivo', 'Inactive')}
                           </span>
                         }
                         isExpanded={isExpanded}
@@ -3072,12 +2649,16 @@ export const MachineryView: React.FC<Props> = ({
                           <div className="space-y-3 text-xs">
                             <div className="rounded-xl border border-[#E2E7E3] bg-white divide-y divide-[#EFF2EF]">
                               <div className="px-3 py-2 flex items-center justify-between gap-2">
-                                <span className="text-[#5E6D64] font-medium">Tipo de máquina compatible</span>
+                                <span className="text-[#5E6D64] font-medium">
+                                  {bi('Tipo de máquina compatible', 'Compatible machine type')}
+                                </span>
                                 <span className="font-semibold text-[#26352D]">{compatType}</span>
                               </div>
                               <div className="px-3 py-2 flex items-center justify-between gap-2">
-                                <span className="text-[#5E6D64] font-medium">Tarifa propia</span>
-                                <span className="font-mono font-semibold text-[#24875B]">
+                                <span className="text-[#5E6D64] font-medium">
+                                  {bi('Tarifa propia', 'Own rate')}
+                                </span>
+                                <span className="tabular-nums font-semibold text-[#24875B]">
                                   {jt.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
                                   {Number(jt.tarifa || 0).toLocaleString('es-BO', {
                                     minimumFractionDigits: 2,
@@ -3087,20 +2668,24 @@ export const MachineryView: React.FC<Props> = ({
                                 </span>
                               </div>
                               <div className="px-3 py-2 flex items-center justify-between gap-2">
-                                <span className="text-[#5E6D64] font-medium">Unidad de cobro</span>
+                                <span className="text-[#5E6D64] font-medium">
+                                  {bi('Unidad de cobro', 'Billing unit')}
+                                </span>
                                 <span className="font-semibold text-[#26352D]">
-                                  {uLabel === 'ha' ? 'Hectárea (ha)' : 'Hora (h)'}
+                                  {uLabel === 'ha' ? bi('Hectárea (ha)', 'Hectare (ha)') : bi('Hora (h)', 'Hour (h)')}
                                 </span>
                               </div>
                               <div className="px-3 py-2 flex items-center justify-between gap-2">
-                                <span className="text-[#5E6D64] font-medium">Valor patrimonial</span>
-                                <span className="font-mono font-semibold text-[#26352D]">
+                                <span className="text-[#5E6D64] font-medium">
+                                  {bi('Valor patrimonial', 'Asset value')}
+                                </span>
+                                <span className="tabular-nums font-semibold text-[#26352D]">
                                   {assetInfo
                                     ? `${assetInfo.moneda === 'USD' ? 'USD' : 'Bs'} ${assetInfo.valor.toLocaleString('es-BO', {
                                         minimumFractionDigits: 2,
                                         maximumFractionDigits: 2,
                                       })}`
-                                    : 'No registrado'}
+                                    : bi('No registrado', 'Not registered')}
                                 </span>
                               </div>
                             </div>
@@ -3108,7 +2693,7 @@ export const MachineryView: React.FC<Props> = ({
                             {/* Historial de trabajos realizados con este implemento */}
                             <div className="space-y-1.5">
                               <p className="text-[11px] font-semibold text-[#5E6D64]">
-                                Historial con este implemento ({implementJobs.length})
+                                {bi('Historial con este implemento', 'History with this implement')} ({implementJobs.length})
                               </p>
                               {implementJobs.length > 0 ? (
                                 <div className="rounded-xl border border-[#E2E7E3] bg-white divide-y divide-[#EFF2EF] overflow-hidden">
@@ -3118,8 +2703,8 @@ export const MachineryView: React.FC<Props> = ({
                                       : null;
                                     const destLabel =
                                       j.tipoTrabajo === 'propiedad'
-                                        ? j.loteNombre || lotObj?.nombre || 'Lote propio'
-                                        : j.cliente || 'Cliente externo';
+                                        ? j.loteNombre || lotObj?.nombre || bi('Lote propio', 'Own lot')
+                                        : j.cliente || bi('Cliente externo', 'External client');
                                     const uStr =
                                       j.unidad === 'hectarea' || (j.unidad as string) === 'ha'
                                         ? 'ha'
@@ -3131,13 +2716,13 @@ export const MachineryView: React.FC<Props> = ({
                                       >
                                         <div className="min-w-0">
                                           <p className="text-xs font-semibold text-[#26352D] truncate">
-                                            {j.maquinariaNombre || 'Máquina'} · {destLabel}
+                                            {j.maquinariaNombre || bi('Máquina', 'Machine')} · {destLabel}
                                           </p>
                                           <p className="text-[11px] text-[#7A8780] truncate">
                                             {formatDateDDMMAAAA(j.fecha)} · {j.cantidad} {uStr}
                                           </p>
                                         </div>
-                                        <span className="text-xs font-bold text-[#24875B] font-mono shrink-0">
+                                        <span className="text-xs font-bold text-[#24875B] tabular-nums shrink-0">
                                           {formatMoney(j.total, (j.moneda as Currency) || 'BOB')}
                                         </span>
                                       </div>
@@ -3146,7 +2731,10 @@ export const MachineryView: React.FC<Props> = ({
                                 </div>
                               ) : (
                                 <div className="px-3 py-2.5 text-xs text-[#7A8780] bg-white rounded-xl border border-[#E2E7E3]">
-                                  Sin trabajos registrados con este implemento en esta campaña.
+                                  {bi(
+                                    'Sin trabajos registrados con este implemento en esta campaña.',
+                                    'No jobs recorded with this implement in this campaign.'
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -3191,11 +2779,14 @@ export const MachineryView: React.FC<Props> = ({
               <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
                 <div className="min-w-0">
                   <h3 className="text-base font-bold text-slate-900 truncate">
-                    Editar servicio
+                    {bi('Editar servicio', 'Edit service')}
                   </h3>
                   {hasRegisteredCobros && (
                     <p className="text-[11px] text-[#24875B] font-semibold mt-0.5">
-                      Conserva {editJobCobroCuenta?.pagos?.length || 1} cobro(s) registrado(s)
+                      {bi(
+                        `Conserva ${editJobCobroCuenta?.pagos?.length || 1} cobro(s) registrado(s)`,
+                        `Keeps ${editJobCobroCuenta?.pagos?.length || 1} recorded payment(s)`
+                      )}
                     </p>
                   )}
                 </div>
@@ -3225,7 +2816,7 @@ export const MachineryView: React.FC<Props> = ({
                   <div className="rounded-xl border border-[#BFE0CD] bg-[#F5FAF7] p-3 space-y-2">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-[11px] font-bold text-[#1D5C3F] uppercase">
-                        Estado de cobro (USD)
+                        {bi('Estado de cobro (USD)', 'Payment status (USD)')}
                       </span>
                       {loadingEditJobCobro && (
                         <RefreshCw className="h-3.5 w-3.5 animate-spin text-[#24875B]" />
@@ -3234,20 +2825,26 @@ export const MachineryView: React.FC<Props> = ({
                     {editJobCobroCuenta && (
                       <div className="grid grid-cols-3 divide-x divide-[#D4E6DC] text-center bg-white rounded-lg border border-[#D4E6DC] py-2">
                         <div className="px-1">
-                          <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Total</span>
-                          <span className="text-xs font-bold text-[#26352D] font-mono tabular-nums">
+                          <span className="text-[10px] font-bold uppercase text-[#7A8780] block">
+                            {bi('Total', 'Total')}
+                          </span>
+                          <span className="text-xs font-bold text-[#26352D] tabular-nums">
                             USD {editTotalUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </span>
                         </div>
                         <div className="px-1">
-                          <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Cobrado</span>
-                          <span className="text-xs font-bold text-[#24875B] font-mono tabular-nums">
+                          <span className="text-[10px] font-bold uppercase text-[#7A8780] block">
+                            {bi('Cobrado', 'Collected')}
+                          </span>
+                          <span className="text-xs font-bold text-[#24875B] tabular-nums">
                             USD {cobradoUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </span>
                         </div>
                         <div className="px-1">
-                          <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Saldo</span>
-                          <span className={`text-xs font-black font-mono tabular-nums ${exceedsCobradoViolation ? 'text-red-600' : 'text-amber-700'}`}>
+                          <span className="text-[10px] font-bold uppercase text-[#7A8780] block">
+                            {bi('Saldo', 'Balance')}
+                          </span>
+                          <span className={`text-xs font-black tabular-nums ${exceedsCobradoViolation ? 'text-red-600' : 'text-amber-700'}`}>
                             USD {saldoProyectadoUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </span>
                         </div>
@@ -3255,7 +2852,10 @@ export const MachineryView: React.FC<Props> = ({
                     )}
                     {exceedsCobradoViolation && (
                       <p className="text-[11px] font-semibold text-red-700">
-                        El total del servicio no puede ser menor al monto ya cobrado (USD {cobradoUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}).
+                        {bi(
+                          `El total del servicio no puede ser menor al monto ya cobrado (USD ${cobradoUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}).`,
+                          `Service total cannot be less than the amount already collected (USD ${cobradoUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}).`
+                        )}
                       </p>
                     )}
                   </div>
@@ -3265,7 +2865,7 @@ export const MachineryView: React.FC<Props> = ({
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-end">
                   <div>
                     <label className={FORM_LABEL_CLASS}>
-                      Fecha <span className="text-[#C44545]">*</span>
+                      {bi('Fecha', 'Date')} <span className="text-[#C44545]">*</span>
                     </label>
                     <input
                       type="date"
@@ -3276,16 +2876,16 @@ export const MachineryView: React.FC<Props> = ({
                     />
                   </div>
                   <AppSelect
-                    label="Campaña"
+                    label={bi('Campaña', 'Campaign')}
                     required
                     icon={<Calendar className="h-[17px] w-[17px]" />}
                     value={editCampanaId}
                     onChange={(e) => setEditCampanaId(e.target.value)}
                   >
-                    <option value="">Seleccionar campaña</option>
+                    <option value="">{bi('Seleccionar campaña', 'Select campaign')}</option>
                     {campaigns.map((c) => (
                       <option key={c.id} value={c.id}>
-                        {c.nombre} {c.activa ? '(Activa)' : ''}
+                        {c.nombre} {c.activa ? `(${bi('Activa', 'Active')})` : ''}
                       </option>
                     ))}
                   </AppSelect>
@@ -3293,7 +2893,7 @@ export const MachineryView: React.FC<Props> = ({
 
                 {/* 2. Máquina */}
                 <VisualMachinePicker
-                  label="Máquina"
+                  label={bi('Máquina', 'Machine')}
                   machines={machines}
                   selectedMachineId={editMachineId}
                   onSelectMachine={(m) => {
@@ -3321,8 +2921,8 @@ export const MachineryView: React.FC<Props> = ({
 
                 {/* 3. Implemento agrícola (opcional) */}
                 <VisualJobTypePicker
-                  label="Implemento agrícola"
-                  optionalText="(opcional)"
+                  label={bi('Implemento agrícola', 'Agricultural implement')}
+                  optionalText={t('common.optional')}
                   jobTypes={editCompatibleImplements}
                   selectedJobTypeId={editJobTypeId}
                   onSelectJobType={(jDef) => {
@@ -3360,49 +2960,41 @@ export const MachineryView: React.FC<Props> = ({
                   allowNone
                   noneLabel={
                     editMachineObj
-                      ? `Sin implemento (tarifa de ${editMachineObj.nombre})`
-                      : 'Sin implemento'
+                      ? bi(
+                          `Sin implemento (tarifa de ${editMachineObj.nombre})`,
+                          `No implement (${editMachineObj.nombre} rate)`
+                        )
+                      : bi('Sin implemento', 'No implement')
                   }
                 />
 
                 {/* 4. Destino */}
                 <div>
-                  <label className={FORM_LABEL_CLASS}>Destino</label>
-                  <div className="flex p-1 bg-[#F2F5F3] rounded-xl gap-1 border border-[#E2E7E3]">
-                    <button
-                      type="button"
-                      disabled={hasRegisteredCobros}
-                      onClick={() => setEditTipoTrabajo('propiedad')}
-                      className={`flex-1 h-[36px] text-xs font-semibold rounded-lg transition ${
-                        hasRegisteredCobros
-                          ? 'opacity-45 cursor-not-allowed text-[#7A8780]'
-                          : editTipoTrabajo === 'propiedad'
-                          ? 'bg-white text-[#24875B] shadow-xs border border-[#BFE0CD] cursor-pointer'
-                          : 'text-[#5E6D64] hover:text-[#26352D] cursor-pointer'
-                      }`}
-                    >
-                      Propiedad propia
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setEditTipoTrabajo('tercero')}
-                      className={`flex-1 h-[36px] text-xs font-semibold rounded-lg transition cursor-pointer ${
-                        editTipoTrabajo === 'tercero'
-                          ? 'bg-white text-[#26352D] shadow-xs border border-[#D4DDD6]'
-                          : 'text-[#5E6D64] hover:text-[#26352D]'
-                      }`}
-                    >
-                      Cliente externo
-                    </button>
-                  </div>
+                  <Switch<'propiedad' | 'tercero'>
+                    label={bi('Destino', 'Destination')}
+                    value={editTipoTrabajo}
+                    onChange={(val) => setEditTipoTrabajo(val)}
+                    leftOption={{
+                      value: 'propiedad',
+                      label: bi('Propiedad propia', 'Own farm'),
+                      disabled: hasRegisteredCobros,
+                    }}
+                    rightOption={{
+                      value: 'tercero',
+                      label: bi('Cliente externo', 'External client'),
+                    }}
+                  />
                   {hasRegisteredCobros && (
                     <p className="text-[11px] text-amber-700 mt-1">
-                      Bloqueado en Cliente externo porque ya existen cobros registrados.
+                      {bi(
+                        'Bloqueado en Cliente externo porque ya existen cobros registrados.',
+                        'Locked to External client because payments are already recorded.'
+                      )}
                     </p>
                   )}
                 </div>
 
-                {/* 5. Lote o Cliente */}
+                {/* 5. Lote o Cliente del catálogo */}
                 {editTipoTrabajo === 'propiedad' ? (
                   <VisualLotPicker
                     lots={lots}
@@ -3414,27 +3006,107 @@ export const MachineryView: React.FC<Props> = ({
                         if (ha !== null) setEditCantidad(ha);
                       }
                     }}
-                    label="Lote"
+                    label={bi('Lote', 'Lot')}
                     required
                   />
                 ) : (
-                  <div>
-                    <label className={FORM_LABEL_CLASS}>Cliente</label>
-                    <input
-                      type="text"
-                      value={editCliente}
-                      onChange={(e) => setEditCliente(e.target.value)}
-                      placeholder="Nombre del cliente"
-                      className={FORM_INPUT_CLASS}
+                  <div className="space-y-3">
+                    <CustomerPicker
+                      label={bi('Cliente', 'Customer')}
+                      customers={customers}
+                      selectedCustomerId={editClienteId}
+                      isPending={editClientePendiente}
+                      allowPending
+                      pendingLabel={t('customers.pendingClient')}
+                      required
+                      onSelectCustomer={(c) => {
+                        setEditClienteId(c.id);
+                        setEditCliente(c.nombre);
+                        setEditClientePendiente(false);
+                      }}
+                      onSelectPending={() => {
+                        setEditClienteId('');
+                        setEditCliente('');
+                        setEditClientePendiente(true);
+                      }}
                     />
+
+                    {/* Condiciones de cobro individuales */}
+                    <div className="rounded-xl border border-[#E2E7E3] bg-[#F8FAF8] p-3 space-y-2.5">
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-[#5E6D64]">
+                        {bi('Condiciones de cobro', 'Payment terms')}
+                      </p>
+                      <div className="grid grid-cols-2 gap-2.5 items-end">
+                        <div>
+                          <label className={FORM_LABEL_CLASS}>
+                            {bi('Plazo (días)', 'Term (days)')}
+                          </label>
+                          <input
+                            type="number"
+                            inputMode="numeric"
+                            min="0"
+                            placeholder="0"
+                            value={editPlazoDias}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setEditPlazoDias(val);
+                              if (val.trim() !== '' && !isNaN(Number(val)) && editFecha) {
+                                setEditFechaVencimiento(addDaysToIso(editFecha, Number(val)));
+                              } else {
+                                setEditFechaVencimiento('');
+                              }
+                            }}
+                            className={`${FORM_INPUT_CLASS} tabular-nums`}
+                          />
+                        </div>
+                        <div>
+                          <label className={FORM_LABEL_CLASS}>
+                            {bi('Vencimiento', 'Due date')}
+                          </label>
+                          <input
+                            type="date"
+                            value={editFechaVencimiento}
+                            onChange={(e) => setEditFechaVencimiento(e.target.value)}
+                            className={FORM_INPUT_CLASS}
+                          />
+                        </div>
+                      </div>
+                      <div className="pt-1 border-t border-[#E2E7E3] space-y-2.5">
+                        <Switch<boolean>
+                          inline
+                          label={bi('Aplicar interés por mora', 'Apply late interest')}
+                          value={editAplicarInteres}
+                          onChange={setEditAplicarInteres}
+                        />
+                        {editAplicarInteres && (
+                          <div>
+                            <label className={`${FORM_LABEL_CLASS} whitespace-nowrap truncate`}>
+                              {bi('Interés mensual (%)', 'Monthly interest (%)')}
+                              <span className="text-[#C44545] ml-0.5">*</span>
+                            </label>
+                            <input
+                              type="number"
+                              inputMode="decimal"
+                              step="any"
+                              min="0.01"
+                              placeholder="0.00"
+                              value={editTasaInteres}
+                              onChange={(e) => setEditTasaInteres(e.target.value)}
+                              className={`${FORM_INPUT_CLASS} tabular-nums`}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 )}
 
                 {/* 6. Cantidad y Unidad */}
                 <div className="grid grid-cols-2 gap-2.5 items-end">
-                  <div>
-                    <label className={FORM_LABEL_CLASS}>
-                      Cantidad <span className="text-[#C44545]">*</span>
+                  <div className="min-w-0">
+                    <label className={`${FORM_LABEL_CLASS} whitespace-nowrap truncate`}>
+                      {bi('Cantidad', 'Quantity')}
+                      <span className="text-[#C44545] ml-0.5">*</span>
                     </label>
                     <input
                       type="number"
@@ -3448,7 +3120,7 @@ export const MachineryView: React.FC<Props> = ({
                     />
                   </div>
                   <AppSelect
-                    label="Unidad"
+                    label={bi('Unidad', 'Unit')}
                     required
                     icon={<Wrench className="h-[17px] w-[17px]" />}
                     value={editUnidad}
@@ -3461,16 +3133,18 @@ export const MachineryView: React.FC<Props> = ({
                       }
                     }}
                   >
-                    <option value="hora">Horas</option>
-                    <option value="hectarea">Hectáreas</option>
+                    <option value="hora">{bi('Horas', 'Hours')}</option>
+                    <option value="hectarea">{bi('Hectáreas', 'Hectares')}</option>
                   </AppSelect>
                 </div>
 
                 {/* 7. Tarifa y Moneda */}
                 <div className="grid grid-cols-2 gap-2.5 items-end">
-                  <div>
-                    <label className={FORM_LABEL_CLASS}>
-                      Tarifa por {editUnidad === 'hectarea' ? 'ha' : 'hora'}
+                  <div className="min-w-0">
+                    <label className={`${FORM_LABEL_CLASS} whitespace-nowrap truncate`}>
+                      {editUnidad === 'hectarea'
+                        ? bi('Tarifa / ha', 'Rate / ha')
+                        : bi('Tarifa / hora', 'Rate / hour')}
                     </label>
                     <input
                       type="number"
@@ -3486,7 +3160,7 @@ export const MachineryView: React.FC<Props> = ({
                     />
                   </div>
                   <CurrencySelect
-                    label="Moneda"
+                    label={bi('Moneda', 'Currency')}
                     required
                     value={editMoneda}
                     onChange={handleEditJobCurrencyChange}
@@ -3496,7 +3170,8 @@ export const MachineryView: React.FC<Props> = ({
                 {/* Tipo de cambio editable */}
                 <div>
                   <label className={FORM_LABEL_CLASS}>
-                    Tipo de cambio (Bs/USD) <span className="text-[#C44545]">*</span>
+                    {bi('Tipo de cambio (Bs/USD)', 'Exchange rate (Bs/USD)')}{' '}
+                    <span className="text-[#C44545]">*</span>
                   </label>
                   <input
                     type="number"
@@ -3513,23 +3188,21 @@ export const MachineryView: React.FC<Props> = ({
 
                 {/* 8. Importe total */}
                 <div className="bg-[#EAF5EE] px-3.5 py-2.5 rounded-xl border border-[#BFE0CD] flex items-center justify-between">
-                  <span className="text-[13px] font-bold text-[#175B3D]">Importe total</span>
-                  <span className="text-base font-extrabold text-[#175B3D] font-mono tabular-nums">
+                  <span className="text-[13px] font-bold text-[#175B3D]">
+                    {bi('Importe total', 'Total amount')}
+                  </span>
+                  <span className="text-base font-extrabold text-[#175B3D] tabular-nums">
                     {editMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
                     {editTotalOrig.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </span>
                 </div>
 
-                {/* 9. Observación */}
-                <div>
-                  <label className={FORM_LABEL_CLASS}>Observación</label>
-                  <textarea
-                    rows={2}
-                    value={editObservacion}
-                    onChange={(e) => setEditObservacion(e.target.value)}
-                    className={FORM_TEXTAREA_CLASS}
-                  />
-                </div>
+                {/* 9. Observación con dictado por voz */}
+                <ObservationField
+                  value={editObservacion}
+                  onChange={setEditObservacion}
+                  optional={false}
+                />
 
                 {/* Botones de acción */}
                 <div className="flex items-center gap-2.5 pt-1">
@@ -3543,7 +3216,7 @@ export const MachineryView: React.FC<Props> = ({
                     }}
                     className="flex-1 h-[42px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm transition cursor-pointer"
                   >
-                    Cancelar
+                    {t('common.cancel')}
                   </button>
                   <button
                     type="submit"
@@ -3551,7 +3224,7 @@ export const MachineryView: React.FC<Props> = ({
                     className="flex-1 h-[42px] rounded-xl bg-[#24875B] hover:bg-[#1D704B] active:bg-[#175B3D] text-white font-bold text-sm transition disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
                   >
                     <Save className="h-4 w-4 shrink-0" />
-                    <span>{saving ? 'Guardando...' : 'Guardar cambios'}</span>
+                    <span>{saving ? t('common.saving') : t('common.saveChanges')}</span>
                   </button>
                 </div>
               </form>
@@ -3572,34 +3245,38 @@ export const MachineryView: React.FC<Props> = ({
               </div>
               <div>
                 <h3 className="text-base font-bold text-slate-900">
-                  ¿Eliminar este trabajo?
+                  {bi('¿Eliminar este trabajo?', 'Delete this job?')}
                 </h3>
                 <p className="text-xs text-slate-500">
-                  Esta acción es definitiva en Google Sheets
+                  {bi('Esta acción es definitiva en Google Sheets', 'This action is permanent in Google Sheets')}
                 </p>
               </div>
             </div>
 
             <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80 text-xs sm:text-sm space-y-1.5">
               <p>
-                <strong className="text-slate-700">Equipo:</strong> {jobToDelete.maquinariaNombre}
+                <strong className="text-slate-700">{bi('Equipo:', 'Equipment:')}</strong> {jobToDelete.maquinariaNombre}
               </p>
               <p>
-                <strong className="text-slate-700">Fecha:</strong> {formatDateDDMMAAAA(jobToDelete.fecha)}
+                <strong className="text-slate-700">{bi('Fecha:', 'Date:')}</strong> {formatDateDDMMAAAA(jobToDelete.fecha)}
               </p>
               <p>
-                <strong className="text-slate-700">Destino:</strong>{' '}
+                <strong className="text-slate-700">{bi('Destino:', 'Destination:')}</strong>{' '}
                 {jobToDelete.tipoTrabajo === 'propiedad'
-                  ? `Lote ${jobToDelete.loteNombre || 'Propiedad'}`
-                  : `Cliente ${jobToDelete.cliente || 'Externo'}`}
+                  ? `${bi('Lote', 'Lot')} ${jobToDelete.loteNombre || bi('Propiedad', 'Farm')}`
+                  : `${bi('Cliente', 'Client')} ${jobToDelete.cliente || bi('Externo', 'External')}`}
               </p>
               <p>
-                <strong className="text-slate-700">Trabajado:</strong> {jobToDelete.cantidad} {jobToDelete.unidad}s
+                <strong className="text-slate-700">{bi('Trabajado:', 'Worked:')}</strong> {jobToDelete.cantidad}{' '}
+                {translateUnit(jobToDelete.unidad)}
               </p>
             </div>
 
             <p className="text-xs text-amber-800 bg-amber-50 p-2.5 rounded-xl border border-amber-200/70">
-              Nota: También se anulará su ingreso contable en Maquinarias y su gasto vinculado en Propiedad si correspondía.
+              {bi(
+                'Nota: También se anulará su ingreso contable en Maquinarias y su gasto vinculado en Propiedad si correspondía.',
+                'Note: Its accounting income in Machinery and linked expense in Property (if applicable) will also be voided.'
+              )}
             </p>
 
             <div className="flex items-center gap-3 pt-1">
@@ -3609,7 +3286,7 @@ export const MachineryView: React.FC<Props> = ({
                 onClick={() => setJobToDelete(null)}
                 className="flex-1 min-h-[48px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm transition cursor-pointer"
               >
-                Cancelar
+                {t('common.cancel')}
               </button>
               <button
                 type="button"
@@ -3617,7 +3294,7 @@ export const MachineryView: React.FC<Props> = ({
                 onClick={handleConfirmDeleteJob}
                 className="flex-1 min-h-[48px] rounded-xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold text-sm transition disabled:opacity-50 cursor-pointer"
               >
-                {deletingJob ? 'Eliminando...' : 'Confirmar Eliminación'}
+                {deletingJob ? t('common.deleting') : bi('Confirmar Eliminación', 'Confirm Delete')}
               </button>
             </div>
           </div>
@@ -3636,28 +3313,28 @@ export const MachineryView: React.FC<Props> = ({
               </div>
               <div>
                 <h3 className="text-base font-bold text-slate-900">
-                  ¿Eliminar este gasto?
+                  {bi('¿Eliminar este gasto?', 'Delete this expense?')}
                 </h3>
                 <p className="text-xs text-slate-500">
-                  Esta acción es definitiva en Google Sheets
+                  {bi('Esta acción es definitiva en Google Sheets', 'This action is permanent in Google Sheets')}
                 </p>
               </div>
             </div>
 
             <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80 text-xs sm:text-sm space-y-1.5">
               <p>
-                <strong className="text-slate-700">Concepto:</strong> {expenseToDelete.itemGasto}
+                <strong className="text-slate-700">{bi('Concepto:', 'Concept:')}</strong> {expenseToDelete.itemGasto}
               </p>
               <p>
-                <strong className="text-slate-700">Fecha:</strong> {formatDateDDMMAAAA(expenseToDelete.fecha)}
+                <strong className="text-slate-700">{bi('Fecha:', 'Date:')}</strong> {formatDateDDMMAAAA(expenseToDelete.fecha)}
               </p>
               {expenseToDelete.maquinariaNombre && (
                 <p>
-                  <strong className="text-slate-700">Equipo:</strong> {expenseToDelete.maquinariaNombre}
+                  <strong className="text-slate-700">{bi('Equipo:', 'Equipment:')}</strong> {expenseToDelete.maquinariaNombre}
                 </p>
               )}
               <p>
-                <strong className="text-slate-700">Monto:</strong> {expenseToDelete.moneda}{' '}
+                <strong className="text-slate-700">{bi('Monto:', 'Amount:')}</strong> {expenseToDelete.moneda}{' '}
                 {expenseToDelete.total.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </p>
             </div>
@@ -3669,32 +3346,43 @@ export const MachineryView: React.FC<Props> = ({
                 onClick={() => setExpenseToDelete(null)}
                 className="flex-1 min-h-[44px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs transition cursor-pointer"
               >
-                Cancelar
+                {t('common.cancel')}
               </button>
               <button
                 type="button"
                 disabled={deletingExpense}
                 onClick={async () => {
                   if (!effectiveIsAdmin) {
-                    setErrorMsg('Solo el Administrador puede eliminar gastos guardados.');
+                    setErrorMsg(
+                      bi(
+                        'Solo el Administrador puede eliminar gastos guardados.',
+                        'Only the Administrator can delete saved expenses.'
+                      )
+                    );
                     setExpenseToDelete(null);
                     return;
                   }
                   setDeletingExpense(true);
                   try {
                     await deleteExpense(expenseToDelete.id);
-                    setSuccessMsg('Gasto de maquinaria eliminado exitosamente.');
+                    setSuccessMsg(
+                      bi('Gasto de maquinaria eliminado exitosamente.', 'Machinery expense deleted successfully.')
+                    );
                     setExpenseToDelete(null);
                     onRefreshData('movements');
                   } catch (err: unknown) {
-                    setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar');
+                    setErrorMsg(
+                      err instanceof Error
+                        ? translateError(err.message)
+                        : bi('Error al eliminar', 'Error deleting')
+                    );
                   } finally {
                     setDeletingExpense(false);
                   }
                 }}
                 className="flex-1 min-h-[44px] rounded-xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold text-xs transition disabled:opacity-50 cursor-pointer"
               >
-                {deletingExpense ? 'Eliminando...' : 'Eliminar Gasto'}
+                {deletingExpense ? t('common.deleting') : bi('Eliminar Gasto', 'Delete Expense')}
               </button>
             </div>
           </div>
@@ -3709,7 +3397,7 @@ export const MachineryView: React.FC<Props> = ({
           <div className="bg-white w-full max-w-lg rounded-3xl shadow-xl border border-slate-200 p-5 sm:p-6 space-y-4 my-8 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="text-base font-bold text-slate-900">
-                Editar gasto
+                {bi('Editar gasto', 'Edit expense')}
               </h3>
               <button
                 type="button"
@@ -3730,7 +3418,7 @@ export const MachineryView: React.FC<Props> = ({
 
               {/* Fecha */}
               <div>
-                <label className={FORM_LABEL_CLASS}>Fecha</label>
+                <label className={FORM_LABEL_CLASS}>{bi('Fecha', 'Date')}</label>
                 <input
                   type="date"
                   required
@@ -3742,18 +3430,18 @@ export const MachineryView: React.FC<Props> = ({
 
               {/* Máquina */}
               <VisualMachinePicker
-                label="Máquina"
-                optionalText="(opcional)"
+                label={bi('Máquina', 'Machine')}
+                optionalText={t('common.optional')}
                 machines={machines}
                 selectedMachineId={editExpMachineId}
                 onSelectMachine={(m) => setEditExpMachineId(m.id)}
                 allowNone
-                noneLabel="Gasto general (sin máquina)"
+                noneLabel={bi('Gasto general (sin máquina)', 'General expense (no machine)')}
               />
 
               {/* Concepto de gasto */}
               <VisualExpenseItemPicker
-                label="Concepto de gasto"
+                label={bi('Concepto de gasto', 'Expense concept')}
                 items={machineryExpenseItems}
                 selectedItemName={editExpItemGasto}
                 onSelectItem={(item) => {
@@ -3766,7 +3454,7 @@ export const MachineryView: React.FC<Props> = ({
               {/* Cantidad y Unidad */}
               <div className="grid grid-cols-2 gap-2.5 items-end">
                 <div>
-                  <label className={FORM_LABEL_CLASS}>Cantidad</label>
+                  <label className={FORM_LABEL_CLASS}>{bi('Cantidad', 'Quantity')}</label>
                   <input
                     type="number"
                     inputMode="decimal"
@@ -3779,12 +3467,12 @@ export const MachineryView: React.FC<Props> = ({
                   />
                 </div>
                 <div>
-                  <label className={FORM_LABEL_CLASS}>Unidad</label>
+                  <label className={FORM_LABEL_CLASS}>{bi('Unidad', 'Unit')}</label>
                   <input
                     type="text"
                     value={editExpUnidad}
                     onChange={(e) => setEditExpUnidad(e.target.value)}
-                    placeholder="litros, repuestos"
+                    placeholder={bi('litros, repuestos', 'liters, spare parts')}
                     className={FORM_INPUT_CLASS}
                   />
                 </div>
@@ -3793,7 +3481,7 @@ export const MachineryView: React.FC<Props> = ({
               {/* Precio y Moneda */}
               <div className="grid grid-cols-2 gap-2.5 items-end">
                 <div>
-                  <label className={FORM_LABEL_CLASS}>Precio unitario</label>
+                  <label className={FORM_LABEL_CLASS}>{bi('Precio unitario', 'Unit price')}</label>
                   <input
                     type="number"
                     inputMode="decimal"
@@ -3809,7 +3497,7 @@ export const MachineryView: React.FC<Props> = ({
                   />
                 </div>
                 <CurrencySelect
-                  label="Moneda"
+                  label={bi('Moneda', 'Currency')}
                   required
                   value={editExpMoneda}
                   onChange={handleEditExpCurrencyChange}
@@ -3819,7 +3507,8 @@ export const MachineryView: React.FC<Props> = ({
               {/* Tipo de cambio editable */}
               <div>
                 <label className={FORM_LABEL_CLASS}>
-                  Tipo de cambio (Bs/USD) <span className="text-[#C44545]">*</span>
+                  {bi('Tipo de cambio (Bs/USD)', 'Exchange rate (Bs/USD)')}{' '}
+                  <span className="text-[#C44545]">*</span>
                 </label>
                 <input
                   type="number"
@@ -3836,8 +3525,10 @@ export const MachineryView: React.FC<Props> = ({
 
               {/* Importe total */}
               <div className="bg-[#FCECEC] px-3.5 py-2.5 rounded-xl border border-[#F2C6C6] flex items-center justify-between">
-                <span className="text-[13px] font-bold text-[#9F2D2D]">Importe total</span>
-                <span className="text-base font-extrabold text-[#9F2D2D] font-mono tabular-nums">
+                <span className="text-[13px] font-bold text-[#9F2D2D]">
+                  {bi('Importe total', 'Total amount')}
+                </span>
+                <span className="text-base font-extrabold text-[#9F2D2D] tabular-nums">
                   {editExpMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
                   {(
                     (typeof editExpCantidad === 'number' ? editExpCantidad : 1) *
@@ -3846,16 +3537,12 @@ export const MachineryView: React.FC<Props> = ({
                 </span>
               </div>
 
-              {/* Observación */}
-              <div>
-                <label className={FORM_LABEL_CLASS}>Observación</label>
-                <textarea
-                  rows={2}
-                  value={editExpObservacion}
-                  onChange={(e) => setEditExpObservacion(e.target.value)}
-                  className={FORM_TEXTAREA_CLASS}
-                />
-              </div>
+              {/* Observación con dictado por voz */}
+              <ObservationField
+                value={editExpObservacion}
+                onChange={setEditExpObservacion}
+                optional={false}
+              />
 
               {/* Botones */}
               <div className="flex items-center gap-2.5 pt-1">
@@ -3864,7 +3551,7 @@ export const MachineryView: React.FC<Props> = ({
                   onClick={() => setEditingExpense(null)}
                   className="flex-1 h-[42px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm transition cursor-pointer"
                 >
-                  Cancelar
+                  {t('common.cancel')}
                 </button>
                 <button
                   type="submit"
@@ -3872,7 +3559,7 @@ export const MachineryView: React.FC<Props> = ({
                   className="flex-1 h-[42px] rounded-xl bg-[#24875B] hover:bg-[#1D704B] active:bg-[#175B3D] text-white font-bold text-sm transition disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
                 >
                   <Save className="h-4 w-4 shrink-0" />
-                  <span>{saving ? 'Guardando...' : 'Guardar cambios'}</span>
+                  <span>{saving ? t('common.saving') : t('common.saveChanges')}</span>
                 </button>
               </div>
             </form>
@@ -3880,243 +3567,6 @@ export const MachineryView: React.FC<Props> = ({
         </div>
       )}
 
-      {/* ============================================================ */}
-      {/* MODAL: REGISTRAR COBRO EN USD O BS (cobros.registrar)        */}
-      {/* ============================================================ */}
-      {cobroModalCuenta && (() => {
-        const importeInputNum = parseDecimalNumber(cobroImporte);
-        const tcInputNum = parseDecimalNumber(cobroTc);
-        const equivUsdPreview =
-          cobroMoneda === 'BOB'
-            ? tcInputNum > 0 && importeInputNum > 0
-              ? Number((importeInputNum / tcInputNum).toFixed(2))
-              : 0
-            : importeInputNum > 0
-            ? Number(importeInputNum.toFixed(2))
-            : 0;
-        const maxEnMonedaSeleccionada =
-          cobroMoneda === 'BOB' && tcInputNum > 0
-            ? Number((cobroModalCuenta.saldo * tcInputNum).toFixed(2))
-            : Number(cobroModalCuenta.saldo.toFixed(2));
-        const nuevoSaldoEstimado = Math.max(
-          0,
-          Number((cobroModalCuenta.saldo - equivUsdPreview).toFixed(2))
-        );
-        const excedeSaldo = equivUsdPreview > cobroModalCuenta.saldo + 0.005;
-
-        return (
-          <div className="fixed inset-0 z-50 flex flex-col justify-end sm:justify-center items-center bg-slate-900/50 backdrop-blur-xs p-0 sm:p-4 animate-fadeIn">
-            <div className="fixed inset-0" onClick={() => !savingCobro && setCobroModalCuenta(null)} />
-            <div className="relative w-full max-w-md bg-white rounded-t-3xl sm:rounded-3xl shadow-2xl border-t sm:border border-slate-200 overflow-hidden z-10 max-h-[92vh] flex flex-col">
-              <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
-                <div className="min-w-0">
-                  <h3 className="text-base font-bold text-slate-900 truncate">Registrar cobro</h3>
-                  <p className="text-xs text-slate-500 truncate mt-0.5">
-                    {cobroModalCuenta.cliente} · {formatDateDDMMAAAA(cobroModalCuenta.fecha)}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  disabled={savingCobro}
-                  onClick={() => setCobroModalCuenta(null)}
-                  className="p-2 rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-700 cursor-pointer"
-                >
-                  <X className="h-5 w-5" />
-                </button>
-              </div>
-
-              <form onSubmit={handleSubmitCobro} className="p-4 sm:p-5 overflow-y-auto space-y-3">
-                {cobroModalError && (
-                  <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-start gap-2">
-                    <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
-                    <span className="break-words">{cobroModalError}</span>
-                  </div>
-                )}
-
-                {/* Resumen de cuenta en USD */}
-                <div className="rounded-xl border border-[#E2E7E3] bg-[#F8FAF8] overflow-hidden">
-                  <div className="grid grid-cols-3 divide-x divide-[#E6EBE7] py-2 text-center">
-                    <div className="px-1.5">
-                      <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Total</span>
-                      <span className="text-xs font-bold text-[#26352D] font-mono tabular-nums">
-                        USD {cobroModalCuenta.importe.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </span>
-                    </div>
-                    <div className="px-1.5">
-                      <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Cobrado</span>
-                      <span className="text-xs font-bold text-[#24875B] font-mono tabular-nums">
-                        USD {cobroModalCuenta.cobrado.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </span>
-                    </div>
-                    <div className="px-1.5">
-                      <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Saldo</span>
-                      <span className="text-xs font-black text-amber-700 font-mono tabular-nums">
-                        USD {cobroModalCuenta.saldo.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </span>
-                    </div>
-                  </div>
-                  {cobroModalCuenta.monedaOriginalServicio === 'BOB' && cobroModalCuenta.importeOriginalServicio ? (
-                    <div className="px-3 py-1.5 border-t border-[#E6EBE7] text-[11px] text-[#5E6D64] text-center font-mono">
-                      Servicio original: Bs {cobroModalCuenta.importeOriginalServicio.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      {cobroModalCuenta.tcServicio ? ` · TC ${cobroModalCuenta.tcServicio}` : ''}
-                    </div>
-                  ) : null}
-                </div>
-
-                {/* Moneda del cobro: selector desplegable unificado con conversión automática */}
-                <CurrencySelect
-                  label="Moneda del cobro"
-                  required
-                  value={cobroMoneda}
-                  onChange={handleCobroCurrencyChange}
-                />
-
-                {/* Fecha del cobro y Tipo de cambio */}
-                <div className="grid grid-cols-2 gap-2.5 items-end">
-                  <div>
-                    <label className={FORM_LABEL_CLASS}>
-                      Fecha de cobro <span className="text-[#C44545]">*</span>
-                    </label>
-                    <input
-                      type="date"
-                      required
-                      value={cobroFecha}
-                      onChange={(e) => setCobroFecha(e.target.value)}
-                      className={FORM_INPUT_CLASS}
-                    />
-                  </div>
-                  <div>
-                    <label className={FORM_LABEL_CLASS}>
-                      Tipo de cambio <span className="text-[#C44545]">*</span>
-                    </label>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="any"
-                      min="0.01"
-                      required
-                      placeholder="6.96"
-                      value={cobroTc}
-                      onChange={(e) => setCobroTc(e.target.value)}
-                      className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
-                    />
-                  </div>
-                </div>
-
-                {/* Importe recibido en la moneda seleccionada */}
-                <div>
-                  <div className="flex items-center justify-between gap-2 mb-1">
-                    <label className="text-[13px] font-semibold text-[#26352D]">
-                      Importe recibido ({cobroMoneda === 'USD' ? 'USD' : 'Bs'}){' '}
-                      <span className="text-[#C44545]">*</span>
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const tcRef = tcInputNum > 0 ? tcInputNum : (exchangeRate?.tasaBobPerUsd || 6.96);
-                        cobroCurrencyAnchorRef.current = {
-                          baseAmount: Number(cobroModalCuenta.saldo.toFixed(2)),
-                          baseCurrency: 'USD',
-                          lastDisplayedValue: maxEnMonedaSeleccionada,
-                          lastCurrency: cobroMoneda,
-                          lastTc: tcRef,
-                        };
-                        setCobroImporte(maxEnMonedaSeleccionada.toFixed(2));
-                      }}
-                      className="text-[11px] font-semibold text-[#24875B] hover:underline cursor-pointer shrink-0"
-                    >
-                      Usar saldo ({cobroMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
-                      {maxEnMonedaSeleccionada.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
-                    </button>
-                  </div>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="any"
-                    min="0.01"
-                    required
-                    placeholder="0.00"
-                    value={cobroImporte}
-                    onChange={(e) => {
-                      cobroCurrencyAnchorRef.current = null;
-                      setCobroImporte(e.target.value);
-                    }}
-                    className={`${FORM_INPUT_CLASS} font-semibold tabular-nums ${
-                      excedeSaldo ? 'border-red-400 focus:border-red-500 text-red-700' : ''
-                    }`}
-                  />
-                </div>
-
-                {/* Conversión automática y nuevo saldo estimado en USD */}
-                <div
-                  className={`rounded-xl px-3.5 py-2.5 border space-y-1 ${
-                    excedeSaldo
-                      ? 'bg-red-50 border-red-200'
-                      : cobroMoneda === 'BOB'
-                      ? 'bg-sky-50/80 border-sky-200'
-                      : 'bg-[#EAF5EE] border-[#BFE0CD]'
-                  }`}
-                >
-                  {cobroMoneda === 'BOB' && (
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-bold text-sky-950">Equivalente en USD</span>
-                      <span className="text-sm font-extrabold text-sky-950 font-mono tabular-nums">
-                        USD {equivUsdPreview.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </span>
-                    </div>
-                  )}
-                  <div className="flex items-center justify-between text-xs">
-                    <span className={`font-semibold ${excedeSaldo ? 'text-red-800' : 'text-[#26352D]'}`}>
-                      Saldo pendiente
-                    </span>
-                    <span className={`font-mono font-bold tabular-nums ${excedeSaldo ? 'text-red-700' : 'text-[#175B3D]'}`}>
-                      USD {nuevoSaldoEstimado.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </span>
-                  </div>
-                  {excedeSaldo && (
-                    <p className="text-[11px] font-semibold text-red-700">
-                      El monto supera el saldo pendiente de USD {cobroModalCuenta.saldo.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.
-                    </p>
-                  )}
-                </div>
-
-                {/* Observación */}
-                <div>
-                  <label className={FORM_LABEL_CLASS}>
-                    Observación <span className="text-[#7A8780] font-normal">(opcional)</span>
-                  </label>
-                  <textarea
-                    rows={2}
-                    placeholder="Transferencia, pago parcial en efectivo..."
-                    value={cobroObs}
-                    onChange={(e) => setCobroObs(e.target.value)}
-                    className={FORM_TEXTAREA_CLASS}
-                  />
-                </div>
-
-                <div className="flex items-center gap-2.5 pt-1">
-                  <button
-                    type="button"
-                    disabled={savingCobro}
-                    onClick={() => setCobroModalCuenta(null)}
-                    className="flex-1 h-[42px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm transition cursor-pointer disabled:opacity-50"
-                  >
-                    Cancelar
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={savingCobro || excedeSaldo}
-                    className="flex-1 h-[42px] rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white font-bold text-sm transition disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
-                  >
-                    <Save className="h-4 w-4 shrink-0" />
-                    <span>{savingCobro ? 'Guardando...' : 'Guardar cobro'}</span>
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        );
-      })()}
     </div>
   );
 };

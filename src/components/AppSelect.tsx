@@ -1,8 +1,10 @@
 import React from 'react';
-import { ChevronDown, DollarSign } from 'lucide-react';
+import { ChevronDown } from 'lucide-react';
 import { Currency } from '../types';
+import { useI18n } from '../services/i18n';
+import { Switch } from './Switch';
 
-export const FORM_LABEL_CLASS = 'block text-[13px] font-semibold text-[#26352D] mb-1';
+export const FORM_LABEL_CLASS = 'block text-[13px] font-semibold text-[#26352D] mb-1 leading-tight';
 
 export const FORM_INPUT_CLASS =
   'w-full h-[40px] px-3 text-sm font-medium text-[#1F2D25] rounded-xl border border-[#CFD8D2] bg-white placeholder:text-[#8A9890] focus:border-[#24875B] focus:ring-2 focus:ring-[#24875B]/15 focus:outline-none transition disabled:opacity-60 disabled:cursor-not-allowed';
@@ -112,25 +114,24 @@ interface CurrencySelectProps {
 }
 
 export const CurrencySelect: React.FC<CurrencySelectProps> = ({
-  label = 'Moneda',
+  label,
   value,
   onChange,
   required = false,
   disabled = false,
   className = '',
 }) => {
+  const { t } = useI18n();
   return (
-    <AppSelect
-      label={label}
+    <Switch<Currency>
+      label={label ?? t('common.currency')}
       required={required}
       disabled={disabled}
-      icon={<DollarSign className="h-[17px] w-[17px]" />}
       value={value}
-      onChange={(e) => onChange(e.target.value as Currency)}
+      onChange={onChange}
+      leftOption={{ value: 'USD', label: 'USD' }}
+      rightOption={{ value: 'BOB', label: 'Bs' }}
       className={className}
-    >
-      <option value="USD">USD ($)</option>
-      <option value="BOB">Bs</option>
-    </AppSelect>
+    />
   );
 };

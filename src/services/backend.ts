@@ -21,12 +21,25 @@ import {
   HarvestRecord,
   ExpenseAllocationLot,
   ExpenseAllocationGroup,
+  Customer,
+  PaymentSettings,
+  HarvestSale,
+  HarvestSaleStatus,
+  ArDebt,
+  ArDebtApplicationItem,
+  ArCustomerSummary,
+  ArPaymentRecord,
+  DebitNoteLine,
+  DebitNoteRecord,
+  PaymentReceiptLine,
+  PaymentReceiptRecord,
 } from '../types';
 import {
   getCacheSessionGeneration,
   invalidateQueries,
   resetAllCache,
 } from './dataCache';
+import { computeHarvestAvailability } from './harvestAvailability';
 
 /**
  * Backend Communication Service for MAQUINARIAS Y PROPIEDAD
@@ -98,6 +111,12 @@ const CACHEABLE_READ_ACTIONS = new Set([
   'cobros.estado',
   'harvest.list',
   'harvest.pending',
+  'harvestSale.list',
+  'customer.list',
+  'paymentSettings.get',
+  'ar.summary',
+  'ar.customer',
+  'ar.documents',
   'expense.allocations',
 ]);
 
@@ -665,7 +684,18 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
       throw new BackendError(rawErrMsg, kind, { status: response.status, code });
     }
 
-    const result = data.result !== undefined ? data.result : data;
+    // Preserve sibling fields (e.g. `harvests`) when an endpoint returns an array in `result`
+    // alongside another distinct top-level collection (such as `harvestSale.list`).
+    const preserveMultiCollectionEnvelope =
+      action === 'harvestSale.list' &&
+      Array.isArray(data.result) &&
+      (Array.isArray(data.harvests) || Array.isArray(data.cosechas));
+    const result =
+      data.result !== undefined
+        ? preserveMultiCollectionEnvelope
+          ? { ...data, result: data.result }
+          : data.result
+        : data;
 
     // Warm in-memory cache on read actions (only if session generation hasn't changed)
     if (
@@ -1418,17 +1448,30 @@ export async function updateMachine(id: string, machine: Partial<Machine>): Prom
 }
 
 export async function deleteMachine(id: string): Promise<void> {
-  const payload = { id, maquinariaId: id, deleted: true };
+  const cleanId = String(id || '').trim();
+  if (!cleanId) {
+    throw new Error('Se requiere el identificador de la maquinaria para eliminarla.');
+  }
+  const payload = { id: cleanId, maquinariaId: cleanId, deleted: true };
   let res: any;
   try {
     res = await callGAS<any>('machine.delete', payload);
-  } catch {
-    res = await callGAS<any>('machine.save', payload);
+  } catch (err: any) {
+    const msg = String(err?.message || '').toLowerCase();
+    const isUnknownAction =
+      msg.includes('acción no reconocida') ||
+      msg.includes('accion no reconocida') ||
+      msg.includes('unknown action');
+    if (isUnknownAction) {
+      res = await callGAS<any>('machine.save', payload);
+    } else {
+      throw err;
+    }
   }
   if (res && res.ok === false) {
     throw new Error(res.error || 'No se pudo eliminar la maquinaria en el servidor.');
   }
-  invalidateBackendDomains(['catalog.', 'machineType.', 'asset.']);
+  invalidateBackendDomains(['catalog.', 'machineType.', 'machineJobType.', 'asset.']);
 }
 
 // -------------------------------------------------------------
@@ -1571,13 +1614,16 @@ export async function saveMachineJobType(
 }
 
 export async function deleteMachineJobType(id: string): Promise<void> {
-  const payload = { id, deleted: true, action: 'delete' };
-  try {
-    await callGAS('machineJobType.delete', payload);
-  } catch {
-    await callGAS('machineJobType.save', payload);
+  const cleanId = String(id || '').trim();
+  if (!cleanId) {
+    throw new Error('Se requiere el identificador del implemento para eliminarlo.');
   }
-  invalidateBackendDomains(['catalog.', 'machineJobType.', 'asset.']);
+  const payload = { id: cleanId, deleted: true, action: 'delete' };
+  const res = await callGAS<any>('machineJobType.delete', payload);
+  if (res && res.ok === false) {
+    throw new Error(res.error || 'No se pudo eliminar el implemento en el servidor.');
+  }
+  invalidateBackendDomains(['catalog.', 'machineJobType.', 'machineType.', 'asset.']);
 }
 
 // -------------------------------------------------------------
@@ -1761,7 +1807,25 @@ export function normalizeMachineryJob(raw: any): MachineryJob {
     trabajoTipoId: String(raw.trabajoTipoId || raw.trabajo_tipo_id || raw.tipoTrabajoId || ''),
     trabajoNombre: trabajoNombreVal,
     icono: raw.icono ? String(raw.icono).trim() : undefined,
-    cliente: String(raw.cliente || ''),
+    clienteId: raw.clienteId ? String(raw.clienteId).trim() : '',
+    cliente: String(raw.cliente || raw.clienteNombre || ''),
+    clientePendiente:
+      raw.clientePendiente === true ||
+      String(raw.clientePendiente || '').toUpperCase() === 'TRUE' ||
+      String(raw.clientePendiente || '').toUpperCase() === 'SI',
+    plazoDias:
+      raw.plazoDias !== undefined && raw.plazoDias !== '' && raw.plazoDias !== null
+        ? parseDecimalNumber(raw.plazoDias)
+        : undefined,
+    fechaVencimiento: raw.fechaVencimiento ? formatDateDDMMAAAA(raw.fechaVencimiento) : '',
+    aplicarInteres:
+      raw.aplicarInteres === true ||
+      String(raw.aplicarInteres || '').toUpperCase() === 'TRUE' ||
+      String(raw.aplicarInteres || '').toUpperCase() === 'SI',
+    tasaInteresMensual:
+      raw.tasaInteresMensual !== undefined && raw.tasaInteresMensual !== '' && raw.tasaInteresMensual !== null
+        ? parseDecimalNumber(raw.tasaInteresMensual)
+        : undefined,
     loteId: String(raw.loteId || raw.id_lote || ''),
     loteNombre: raw.loteNombre || raw.lote || '',
     cantidad: cantVal,
@@ -1822,7 +1886,24 @@ export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise
     labor: job.trabajoNombre || '',
     trabajo: job.trabajoNombre || '',
     ...(job.loteId ? { loteId: job.loteId, loteNombre: job.loteNombre || '' } : {}),
+    ...(job.clienteId ? { clienteId: job.clienteId } : {}),
     ...(job.cliente ? { cliente: job.cliente } : {}),
+    ...(job.clientePendiente !== undefined ? { clientePendiente: Boolean(job.clientePendiente) } : {}),
+    ...(job.tipoTrabajo === 'tercero'
+      ? {
+          plazoDias: job.plazoDias !== undefined ? Number(job.plazoDias) : '',
+          fechaVencimiento: job.fechaVencimiento || '',
+          aplicarInteres: Boolean(job.aplicarInteres),
+          tasaInteresMensual: job.aplicarInteres ? Number(job.tasaInteresMensual || 0) : 0,
+        }
+      : {
+          clienteId: '',
+          clientePendiente: false,
+          plazoDias: '',
+          fechaVencimiento: '',
+          aplicarInteres: false,
+          tasaInteresMensual: 0,
+        }),
     cantidad: cantNum,
     tarifa: tarifaNum,
     precio: tarifaNum,
@@ -1845,7 +1926,7 @@ export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise
   };
 
   const res = await callGAS<any>('work.save', payload);
-  invalidateBackendDomains(['work.', 'movement.', 'cobros.', 'report.']);
+  invalidateBackendDomains(['work.', 'movement.', 'cobros.', 'ar.', 'report.']);
   return {
     ...job,
     id: res?.id || res?.result?.id || `job_${Date.now()}`,
@@ -1890,9 +1971,29 @@ export async function updateMachineryJob(
       ? { trabajoNombre: job.trabajoNombre, labor: job.trabajoNombre, trabajo: job.trabajoNombre }
       : {}),
     ...(job.tipoTrabajo === 'propiedad'
-      ? { loteId: job.loteId || '', loteNombre: job.loteNombre || '', cliente: '' }
+      ? {
+          loteId: job.loteId || '',
+          loteNombre: job.loteNombre || '',
+          cliente: '',
+          clienteId: '',
+          clientePendiente: false,
+          plazoDias: '',
+          fechaVencimiento: '',
+          aplicarInteres: false,
+          tasaInteresMensual: 0,
+        }
       : job.tipoTrabajo === 'tercero'
-      ? { cliente: job.cliente || '', loteId: '', loteNombre: '' }
+      ? {
+          cliente: job.cliente || '',
+          clienteId: job.clienteId || '',
+          clientePendiente: Boolean(job.clientePendiente),
+          ...(job.plazoDias !== undefined ? { plazoDias: Number(job.plazoDias) } : {}),
+          ...(job.fechaVencimiento !== undefined ? { fechaVencimiento: job.fechaVencimiento } : {}),
+          ...(job.aplicarInteres !== undefined ? { aplicarInteres: Boolean(job.aplicarInteres) } : {}),
+          ...(job.tasaInteresMensual !== undefined ? { tasaInteresMensual: Number(job.tasaInteresMensual) } : {}),
+          loteId: '',
+          loteNombre: '',
+        }
       : {}),
     unidad: codeUnidad,
     unidadCobro: codeUnidad,
@@ -1927,7 +2028,7 @@ export async function updateMachineryJob(
     }
   }
 
-  invalidateBackendDomains(['work.', 'movement.', 'cobros.', 'report.']);
+  invalidateBackendDomains(['work.', 'movement.', 'cobros.', 'ar.', 'report.']);
   const cuentaRaw = res?.cuenta || res?.result?.cuenta;
   return {
     ...(job as any),
@@ -1945,7 +2046,7 @@ export async function deleteMachineryJob(id: string): Promise<void> {
     console.warn('[deleteMachineryJob] work.delete failed, trying deleteMachineryJob fallback:', err?.message);
     await callGAS('deleteMachineryJob', payload);
   }
-  invalidateBackendDomains(['work.', 'movement.', 'cobros.', 'report.']);
+  invalidateBackendDomains(['work.', 'movement.', 'cobros.', 'ar.', 'report.']);
 }
 
 // -------------------------------------------------------------
@@ -2157,6 +2258,7 @@ export async function getIncomes(campanaId?: string, modulo?: 'maquinarias' | 'p
         maquinariaNombre: i.maquinariaNombre || undefined,
         loteId: i.loteId || undefined,
         loteNombre: i.loteNombre || undefined,
+        itemId: i.itemId ? String(i.itemId).trim() : undefined,
         concepto: String(i.descripcion || i.concepto || i.item || 'Ingreso Cosecha'),
         icono: i.icono || i.Icono || undefined,
         cantidad: cant,
@@ -2168,7 +2270,9 @@ export async function getIncomes(campanaId?: string, modulo?: 'maquinarias' | 'p
         observacion: String(i.observaciones || i.observacion || ''),
         esTrabajoPropio: Boolean(
           i.esTrabajoPropio ||
-            (i.trabajoId && !String(i.trabajoId).trim().toUpperCase().startsWith('COSECHA:'))
+            (i.trabajoId &&
+              !String(i.trabajoId).trim().toUpperCase().startsWith('COSECHA:') &&
+              !String(i.trabajoId).trim().toUpperCase().startsWith('INTERES_COBRO:'))
         ),
         trabajoId: i.trabajoId || undefined,
         creadoEn: i.creadoEn ? String(i.creadoEn) : undefined,
@@ -3564,4 +3668,1036 @@ export function getMachineIcon(maquinaId?: string, machines: any[] = [], fallbac
   if (fallbackIcon) return fallbackIcon;
   return 'tractor';
 }
+
+// =============================================================
+// 14. CUSTOMERS CATALOG (Administración → Clientes)
+// =============================================================
+
+function parseBoolFlag(v: any, defaultVal = false): boolean {
+  if (typeof v === 'boolean') return v;
+  if (v === undefined || v === null || v === '') return defaultVal;
+  const s = String(v).trim().toUpperCase();
+  if (s === 'TRUE' || s === '1' || s === 'SI' || s === 'SÍ' || s === 'YES' || s === 'ACTIVO') return true;
+  if (s === 'FALSE' || s === '0' || s === 'NO' || s === 'INACTIVO') return false;
+  return defaultVal;
+}
+
+export function normalizeCustomer(raw: any): Customer {
+  if (!raw || typeof raw !== 'object') {
+    return { id: '', nombre: '', activo: true };
+  }
+  return {
+    id: String(raw.id || raw.ID || '').trim(),
+    nombre: String(raw.nombre || raw.Nombre || '').trim(),
+    telefono: raw.telefono !== undefined ? String(raw.telefono || '').trim() : '',
+    direccion: raw.direccion !== undefined ? String(raw.direccion || '').trim() : '',
+    activo: parseBoolFlag(raw.activo, true),
+    creadoEn: raw.creadoEn ? String(raw.creadoEn) : undefined,
+    actualizadoEn: raw.actualizadoEn ? String(raw.actualizadoEn) : undefined,
+  };
+}
+
+export async function getCustomers(useCache = true): Promise<Customer[]> {
+  try {
+    const res = await callGAS<any>('customer.list', {}, useCache);
+    const list = extractArrayFromResponse(res, ['customers', 'clientes', 'result', 'items']);
+    return list.map(normalizeCustomer).filter((c) => Boolean(c.id && c.nombre));
+  } catch (err: any) {
+    const msg = String(err?.message || '').toLowerCase();
+    if (msg.includes('acción no reconocida') || msg.includes('accion no reconocida') || msg.includes('unknown action')) {
+      return [];
+    }
+    throw err;
+  }
+}
+
+export async function createCustomer(data: {
+  nombre: string;
+  telefono?: string;
+  direccion?: string;
+}): Promise<Customer> {
+  const payload = {
+    nombre: data.nombre.trim(),
+    telefono: (data.telefono || '').trim(),
+    direccion: (data.direccion || '').trim(),
+  };
+  const res = await callGAS<any>('customer.create', payload, false);
+  invalidateBackendDomains(['customer.', 'ar.', 'work.', 'harvestSale.']);
+  const created = res?.customer || res?.cliente || res?.result || res;
+  return normalizeCustomer({ ...payload, ...(created || {}) });
+}
+
+export async function updateCustomer(
+  id: string,
+  data: { nombre: string; telefono?: string; direccion?: string; activo?: boolean }
+): Promise<Customer> {
+  const payload = {
+    id,
+    nombre: data.nombre.trim(),
+    telefono: (data.telefono || '').trim(),
+    direccion: (data.direccion || '').trim(),
+    ...(data.activo !== undefined ? { activo: data.activo } : {}),
+  };
+  const res = await callGAS<any>('customer.update', payload, false);
+  invalidateBackendDomains(['customer.', 'ar.', 'work.', 'harvestSale.']);
+  const updated = res?.customer || res?.cliente || res?.result || res;
+  return normalizeCustomer({ ...payload, ...(updated || {}) });
+}
+
+export async function toggleCustomerActive(id: string, activo: boolean): Promise<Customer> {
+  const res = await callGAS<any>('customer.toggle', { id, activo }, false);
+  invalidateBackendDomains(['customer.', 'ar.']);
+  const updated = res?.customer || res?.cliente || res?.result || res;
+  return normalizeCustomer({ id, activo, ...(updated || {}) });
+}
+
+export async function deleteCustomer(id: string): Promise<{ deleted: boolean; deactivated?: boolean; message?: string }> {
+  const res = await callGAS<any>('customer.delete', { id }, false);
+  invalidateBackendDomains(['customer.', 'ar.']);
+  return {
+    deleted: Boolean(res?.deleted ?? res?.result?.deleted ?? true),
+    deactivated: Boolean(res?.deactivated ?? res?.result?.deactivated ?? false),
+    message: res?.message || res?.result?.message,
+  };
+}
+
+// =============================================================
+// 15. PAYMENT & INTEREST SETTINGS (Administración → Configuración de cobros)
+// =============================================================
+
+export function normalizePaymentSettings(raw: any): PaymentSettings {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      plazoDiasPredeterminado: null,
+      aplicarInteresPorDefecto: false,
+      porcentajeInteresMensual: null,
+      configurado: false,
+    };
+  }
+  const src = raw.settings || raw.config || raw.result || raw;
+  const rawPlazo = src.plazoDiasPredeterminado ?? src.plazoDiasDefault ?? src.COBRO_PLAZO_DIAS;
+  const rawTasa = src.porcentajeInteresMensual ?? src.tasaInteresMensualDefault ?? src.COBRO_INTERES_MENSUAL;
+  const plazo =
+    rawPlazo !== '' && rawPlazo !== null && rawPlazo !== undefined && !isNaN(Number(rawPlazo))
+      ? Math.max(0, Math.round(Number(rawPlazo)))
+      : null;
+  const tasa =
+    rawTasa !== '' && rawTasa !== null && rawTasa !== undefined && !isNaN(Number(rawTasa))
+      ? Math.max(0, Number(rawTasa))
+      : null;
+  const aplicar = parseBoolFlag(
+    src.aplicarInteresPorDefecto ?? src.aplicarInteresDefault ?? src.COBRO_INTERES_ACTIVO,
+    false
+  );
+  const configurado =
+    parseBoolFlag(src.configurado, false) || plazo !== null || tasa !== null || aplicar;
+
+  return {
+    plazoDiasPredeterminado: plazo,
+    aplicarInteresPorDefecto: aplicar && tasa !== null && tasa > 0,
+    porcentajeInteresMensual: tasa,
+    configurado,
+    actualizadoEn: src.actualizadoEn ? String(src.actualizadoEn) : undefined,
+  };
+}
+
+export async function getPaymentSettings(useCache = true): Promise<PaymentSettings> {
+  try {
+    const res = await callGAS<any>('paymentSettings.get', {}, useCache);
+    return normalizePaymentSettings(res);
+  } catch (err: any) {
+    const msg = String(err?.message || '').toLowerCase();
+    if (msg.includes('acción no reconocida') || msg.includes('accion no reconocida') || msg.includes('unknown action')) {
+      return {
+        plazoDiasPredeterminado: null,
+        aplicarInteresPorDefecto: false,
+        porcentajeInteresMensual: null,
+        configurado: false,
+      };
+    }
+    throw err;
+  }
+}
+
+export async function savePaymentSettings(settings: {
+  plazoDiasPredeterminado: number | null;
+  aplicarInteresPorDefecto: boolean;
+  porcentajeInteresMensual: number | null;
+}): Promise<PaymentSettings> {
+  const payload = {
+    plazoDiasPredeterminado:
+      settings.plazoDiasPredeterminado === null ? '' : Math.max(0, Math.round(settings.plazoDiasPredeterminado)),
+    aplicarInteresPorDefecto: Boolean(settings.aplicarInteresPorDefecto),
+    porcentajeInteresMensual:
+      settings.porcentajeInteresMensual === null ? '' : Math.max(0, Number(settings.porcentajeInteresMensual)),
+  };
+  const res = await callGAS<any>('paymentSettings.save', payload, false);
+  invalidateBackendDomains(['paymentSettings.']);
+  return normalizePaymentSettings(res);
+}
+
+// =============================================================
+// 16. HARVEST SALES (Propiedad → Ventas de cosecha — Admin only)
+// =============================================================
+
+export function computeHarvestSaleStatus(
+  compradorPendiente: boolean,
+  precioPendiente: boolean
+): HarvestSaleStatus {
+  if (compradorPendiente && precioPendiente) return 'COMPRADOR_Y_PRECIO_PENDIENTES';
+  if (compradorPendiente) return 'COMPRADOR_PENDIENTE';
+  if (precioPendiente) return 'PRECIO_PENDIENTE';
+  return 'VENTA_COMPLETA';
+}
+
+export function normalizeHarvestSale(raw: any): HarvestSale {
+  const rawMoneda = String(raw?.moneda || 'USD').toUpperCase();
+  const moneda: Currency = rawMoneda === 'USD' || rawMoneda === 'U$D' ? 'USD' : 'BOB';
+  const cantidad = parseDecimalNumber(raw?.cantidad ?? raw?.toneladas ?? raw?.cantidadAsignada ?? 0);
+  const precioVal = parseDecimalNumber(raw?.precioUnitario ?? raw?.precioUsdTon ?? 0);
+  const precioPendiente =
+    raw?.precioPendiente !== undefined
+      ? parseBoolFlag(raw.precioPendiente, precioVal <= 0)
+      : precioVal <= 0;
+  const clienteId = String(raw?.clienteId || '').trim();
+  const clienteNombre = String(raw?.clienteNombre || raw?.comprador || raw?.cliente || '').trim();
+  const compradorPendiente =
+    raw?.compradorPendiente !== undefined
+      ? parseBoolFlag(raw.compradorPendiente, !clienteId && !clienteNombre)
+      : !clienteId && !clienteNombre;
+  const importeTotal = precioPendiente
+    ? 0
+    : parseDecimalNumber(raw?.importeTotal ?? raw?.importe ?? (precioVal > 0 ? cantidad * precioVal : 0));
+
+  const validStates: HarvestSaleStatus[] = [
+    'COMPRADOR_Y_PRECIO_PENDIENTES',
+    'COMPRADOR_PENDIENTE',
+    'PRECIO_PENDIENTE',
+    'VENTA_COMPLETA',
+  ];
+  const rawEstado = String(raw?.estado || '').toUpperCase() as HarvestSaleStatus;
+  const estado = validStates.includes(rawEstado)
+    ? rawEstado
+    : computeHarvestSaleStatus(compradorPendiente, precioPendiente);
+
+  const isComplete = !compradorPendiente && !precioPendiente;
+  const rawPlazo =
+    isComplete && raw?.plazoDias !== undefined && raw?.plazoDias !== '' && raw?.plazoDias !== null
+      ? parseDecimalNumber(raw.plazoDias)
+      : undefined;
+  const rawAplicarInteres = isComplete ? parseBoolFlag(raw?.aplicarInteres, false) : false;
+  const rawTasa = rawAplicarInteres ? parseDecimalNumber(raw?.tasaInteresMensual ?? 0) : 0;
+
+  return {
+    id: String(raw?.id || raw?.ID || '').trim(),
+    cosechaId: String(raw?.cosechaId || '').trim(),
+    fecha: formatDateDDMMAAAA(raw?.fecha || ''),
+    campanaId: String(raw?.campanaId || '').trim(),
+    campanaNombre: String(raw?.campanaNombre || raw?.campana || '').trim(),
+    loteId: String(raw?.loteId || '').trim(),
+    loteNombre: String(raw?.loteNombre || raw?.lote || '').trim(),
+    producto: String(raw?.producto || '').trim(),
+    cantidad,
+    unidad: String(raw?.unidad || 't').trim() || 't',
+    clienteId: clienteId || undefined,
+    clienteNombre: clienteNombre || undefined,
+    compradorPendiente,
+    precioUnitario: precioPendiente ? 0 : precioVal,
+    precioPendiente,
+    moneda,
+    tc: parseDecimalNumber(raw?.tc ?? raw?.tipoCambio ?? 6.96),
+    importeTotal,
+    plazoDias: rawPlazo,
+    fechaVencimiento: isComplete && raw?.fechaVencimiento ? formatDateDDMMAAAA(raw.fechaVencimiento) : '',
+    fechaCompletado: isComplete && raw?.fechaCompletado ? formatDateDDMMAAAA(raw.fechaCompletado) : '',
+    aplicarInteres: rawAplicarInteres && rawTasa > 0,
+    tasaInteresMensual: rawAplicarInteres && rawTasa > 0 ? rawTasa : 0,
+    observacion: String(raw?.observacion || '').trim(),
+    movimientoId: String(raw?.movimientoId || '').trim() || undefined,
+    estado,
+    estadoComprador: compradorPendiente ? 'PENDIENTE' : 'ASIGNADO',
+    estadoPrecio: precioPendiente ? 'PENDIENTE' : 'ASIGNADO',
+    anulada: parseBoolFlag(raw?.anulada, false),
+    creadoPor: raw?.creadoPor ? String(raw.creadoPor) : undefined,
+    creadoEn: raw?.creadoEn ? String(raw.creadoEn) : undefined,
+    actualizadoEn: raw?.actualizadoEn ? String(raw.actualizadoEn) : undefined,
+  };
+}
+
+export async function getHarvestSales(
+  options?: { campanaId?: string; includeAnuladas?: boolean },
+  useCache = true
+): Promise<{ sales: HarvestSale[]; harvests: HarvestRecord[] }> {
+  const payload: Record<string, any> = {};
+  if (options?.campanaId && options.campanaId !== 'all') payload.campanaId = options.campanaId;
+  if (options?.includeAnuladas) payload.includeAnuladas = true;
+
+  try {
+    const res = await callGAS<any>('harvestSale.list', payload, useCache);
+    const salesRaw = extractArrayFromResponse(res, ['sales', 'ventas', 'asignaciones', 'result']);
+    const hasEmbeddedHarvests =
+      Array.isArray(res?.harvests) ||
+      Array.isArray(res?.cosechas) ||
+      Array.isArray(res?.result?.harvests) ||
+      Array.isArray(res?.result?.cosechas);
+
+    let harvestsNormalized: HarvestRecord[];
+    if (hasEmbeddedHarvests) {
+      const harvestsRaw = Array.isArray(res?.harvests)
+        ? res.harvests
+        : Array.isArray(res?.cosechas)
+        ? res.cosechas
+        : Array.isArray(res?.result?.harvests)
+        ? res.result.harvests
+        : res.result.cosechas;
+      harvestsNormalized = harvestsRaw.map(normalizeHarvestRecord);
+    } else {
+      // Fallback if response omitted embedded harvests collection
+      harvestsNormalized = await getHarvests(
+        {
+          ...(options?.campanaId && options.campanaId !== 'all' ? { campanaId: options.campanaId } : {}),
+          soloPendientes: false,
+        },
+        useCache
+      );
+    }
+
+    const salesNormalized = salesRaw.map(normalizeHarvestSale).filter((s) => Boolean(s.id));
+    // Reconcile availability centrally so PropertyView and HarvestSalesView always agree
+    // (harvested tons minus all non-cancelled sales, including pending buyer/price sales).
+    const reconciledHarvests = computeHarvestAvailability(harvestsNormalized, salesNormalized);
+
+    return {
+      sales: salesNormalized,
+      harvests: reconciledHarvests,
+    };
+  } catch (err: any) {
+    const msg = String(err?.message || '').toLowerCase();
+    if (msg.includes('acción no reconocida') || msg.includes('accion no reconocida') || msg.includes('unknown action')) {
+      const fallbackHarvests = await getHarvests(
+        {
+          ...(options?.campanaId && options.campanaId !== 'all' ? { campanaId: options.campanaId } : {}),
+          soloPendientes: false,
+        },
+        useCache
+      );
+      return { sales: [], harvests: computeHarvestAvailability(fallbackHarvests) };
+    }
+    throw err;
+  }
+}
+
+export async function createHarvestSale(params: {
+  cosechaId: string;
+  fecha: string;
+  cantidad: number;
+  clienteId?: string;
+  compradorPendiente?: boolean;
+  precioPendiente?: boolean;
+  precioUnitario?: number;
+  moneda: Currency;
+  tc: number;
+  plazoDias?: number | null;
+  fechaVencimiento?: string;
+  aplicarInteres?: boolean;
+  tasaInteresMensual?: number;
+  observacion?: string;
+  idempotencyKey?: string;
+}): Promise<HarvestSale> {
+  const payload = {
+    cosechaId: params.cosechaId,
+    fecha: params.fecha,
+    cantidad: parseDecimalNumber(params.cantidad),
+    clienteId: params.compradorPendiente ? '' : (params.clienteId || '').trim(),
+    compradorPendiente: Boolean(params.compradorPendiente || !params.clienteId),
+    precioPendiente: Boolean(params.precioPendiente),
+    precioUnitario: params.precioPendiente ? 0 : parseDecimalNumber(params.precioUnitario ?? 0),
+    moneda: params.moneda === 'USD' ? 'USD' : 'BOB',
+    tc: resolveEffectiveExchangeRate(params.tc),
+    plazoDias: params.plazoDias !== undefined && params.plazoDias !== null ? Number(params.plazoDias) : '',
+    fechaVencimiento: params.fechaVencimiento || '',
+    aplicarInteres: Boolean(params.aplicarInteres),
+    tasaInteresMensual: params.aplicarInteres ? Number(params.tasaInteresMensual || 0) : 0,
+    observacion: (params.observacion || '').trim(),
+    idempotencyKey: params.idempotencyKey || `hs_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+  };
+  const res = await callGAS<any>('harvestSale.create', payload, false);
+  invalidateBackendDomains(['harvestSale.', 'harvest.', 'movement.', 'ar.', 'report.']);
+  const created = res?.sale || res?.venta || res?.result || res;
+  return normalizeHarvestSale({ ...payload, ...(created || {}) });
+}
+
+export async function updateHarvestSale(
+  id: string,
+  params: {
+    fecha?: string;
+    cantidad?: number;
+    clienteId?: string;
+    compradorPendiente?: boolean;
+    precioPendiente?: boolean;
+    precioUnitario?: number;
+    moneda?: Currency;
+    tc?: number;
+    plazoDias?: number | null;
+    fechaVencimiento?: string;
+    aplicarInteres?: boolean;
+    tasaInteresMensual?: number;
+    observacion?: string;
+  }
+): Promise<HarvestSale> {
+  const payload: Record<string, any> = { id };
+  if (params.fecha !== undefined) payload.fecha = params.fecha;
+  if (params.cantidad !== undefined) payload.cantidad = parseDecimalNumber(params.cantidad);
+  if (params.compradorPendiente !== undefined) payload.compradorPendiente = Boolean(params.compradorPendiente);
+  if (params.clienteId !== undefined) payload.clienteId = params.compradorPendiente ? '' : params.clienteId;
+  if (params.precioPendiente !== undefined) payload.precioPendiente = Boolean(params.precioPendiente);
+  if (params.precioUnitario !== undefined) {
+    payload.precioUnitario = params.precioPendiente ? 0 : parseDecimalNumber(params.precioUnitario ?? 0);
+  }
+  if (params.moneda !== undefined) payload.moneda = params.moneda === 'USD' ? 'USD' : 'BOB';
+  if (params.tc !== undefined) payload.tc = resolveEffectiveExchangeRate(params.tc);
+  if (params.plazoDias !== undefined) payload.plazoDias = params.plazoDias === null ? '' : Number(params.plazoDias);
+  if (params.fechaVencimiento !== undefined) payload.fechaVencimiento = params.fechaVencimiento;
+  if (params.aplicarInteres !== undefined) payload.aplicarInteres = Boolean(params.aplicarInteres);
+  if (params.tasaInteresMensual !== undefined) {
+    payload.tasaInteresMensual = params.aplicarInteres ? Number(params.tasaInteresMensual || 0) : 0;
+  }
+  if (params.observacion !== undefined) payload.observacion = params.observacion.trim();
+
+  const res = await callGAS<any>('harvestSale.update', payload, false);
+  invalidateBackendDomains(['harvestSale.', 'harvest.', 'movement.', 'ar.', 'report.']);
+  const updated = res?.sale || res?.venta || res?.result || res;
+  return normalizeHarvestSale({ ...payload, ...(updated || {}) });
+}
+
+export async function cancelHarvestSale(id: string): Promise<void> {
+  await callGAS<any>('harvestSale.cancel', { id }, false);
+  invalidateBackendDomains(['harvestSale.', 'harvest.', 'movement.', 'ar.', 'report.']);
+}
+
+// =============================================================
+// 17. CENTRALIZED ACCOUNTS RECEIVABLE, PAYMENTS & DOCUMENTS
+// =============================================================
+
+export function normalizeArDebtApplication(raw: any): ArDebtApplicationItem {
+  const monedaDeuda: Currency = String(raw?.monedaDeuda || 'USD').toUpperCase().includes('USD') ? 'USD' : 'BOB';
+  const monedaPago: Currency = String(raw?.monedaPago || monedaDeuda).toUpperCase().includes('USD') ? 'USD' : 'BOB';
+  const rawTipo = String(raw?.deudaTipo || raw?.tipo || 'TRABAJO').toUpperCase();
+  const deudaTipo = rawTipo === 'VENTA_COSECHA' ? 'VENTA_COSECHA' : 'TRABAJO';
+  const rawMod = String(raw?.moduloOrigen || raw?.origen || (deudaTipo === 'VENTA_COSECHA' ? 'PROPIEDAD' : 'MAQUINARIAS')).toUpperCase();
+
+  return {
+    id: String(raw?.id || '').trim(),
+    cobroId: String(raw?.cobroId || '').trim(),
+    deudaTipo,
+    deudaId: String(raw?.deudaId || '').trim(),
+    clienteId: raw?.clienteId ? String(raw.clienteId).trim() : undefined,
+    moduloOrigen: rawMod === 'PROPIEDAD' ? 'PROPIEDAD' : 'MAQUINARIAS',
+    campanaOrigenId: raw?.campanaOrigenId ? String(raw.campanaOrigenId).trim() : undefined,
+    loteOrigenId: raw?.loteOrigenId ? String(raw.loteOrigenId).trim() : undefined,
+    fechaCobro: formatDateDDMMAAAA(raw?.fechaCobro || raw?.fecha || ''),
+    monedaDeuda,
+    monedaPago,
+    tcAplicado: parseDecimalNumber(raw?.tcAplicado ?? raw?.tc ?? 6.96),
+    importeOriginalPagado: parseDecimalNumber(raw?.importeOriginalPagado ?? 0),
+    importeEquivalenteDeuda: parseDecimalNumber(raw?.importeEquivalenteDeuda ?? 0),
+    saldoCapitalAnterior: parseDecimalNumber(raw?.saldoCapitalAnterior ?? 0),
+    interesAcumuladoAnterior: parseDecimalNumber(raw?.interesAcumuladoAnterior ?? 0),
+    interesPagado: parseDecimalNumber(raw?.interesPagado ?? 0),
+    capitalPagado: parseDecimalNumber(raw?.capitalPagado ?? 0),
+    saldoCapitalRestante: parseDecimalNumber(raw?.saldoCapitalRestante ?? 0),
+    interesRestante: parseDecimalNumber(raw?.interesRestante ?? 0),
+    movimientoInteresId: raw?.movimientoInteresId ? String(raw.movimientoInteresId).trim() : undefined,
+    anulado: parseBoolFlag(raw?.anulado, false),
+    creadoPor: raw?.creadoPor ? String(raw.creadoPor) : undefined,
+    creadoEn: raw?.creadoEn ? String(raw.creadoEn) : undefined,
+  };
+}
+
+export function normalizeArDebt(raw: any): ArDebt {
+  const rawMoneda = String(raw?.moneda || 'USD').toUpperCase();
+  const moneda: Currency = rawMoneda === 'USD' || rawMoneda === 'U$D' ? 'USD' : 'BOB';
+  const rawTipo = String(raw?.deudaTipo || (String(raw?.origen || '').toUpperCase() === 'PROPIEDAD' ? 'VENTA_COSECHA' : 'TRABAJO')).toUpperCase();
+  const deudaTipo = rawTipo === 'VENTA_COSECHA' ? 'VENTA_COSECHA' : 'TRABAJO';
+  const origen: 'MAQUINARIAS' | 'PROPIEDAD' =
+    deudaTipo === 'VENTA_COSECHA' || String(raw?.origen || '').toUpperCase() === 'PROPIEDAD'
+      ? 'PROPIEDAD'
+      : 'MAQUINARIAS';
+  const rawEstado = String(raw?.estado || 'PENDIENTE').toUpperCase();
+  const estado: CobroEstado =
+    rawEstado === 'COBRADO' || rawEstado === 'PAGADA' || rawEstado === 'PAGADO'
+      ? 'COBRADO'
+      : rawEstado === 'PARCIAL'
+      ? 'PARCIAL'
+      : 'PENDIENTE';
+
+  const deudaId = String(raw?.deudaId || raw?.id || '').trim();
+  const aplicaciones = Array.isArray(raw?.aplicaciones)
+    ? raw.aplicaciones.map(normalizeArDebtApplication)
+    : [];
+
+  return {
+    id: String(raw?.id || `${deudaTipo}:${deudaId}`),
+    deudaTipo,
+    deudaId,
+    origen,
+    clienteId: raw?.clienteId ? String(raw.clienteId).trim() : undefined,
+    clienteNombre: String(raw?.clienteNombre || raw?.cliente || '').trim(),
+    clientePendiente: parseBoolFlag(raw?.clientePendiente, !String(raw?.clienteId || '').trim()),
+    fecha: formatDateDDMMAAAA(raw?.fecha || raw?.fechaOperacion || ''),
+    concepto: String(raw?.concepto || '').trim(),
+    campanaId: raw?.campanaId ? String(raw.campanaId).trim() : undefined,
+    campanaNombre: raw?.campanaNombre ? String(raw.campanaNombre).trim() : undefined,
+    loteId: raw?.loteId ? String(raw.loteId).trim() : undefined,
+    loteNombre: raw?.loteNombre ? String(raw.loteNombre).trim() : undefined,
+    maquinaId: raw?.maquinaId ? String(raw.maquinaId).trim() : undefined,
+    maquinaNombre: raw?.maquinaNombre ? String(raw.maquinaNombre).trim() : undefined,
+    cantidad: parseDecimalNumber(raw?.cantidad ?? 0),
+    unidad: String(raw?.unidad || '').trim(),
+    precioUnitario: parseDecimalNumber(raw?.precioUnitario ?? 0),
+    moneda,
+    tcHistorico: parseDecimalNumber(raw?.tcHistorico ?? raw?.tc ?? 6.96),
+    importeOriginal: parseDecimalNumber(raw?.importeOriginal ?? 0),
+    plazoDias: Math.max(0, Math.round(parseDecimalNumber(raw?.plazoDias ?? 0))),
+    fechaVencimiento: raw?.fechaVencimiento ? formatDateDDMMAAAA(raw.fechaVencimiento) : '',
+    aplicarInteres: parseBoolFlag(raw?.aplicarInteres, false),
+    tasaInteresMensual: parseDecimalNumber(raw?.tasaInteresMensual ?? 0),
+    pagosAnteriores: parseDecimalNumber(raw?.pagosAnteriores ?? 0),
+    pagosCapitalAnteriores: parseDecimalNumber(raw?.pagosCapitalAnteriores ?? 0),
+    pagosInteresAnteriores: parseDecimalNumber(raw?.pagosInteresAnteriores ?? 0),
+    capitalPendiente: parseDecimalNumber(raw?.capitalPendiente ?? 0),
+    interesAcumulado: parseDecimalNumber(raw?.interesAcumulado ?? 0),
+    totalPendiente: parseDecimalNumber(raw?.totalPendiente ?? 0),
+    diasAtraso: Math.max(0, Math.round(parseDecimalNumber(raw?.diasAtraso ?? 0))),
+    vencida: parseBoolFlag(raw?.vencida, false),
+    estado,
+    observacion: raw?.observacion ? String(raw.observacion) : undefined,
+    aplicaciones,
+  };
+}
+
+export function normalizeArCustomerSummary(raw: any): ArCustomerSummary {
+  const usdRaw = raw?.usd || {};
+  const bobRaw = raw?.bob || {};
+  return {
+    clienteId: String(raw?.clienteId || raw?.id || '').trim(),
+    clienteNombre: String(raw?.clienteNombre || raw?.nombre || '').trim(),
+    telefono: raw?.telefono ? String(raw.telefono).trim() : undefined,
+    direccion: raw?.direccion ? String(raw.direccion).trim() : undefined,
+    activo: parseBoolFlag(raw?.activo, true),
+    registrosPendientes: Math.round(parseDecimalNumber(raw?.registrosPendientes ?? 0)),
+    registrosVencidos: Math.round(parseDecimalNumber(raw?.registrosVencidos ?? 0)),
+    usd: {
+      capitalPendiente: parseDecimalNumber(usdRaw.capitalPendiente ?? raw?.capitalUsd ?? 0),
+      interesAcumulado: parseDecimalNumber(usdRaw.interesAcumulado ?? raw?.interesUsd ?? 0),
+      totalPendiente: parseDecimalNumber(usdRaw.totalPendiente ?? raw?.totalUsd ?? 0),
+    },
+    bob: {
+      capitalPendiente: parseDecimalNumber(bobRaw.capitalPendiente ?? raw?.capitalBob ?? 0),
+      interesAcumulado: parseDecimalNumber(bobRaw.interesAcumulado ?? raw?.interesBob ?? 0),
+      totalPendiente: parseDecimalNumber(bobRaw.totalPendiente ?? raw?.totalBob ?? 0),
+    },
+    deudas: Array.isArray(raw?.deudas) ? raw.deudas.map(normalizeArDebt) : [],
+  };
+}
+
+export function normalizeArPaymentRecord(raw: any): ArPaymentRecord {
+  const rawMon = String(raw?.monedaPago || raw?.moneda || 'USD').toUpperCase();
+  const monedaPago: Currency = rawMon === 'USD' || rawMon === 'U$D' ? 'USD' : 'BOB';
+  const id = String(raw?.id || raw?.cobroId || '').trim();
+  return {
+    id,
+    cobroId: String(raw?.cobroId || id),
+    fecha: formatDateDDMMAAAA(raw?.fecha || ''),
+    clienteId: raw?.clienteId ? String(raw.clienteId).trim() : undefined,
+    clienteNombre: String(raw?.clienteNombre || raw?.cliente || '').trim(),
+    monedaPago,
+    importeOriginalPagado: parseDecimalNumber(raw?.importeOriginalPagado ?? raw?.montoPago ?? raw?.monto ?? 0),
+    tcAplicado: parseDecimalNumber(raw?.tcAplicado ?? raw?.tc ?? 6.96),
+    tipoPago: String(raw?.tipoPago || 'PARCIAL').toUpperCase() === 'TOTAL' ? 'TOTAL' : 'PARCIAL',
+    capitalTotalAplicado: parseDecimalNumber(raw?.capitalTotalAplicado ?? 0),
+    interesTotalAplicado: parseDecimalNumber(raw?.interesTotalAplicado ?? 0),
+    monedaTotalesAplicados: String(raw?.monedaTotalesAplicados || monedaPago).toUpperCase().includes('USD') ? 'USD' : 'BOB',
+    capitalAplicadoUsd: parseDecimalNumber(raw?.capitalAplicadoUsd ?? 0),
+    interesAplicadoUsd: parseDecimalNumber(raw?.interesAplicadoUsd ?? 0),
+    capitalAplicadoBob: parseDecimalNumber(raw?.capitalAplicadoBob ?? 0),
+    interesAplicadoBob: parseDecimalNumber(raw?.interesAplicadoBob ?? 0),
+    notaCobroNumero: raw?.notaCobroNumero ? String(raw.notaCobroNumero).trim() : undefined,
+    observacion: raw?.observacion ? String(raw.observacion).trim() : undefined,
+    anulado: parseBoolFlag(raw?.anulado, false),
+    creadoPor: raw?.creadoPor ? String(raw.creadoPor) : undefined,
+    creadoEn: raw?.creadoEn ? String(raw.creadoEn) : undefined,
+    aplicaciones: Array.isArray(raw?.aplicaciones)
+      ? raw.aplicaciones.map(normalizeArDebtApplication)
+      : [],
+  };
+}
+
+function roundMoney2(val: number): number {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+function hasDefinedValue(val: any): boolean {
+  return val !== undefined && val !== null && String(val).trim() !== '';
+}
+
+export function normalizeDebitNoteLine(raw: any): DebitNoteLine {
+  const monedaRaw = String(raw?.moneda || raw?.monedaDeuda || 'USD').trim().toUpperCase();
+  const moneda: Currency = monedaRaw === 'BOB' || monedaRaw === 'BS' || monedaRaw === 'BS.' ? 'BOB' : 'USD';
+  const deudaTipo =
+    String(raw?.deudaTipo || 'TRABAJO').trim().toUpperCase() === 'VENTA_COSECHA'
+      ? 'VENTA_COSECHA'
+      : 'TRABAJO';
+  const origenRaw = String(raw?.origen || (deudaTipo === 'VENTA_COSECHA' ? 'PROPIEDAD' : 'MAQUINARIAS'))
+    .trim()
+    .toUpperCase();
+  const origen: 'MAQUINARIAS' | 'PROPIEDAD' = origenRaw === 'PROPIEDAD' ? 'PROPIEDAD' : 'MAQUINARIAS';
+
+  // Preserve original operation date; never substitute today's date if absent
+  const rawOpDate = raw?.fecha ?? raw?.fechaOperacion ?? raw?.fechaTrabajo ?? raw?.fechaDeuda ?? '';
+  const fecha = hasDefinedValue(rawOpDate) ? formatDateDDMMAAAA(rawOpDate) : '';
+
+  const rawDueDate = raw?.fechaVencimiento ?? '';
+  const fechaVencimiento = hasDefinedValue(rawDueDate) ? formatDateDDMMAAAA(rawDueDate) : undefined;
+
+  // Map real pending principal (GAS writes `capitalPendiente`; frontend uses `saldoPendiente`).
+  // Never substitute cantidad * precioUnitario (would ignore partial payments).
+  const rawPrincipal = hasDefinedValue(raw?.saldoPendiente)
+    ? raw.saldoPendiente
+    : hasDefinedValue(raw?.capitalPendiente)
+    ? raw.capitalPendiente
+    : 0;
+  const saldoPendiente = roundMoney2(parseDecimalNumber(rawPrincipal));
+
+  // Map real accrued interest (GAS writes `interesAcumulado`; frontend uses `interes`).
+  const rawInterest = hasDefinedValue(raw?.interes)
+    ? raw.interes
+    : hasDefinedValue(raw?.interesAcumulado)
+    ? raw.interesAcumulado
+    : 0;
+  const interes = roundMoney2(parseDecimalNumber(rawInterest));
+
+  // Map real total receivable (GAS writes `totalPendiente`; frontend uses `totalPorCobrar`).
+  const hasExplicitTotal = hasDefinedValue(raw?.totalPorCobrar) || hasDefinedValue(raw?.totalPendiente);
+  const totalPorCobrar = hasExplicitTotal
+    ? roundMoney2(parseDecimalNumber(hasDefinedValue(raw?.totalPorCobrar) ? raw.totalPorCobrar : raw.totalPendiente))
+    : roundMoney2(saldoPendiente + interes);
+
+  const importeOriginal = hasDefinedValue(raw?.importeOriginal)
+    ? roundMoney2(parseDecimalNumber(raw.importeOriginal))
+    : undefined;
+  const pagosAnteriores = hasDefinedValue(raw?.pagosAnteriores)
+    ? roundMoney2(parseDecimalNumber(raw.pagosAnteriores))
+    : undefined;
+
+  return {
+    deudaTipo,
+    deudaId: String(raw?.deudaId || '').trim(),
+    fecha,
+    concepto: String(raw?.concepto || '').trim(),
+    origen,
+    campanaNombre: raw?.campanaNombre ? String(raw.campanaNombre).trim() : undefined,
+    loteNombre: raw?.loteNombre ? String(raw.loteNombre).trim() : undefined,
+    maquinaNombre: raw?.maquinaNombre ? String(raw.maquinaNombre).trim() : undefined,
+    cantidad: parseDecimalNumber(raw?.cantidad ?? 0),
+    unidad: String(raw?.unidad || (deudaTipo === 'VENTA_COSECHA' ? 't' : 'ha')).trim(),
+    precioUnitario: roundMoney2(parseDecimalNumber(raw?.precioUnitario ?? 0)),
+    fechaVencimiento,
+    diasAtraso: Math.max(0, Math.round(parseDecimalNumber(raw?.diasAtraso ?? 0))),
+    moneda,
+    importeOriginal,
+    pagosAnteriores,
+    saldoPendiente,
+    interes,
+    totalPorCobrar,
+  };
+}
+
+export function normalizePaymentReceiptLine(
+  raw: any,
+  receiptCtx?: {
+    monedaPago: Currency;
+    tcAplicado: number;
+    totalOriginalPagado: number;
+    itemCount: number;
+  }
+): PaymentReceiptLine {
+  const monedaDeudaRaw = String(raw?.monedaDeuda || raw?.moneda || 'USD').trim().toUpperCase();
+  const monedaDeuda: Currency =
+    monedaDeudaRaw === 'BOB' || monedaDeudaRaw === 'BS' || monedaDeudaRaw === 'BS.' ? 'BOB' : 'USD';
+
+  const monedaPagoRaw = String(raw?.monedaPago || receiptCtx?.monedaPago || monedaDeuda).trim().toUpperCase();
+  const monedaPago: Currency =
+    monedaPagoRaw === 'BOB' || monedaPagoRaw === 'BS' || monedaPagoRaw === 'BS.' ? 'BOB' : 'USD';
+
+  const deudaTipo =
+    String(raw?.deudaTipo || 'TRABAJO').trim().toUpperCase() === 'VENTA_COSECHA'
+      ? 'VENTA_COSECHA'
+      : 'TRABAJO';
+  const origenRaw = String(raw?.origen || (deudaTipo === 'VENTA_COSECHA' ? 'PROPIEDAD' : 'MAQUINARIAS'))
+    .trim()
+    .toUpperCase();
+  const origen: 'MAQUINARIAS' | 'PROPIEDAD' = origenRaw === 'PROPIEDAD' ? 'PROPIEDAD' : 'MAQUINARIAS';
+
+  const rawDebtDate = raw?.fechaDeuda ?? raw?.fechaOperacion ?? raw?.fecha ?? '';
+  const fechaDeuda = hasDefinedValue(rawDebtDate) ? formatDateDDMMAAAA(rawDebtDate) : undefined;
+
+  const importeAnterior = roundMoney2(
+    parseDecimalNumber(
+      hasDefinedValue(raw?.importeAnterior)
+        ? raw.importeAnterior
+        : hasDefinedValue(raw?.saldoAnterior)
+        ? raw.saldoAnterior
+        : 0
+    )
+  );
+  const capitalPagado = roundMoney2(parseDecimalNumber(raw?.capitalPagado ?? 0));
+  const interesPagado = roundMoney2(parseDecimalNumber(raw?.interesPagado ?? 0));
+
+  const hasExplicitTotal =
+    hasDefinedValue(raw?.totalPagado) ||
+    hasDefinedValue(raw?.importeAplicadoDeuda) ||
+    hasDefinedValue(raw?.equivalenteDescontado);
+  const totalPagado = hasExplicitTotal
+    ? roundMoney2(
+        parseDecimalNumber(
+          hasDefinedValue(raw?.totalPagado)
+            ? raw.totalPagado
+            : hasDefinedValue(raw?.importeAplicadoDeuda)
+            ? raw.importeAplicadoDeuda
+            : raw.equivalenteDescontado
+        )
+      )
+    : roundMoney2(capitalPagado + interesPagado);
+
+  const equivalenteDescontado = roundMoney2(
+    parseDecimalNumber(
+      hasDefinedValue(raw?.equivalenteDescontado)
+        ? raw.equivalenteDescontado
+        : hasDefinedValue(raw?.importeAplicadoDeuda)
+        ? raw.importeAplicadoDeuda
+        : totalPagado
+    )
+  );
+
+  const saldoRestante = roundMoney2(parseDecimalNumber(raw?.saldoRestante ?? 0));
+  const tcAplicado = resolveEffectiveExchangeRate(raw?.tcAplicado ?? receiptCtx?.tcAplicado ?? 6.96);
+
+  let importeOriginalPagado: number;
+  if (hasDefinedValue(raw?.importeOriginalPagado)) {
+    importeOriginalPagado = roundMoney2(parseDecimalNumber(raw.importeOriginalPagado));
+  } else if (receiptCtx && receiptCtx.itemCount === 1 && receiptCtx.totalOriginalPagado > 0) {
+    importeOriginalPagado = roundMoney2(receiptCtx.totalOriginalPagado);
+  } else if (monedaPago === monedaDeuda) {
+    importeOriginalPagado = totalPagado;
+  } else if (monedaDeuda === 'USD' && monedaPago === 'BOB') {
+    importeOriginalPagado = roundMoney2(totalPagado * tcAplicado);
+  } else {
+    importeOriginalPagado = tcAplicado > 0 ? roundMoney2(totalPagado / tcAplicado) : totalPagado;
+  }
+
+  return {
+    deudaTipo,
+    deudaId: String(raw?.deudaId || '').trim(),
+    fechaDeuda,
+    concepto: String(raw?.concepto || '').trim(),
+    origen,
+    campanaNombre: raw?.campanaNombre ? String(raw.campanaNombre).trim() : undefined,
+    loteNombre: raw?.loteNombre ? String(raw.loteNombre).trim() : undefined,
+    maquinaNombre: raw?.maquinaNombre ? String(raw.maquinaNombre).trim() : undefined,
+    monedaDeuda,
+    importeAnterior,
+    capitalPagado,
+    interesPagado,
+    totalPagado,
+    saldoRestante,
+    monedaPago,
+    importeOriginalPagado,
+    tcAplicado,
+    equivalenteDescontado,
+  };
+}
+
+export function normalizeDebitNoteRecord(raw: any): DebitNoteRecord {
+  let rawItems = Array.isArray(raw?.items) ? raw.items : [];
+  if (!rawItems.length && typeof raw?.snapshotJson === 'string' && raw.snapshotJson.trim()) {
+    try {
+      const parsed = JSON.parse(raw.snapshotJson);
+      if (Array.isArray(parsed?.items)) rawItems = parsed.items;
+      else if (Array.isArray(parsed)) rawItems = parsed;
+    } catch {
+      // ignore invalid JSON
+    }
+  }
+  const items: DebitNoteLine[] = rawItems.map(normalizeDebitNoteLine);
+  const sumUsd = roundMoney2(
+    items.filter((i) => i.moneda === 'USD').reduce((acc, i) => acc + i.totalPorCobrar, 0)
+  );
+  const sumBob = roundMoney2(
+    items.filter((i) => i.moneda === 'BOB').reduce((acc, i) => acc + i.totalPorCobrar, 0)
+  );
+  const totalUsd = hasDefinedValue(raw?.totalUsd)
+    ? roundMoney2(parseDecimalNumber(raw.totalUsd))
+    : sumUsd;
+  const totalBob = hasDefinedValue(raw?.totalBob)
+    ? roundMoney2(parseDecimalNumber(raw.totalBob))
+    : sumBob;
+
+  return {
+    id: String(raw?.id || '').trim(),
+    numero: String(raw?.numero || '').trim(),
+    fecha: formatDateDDMMAAAA(raw?.fecha || raw?.fechaEmision || ''),
+    clienteId: String(raw?.clienteId || '').trim(),
+    clienteNombre: String(raw?.clienteNombre || '').trim(),
+    clienteTelefono: raw?.clienteTelefono ? String(raw.clienteTelefono).trim() : undefined,
+    clienteDireccion: raw?.clienteDireccion ? String(raw.clienteDireccion).trim() : undefined,
+    totalUsd,
+    totalBob,
+    items,
+    observacion: raw?.observacion ? String(raw.observacion).trim() : undefined,
+    creadoPor: raw?.creadoPor ? String(raw.creadoPor) : undefined,
+    creadoEn: raw?.creadoEn ? String(raw.creadoEn) : undefined,
+  };
+}
+
+export function normalizePaymentReceiptRecord(raw: any): PaymentReceiptRecord {
+  let rawItems = Array.isArray(raw?.items) ? raw.items : [];
+  if (!rawItems.length && typeof raw?.snapshotJson === 'string' && raw.snapshotJson.trim()) {
+    try {
+      const parsed = JSON.parse(raw.snapshotJson);
+      if (Array.isArray(parsed?.items)) rawItems = parsed.items;
+      else if (Array.isArray(parsed)) rawItems = parsed;
+    } catch {
+      // ignore
+    }
+  }
+  const rawMon = String(raw?.monedaPago || 'USD').trim().toUpperCase();
+  const monedaPago: Currency = rawMon === 'BOB' || rawMon === 'BS' || rawMon === 'BS.' ? 'BOB' : 'USD';
+  const importeOriginalPagado = roundMoney2(
+    parseDecimalNumber(raw?.importeOriginalPagado ?? raw?.montoRecibido ?? 0)
+  );
+  const tcAplicado = resolveEffectiveExchangeRate(raw?.tcAplicado ?? raw?.tc ?? 6.96);
+
+  const items: PaymentReceiptLine[] = rawItems.map((it: any) =>
+    normalizePaymentReceiptLine(it, {
+      monedaPago,
+      tcAplicado,
+      totalOriginalPagado: importeOriginalPagado,
+      itemCount: rawItems.length,
+    })
+  );
+
+  const sumUsd = roundMoney2(
+    items.filter((i) => i.monedaDeuda === 'USD').reduce((acc, i) => acc + i.totalPagado, 0)
+  );
+  const sumBob = roundMoney2(
+    items.filter((i) => i.monedaDeuda === 'BOB').reduce((acc, i) => acc + i.totalPagado, 0)
+  );
+  const totalAplicadoUsd = hasDefinedValue(raw?.totalAplicadoUsd)
+    ? roundMoney2(parseDecimalNumber(raw.totalAplicadoUsd))
+    : sumUsd;
+  const totalAplicadoBob = hasDefinedValue(raw?.totalAplicadoBob)
+    ? roundMoney2(parseDecimalNumber(raw.totalAplicadoBob))
+    : sumBob;
+
+  return {
+    id: String(raw?.id || '').trim(),
+    numero: String(raw?.numero || '').trim(),
+    cobroId: String(raw?.cobroId || '').trim(),
+    fecha: formatDateDDMMAAAA(raw?.fecha || raw?.fechaEmision || ''),
+    clienteId: String(raw?.clienteId || '').trim(),
+    clienteNombre: String(raw?.clienteNombre || '').trim(),
+    clienteTelefono: raw?.clienteTelefono ? String(raw.clienteTelefono).trim() : undefined,
+    clienteDireccion: raw?.clienteDireccion ? String(raw.clienteDireccion).trim() : undefined,
+    tipoPago: String(raw?.tipoPago || 'PARCIAL').toUpperCase() === 'TOTAL' ? 'TOTAL' : 'PARCIAL',
+    monedaPago,
+    importeOriginalPagado,
+    tcAplicado,
+    totalAplicadoUsd,
+    totalAplicadoBob,
+    items,
+    observacion: raw?.observacion ? String(raw.observacion).trim() : undefined,
+    anulado: parseBoolFlag(raw?.anulado, false),
+    creadoPor: raw?.creadoPor ? String(raw.creadoPor) : undefined,
+    creadoEn: raw?.creadoEn ? String(raw.creadoEn) : undefined,
+  };
+}
+
+export interface ArSummaryResponse {
+  customers: ArCustomerSummary[];
+  unassignedDebts: ArDebt[];
+  totals: {
+    capitalUsd: number;
+    interesUsd: number;
+    totalUsd: number;
+    capitalBob: number;
+    interesBob: number;
+    totalBob: number;
+    unassignedUsd: number;
+    unassignedBob: number;
+    unassignedCount: number;
+  };
+}
+
+export async function getArSummary(useCache = true): Promise<ArSummaryResponse> {
+  const res = await callGAS<any>('ar.summary', {}, useCache);
+  const src = res?.result || res || {};
+  const customersRaw = Array.isArray(src.customers)
+    ? src.customers
+    : Array.isArray(src.clientes)
+    ? src.clientes
+    : [];
+  const unassignedRaw = Array.isArray(src.unassignedDebts)
+    ? src.unassignedDebts
+    : Array.isArray(src.deudasSinCliente)
+    ? src.deudasSinCliente
+    : [];
+  const totalsRaw = src.totals || src.totales || {};
+
+  return {
+    customers: customersRaw.map(normalizeArCustomerSummary),
+    unassignedDebts: unassignedRaw.map(normalizeArDebt),
+    totals: {
+      capitalUsd: parseDecimalNumber(totalsRaw.capitalUsd ?? 0),
+      interesUsd: parseDecimalNumber(totalsRaw.interesUsd ?? 0),
+      totalUsd: parseDecimalNumber(totalsRaw.totalUsd ?? 0),
+      capitalBob: parseDecimalNumber(totalsRaw.capitalBob ?? 0),
+      interesBob: parseDecimalNumber(totalsRaw.interesBob ?? 0),
+      totalBob: parseDecimalNumber(totalsRaw.totalBob ?? 0),
+      unassignedUsd: parseDecimalNumber(totalsRaw.unassignedUsd ?? 0),
+      unassignedBob: parseDecimalNumber(totalsRaw.unassignedBob ?? 0),
+      unassignedCount: Math.round(parseDecimalNumber(totalsRaw.unassignedCount ?? unassignedRaw.length)),
+    },
+  };
+}
+
+export interface ArCustomerDetailResponse {
+  customer: Customer;
+  summary: ArCustomerSummary;
+  debts: ArDebt[];
+  payments: ArPaymentRecord[];
+  debitNotes: DebitNoteRecord[];
+  paymentReceipts: PaymentReceiptRecord[];
+}
+
+export async function getArCustomerDetail(
+  clienteId: string,
+  useCache = true
+): Promise<ArCustomerDetailResponse> {
+  const res = await callGAS<any>('ar.customer', { clienteId }, useCache);
+  const src = res?.result || res || {};
+  return {
+    customer: normalizeCustomer(src.customer || src.cliente || { id: clienteId }),
+    summary: normalizeArCustomerSummary(src.summary || src.resumen || { clienteId }),
+    debts: (Array.isArray(src.debts) ? src.debts : Array.isArray(src.deudas) ? src.deudas : []).map(normalizeArDebt),
+    payments: (Array.isArray(src.payments) ? src.payments : Array.isArray(src.cobros) ? src.cobros : []).map(
+      normalizeArPaymentRecord
+    ),
+    debitNotes: (Array.isArray(src.debitNotes) ? src.debitNotes : Array.isArray(src.notasDebito) ? src.notasDebito : []).map(
+      normalizeDebitNoteRecord
+    ),
+    paymentReceipts: (
+      Array.isArray(src.paymentReceipts)
+        ? src.paymentReceipts
+        : Array.isArray(src.notasCobro)
+        ? src.notasCobro
+        : []
+    ).map(normalizePaymentReceiptRecord),
+  };
+}
+
+export async function assignDebtCustomer(params: {
+  deudaTipo: 'TRABAJO' | 'VENTA_COSECHA';
+  deudaId: string;
+  clienteId: string;
+}): Promise<void> {
+  await callGAS<any>('ar.debt.assignCustomer', params, false);
+  invalidateBackendDomains(['ar.', 'work.', 'harvestSale.', 'customer.']);
+}
+
+export async function registerArPayment(params: {
+  clienteId: string;
+  fecha: string;
+  monedaPago: Currency;
+  tcAplicado: number;
+  observacion?: string;
+  idempotencyKey?: string;
+  aplicaciones: Array<{
+    deudaTipo: 'TRABAJO' | 'VENTA_COSECHA';
+    deudaId: string;
+    importeOriginalPagado: number;
+  }>;
+}): Promise<{
+  payment: ArPaymentRecord;
+  receipt: PaymentReceiptRecord | null;
+}> {
+  const payload = {
+    clienteId: params.clienteId,
+    fecha: params.fecha,
+    monedaPago: params.monedaPago === 'USD' ? 'USD' : 'BOB',
+    tcAplicado: resolveEffectiveExchangeRate(params.tcAplicado),
+    observacion: (params.observacion || '').trim(),
+    idempotencyKey: params.idempotencyKey || `pay_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    aplicaciones: params.aplicaciones.map((a) => ({
+      deudaTipo: a.deudaTipo,
+      deudaId: a.deudaId,
+      importeOriginalPagado: parseDecimalNumber(a.importeOriginalPagado),
+    })),
+  };
+  const res = await callGAS<any>('ar.payment.register', payload, false);
+  invalidateBackendDomains(['ar.', 'cobros.', 'movement.', 'report.', 'harvestSale.', 'work.']);
+  const src = res?.result || res || {};
+  return {
+    payment: normalizeArPaymentRecord(src.payment || src.cobro || {}),
+    receipt: src.receipt || src.notaCobro ? normalizePaymentReceiptRecord(src.receipt || src.notaCobro) : null,
+  };
+}
+
+export async function cancelArPayment(cobroId: string): Promise<void> {
+  await callGAS<any>('ar.payment.cancel', { cobroId }, false);
+  invalidateBackendDomains(['ar.', 'cobros.', 'movement.', 'report.', 'harvestSale.', 'work.']);
+}
+
+export async function createDebitNote(params: {
+  clienteId: string;
+  fecha: string;
+  deudas: Array<{ deudaTipo: 'TRABAJO' | 'VENTA_COSECHA'; deudaId: string }>;
+  observacion?: string;
+  idempotencyKey?: string;
+}): Promise<DebitNoteRecord> {
+  const payload = {
+    clienteId: params.clienteId,
+    fecha: params.fecha,
+    deudas: params.deudas,
+    observacion: (params.observacion || '').trim(),
+    idempotencyKey: params.idempotencyKey || `nd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+  };
+  const res = await callGAS<any>('ar.debitNote.create', payload, false);
+  invalidateBackendDomains(['ar.']);
+  const src = res?.debitNote || res?.notaDebito || res?.result || res;
+  return normalizeDebitNoteRecord(src);
+}
+
+export async function getArDocuments(
+  clienteId?: string,
+  useCache = true
+): Promise<{ debitNotes: DebitNoteRecord[]; paymentReceipts: PaymentReceiptRecord[] }> {
+  const res = await callGAS<any>('ar.documents', clienteId ? { clienteId } : {}, useCache);
+  const src = res?.result || res || {};
+  return {
+    debitNotes: (Array.isArray(src.debitNotes) ? src.debitNotes : Array.isArray(src.notasDebito) ? src.notasDebito : []).map(
+      normalizeDebitNoteRecord
+    ),
+    paymentReceipts: (
+      Array.isArray(src.paymentReceipts)
+        ? src.paymentReceipts
+        : Array.isArray(src.notasCobro)
+        ? src.notasCobro
+        : []
+    ).map(normalizePaymentReceiptRecord),
+  };
+}
+
 

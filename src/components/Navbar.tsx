@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { RefreshCw, User, LogOut, ShieldOff } from 'lucide-react';
 import { Campaign, Currency, ExchangeRateConfig, UserSession } from '../types';
 import { hasAdminAuthorization, revokeAdminAuthorization } from '../services/backend';
+import { useI18n } from '../services/i18n';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface Props {
@@ -28,6 +29,7 @@ export const Navbar: React.FC<Props> = ({
   onLogout,
   onAdminAuthorizationRevoked,
 }) => {
+  const { t, bi } = useI18n();
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [showRevokeAdminConfirm, setShowRevokeAdminConfirm] = useState(false);
@@ -92,7 +94,7 @@ export const Navbar: React.FC<Props> = ({
           {activeCampaign && (
             <span
               className="text-xs sm:text-sm font-medium text-slate-500 whitespace-nowrap truncate max-w-[120px] sm:max-w-[200px]"
-              title={`Campaña activa: ${activeCampaign.nombre}`}
+              title={`${bi('Campaña activa', 'Active campaign')}: ${activeCampaign.nombre}`}
             >
               · {activeCampaign.nombre}
             </span>
@@ -106,28 +108,28 @@ export const Navbar: React.FC<Props> = ({
             onClick={onRefresh}
             disabled={isRefreshing}
             className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2.5 sm:px-3.5 text-[#26352D] hover:bg-slate-50 transition-colors active:scale-95 disabled:opacity-50 cursor-pointer shrink-0 min-h-[44px] min-w-[44px]"
-            title="Actualizar datos desde Google Sheets"
-            aria-label="Actualizar datos"
+            title={t('navbar.refreshTitle')}
+            aria-label={bi('Actualizar datos', 'Refresh data')}
           >
             <RefreshCw className={`h-4.5 w-4.5 ${isRefreshing ? 'animate-spin text-[#24875B]' : 'text-slate-600'}`} />
             <span className="hidden sm:inline text-sm font-semibold whitespace-nowrap">
-              {isRefreshing ? 'Actualizando' : 'Actualizar'}
+              {isRefreshing ? bi('Actualizando', 'Refreshing') : bi('Actualizar', 'Refresh')}
             </span>
           </button>
 
-          {/* User Session Menu (Cuenta y Seguridad del dispositivo) */}
+          {/* User Session Menu */}
           <div className="relative shrink-0" ref={menuRef}>
             <button
               type="button"
               onClick={() => setIsUserMenuOpen((prev) => !prev)}
               className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2.5 sm:px-3.5 text-[#26352D] hover:bg-slate-50 transition-colors active:scale-95 cursor-pointer min-h-[44px] min-w-[44px]"
-              title="Opciones de cuenta y seguridad"
-              aria-label="Cuenta"
+              title={t('navbar.accountMenu')}
+              aria-label={bi('Cuenta', 'Account')}
               aria-expanded={isUserMenuOpen}
             >
               <User className="h-4.5 w-4.5 text-[#26352D] shrink-0" />
               <span className="hidden sm:inline text-sm font-semibold whitespace-nowrap">
-                Cuenta
+                {bi('Cuenta', 'Account')}
               </span>
             </button>
 
@@ -139,10 +141,12 @@ export const Navbar: React.FC<Props> = ({
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-bold text-[#26352D] truncate">
-                      {session?.usuario || 'Usuario'}
+                      {session?.usuario || bi('Usuario', 'User')}
                     </p>
                     <p className="text-xs text-slate-500">
-                      {isDeviceAdminAuthorized ? 'Dispositivo con acceso Admin' : 'Sesión operativa'}
+                      {isDeviceAdminAuthorized
+                        ? bi('Dispositivo con acceso Admin', 'Admin-authorized device')
+                        : bi('Sesión operativa', 'Standard session')}
                     </p>
                   </div>
                 </div>
@@ -155,7 +159,7 @@ export const Navbar: React.FC<Props> = ({
                       className="w-full flex items-center gap-2.5 px-3 py-2.5 text-sm font-semibold text-[#C44545] hover:bg-[#FCECEC] rounded-xl transition-colors text-left cursor-pointer min-h-[44px]"
                     >
                       <ShieldOff className="h-4.5 w-4.5 text-[#C44545] shrink-0" />
-                      <span>Revocar acceso administrativo</span>
+                      <span>{t('navbar.revokeAdmin')}</span>
                     </button>
                   )}
 
@@ -165,7 +169,7 @@ export const Navbar: React.FC<Props> = ({
                     className="w-full flex items-center gap-2.5 px-3 py-2.5 text-sm font-semibold text-[#C44545] hover:bg-[#FCECEC] rounded-xl transition-colors text-left cursor-pointer min-h-[44px]"
                   >
                     <LogOut className="h-4.5 w-4.5 text-[#C44545] shrink-0" />
-                    <span>Cerrar sesión</span>
+                    <span>{t('navbar.logout')}</span>
                   </button>
                 </div>
               </div>
@@ -193,10 +197,10 @@ export const Navbar: React.FC<Props> = ({
 
             <div className="space-y-1.5">
               <h3 id="revoke-admin-title" className="text-lg font-bold text-[#26352D]">
-                ¿Revocar acceso administrativo?
+                {t('navbar.revokeConfirmTitle')}
               </h3>
               <p className="text-sm text-slate-600 leading-relaxed">
-                Se eliminará la autorización administrativa guardada en este dispositivo. Deberás ingresar la contraseña de administrador para volver a configurar el sistema.
+                {t('navbar.revokeConfirmBody')}
               </p>
             </div>
 
@@ -207,7 +211,7 @@ export const Navbar: React.FC<Props> = ({
                 onClick={() => setShowRevokeAdminConfirm(false)}
                 className="w-full sm:flex-1 py-3 px-4 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-[#26352D] text-sm font-semibold transition-colors cursor-pointer min-h-[48px]"
               >
-                Cancelar
+                {t('common.cancel')}
               </button>
               <button
                 type="button"
@@ -218,10 +222,10 @@ export const Navbar: React.FC<Props> = ({
                 {revokingAdmin ? (
                   <>
                     <RefreshCw className="h-4 w-4 animate-spin" />
-                    <span>Revocando...</span>
+                    <span>{t('navbar.revoking')}</span>
                   </>
                 ) : (
-                  <span>Revocar acceso</span>
+                  <span>{t('navbar.revokeConfirmBtn')}</span>
                 )}
               </button>
             </div>
@@ -244,10 +248,10 @@ export const Navbar: React.FC<Props> = ({
 
             <div className="space-y-1.5">
               <h3 id="logout-title" className="text-lg font-bold text-[#26352D]">
-                ¿Cerrar sesión?
+                {t('navbar.logoutConfirmTitle')}
               </h3>
               <p className="text-sm text-slate-600 leading-relaxed">
-                ¿Deseas salir de la aplicación Maquinarias y Propiedad?
+                {t('navbar.logoutConfirmBody')}
               </p>
             </div>
 
@@ -257,14 +261,14 @@ export const Navbar: React.FC<Props> = ({
                 onClick={() => setShowLogoutConfirm(false)}
                 className="w-full sm:flex-1 py-3 px-4 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-[#26352D] text-sm font-semibold transition-colors cursor-pointer min-h-[48px]"
               >
-                Cancelar
+                {t('common.cancel')}
               </button>
               <button
                 type="button"
                 onClick={handleConfirmLogout}
                 className="w-full sm:flex-1 py-3 px-4 rounded-xl bg-[#C44545] hover:bg-[#A83737] text-white text-sm font-bold transition-colors cursor-pointer min-h-[48px]"
               >
-                Cerrar sesión
+                {t('navbar.logoutConfirmBtn')}
               </button>
             </div>
           </div>

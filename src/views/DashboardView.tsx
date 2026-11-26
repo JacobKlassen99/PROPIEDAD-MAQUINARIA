@@ -1,6 +1,7 @@
 import React from 'react';
 import { Tractor, Sprout, ChevronRight, AlertCircle } from 'lucide-react';
 import { Campaign } from '../types';
+import { useI18n } from '../services/i18n';
 
 interface Props {
   activeCampaign: Campaign | null;
@@ -11,6 +12,8 @@ export const DashboardView: React.FC<Props> = ({
   activeCampaign,
   onNavigate,
 }) => {
+  const { t, bi } = useI18n();
+
   return (
     <div className="space-y-5 animate-fade-in">
       {/* Banner si no hay campaña activa */}
@@ -18,14 +21,18 @@ export const DashboardView: React.FC<Props> = ({
         <div className="rounded-2xl border border-amber-200 bg-amber-50/90 px-4 py-3 text-amber-900 flex items-center gap-3">
           <AlertCircle className="h-5 w-5 text-amber-600 shrink-0" />
           <p className="text-xs font-medium leading-relaxed">
-            No hay una campaña activa. Activa una campaña en{' '}
-            <span className="font-bold">Administración</span> para registrar movimientos.
+            {bi(
+              'No hay una campaña activa. Activa una campaña en ',
+              'There is no active campaign. Activate a campaign in '
+            )}
+            <span className="font-bold">{t('nav.admin')}</span>
+            {bi(' para registrar movimientos.', ' to record movements.')}
           </p>
         </div>
       )}
 
       {/* Accesos principales: Maquinarias y Propiedad */}
-      <section aria-label="Accesos principales" className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
+      <section aria-label={t('nav.homeSubtitle')} className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
         {/* Botón Maquinarias */}
         <button
           type="button"
@@ -38,10 +45,10 @@ export const DashboardView: React.FC<Props> = ({
             </div>
             <div className="min-w-0">
               <h2 className="text-lg font-bold text-[#26352D] tracking-tight leading-snug">
-                Maquinarias
+                {t('dashboard.machineryTitle')}
               </h2>
               <p className="text-xs text-[#5E6D64] mt-0.5 leading-snug">
-                Servicios, gastos, máquinas y cobros
+                {t('dashboard.machineryDesc')}
               </p>
             </div>
           </div>
@@ -62,10 +69,10 @@ export const DashboardView: React.FC<Props> = ({
             </div>
             <div className="min-w-0">
               <h2 className="text-lg font-bold text-[#26352D] tracking-tight leading-snug">
-                Propiedad
+                {t('dashboard.propertyTitle')}
               </h2>
               <p className="text-xs text-[#5E6D64] mt-0.5 leading-snug">
-                Ventas, gastos agrícolas y lotes
+                {t('dashboard.propertyDesc')}
               </p>
             </div>
           </div>

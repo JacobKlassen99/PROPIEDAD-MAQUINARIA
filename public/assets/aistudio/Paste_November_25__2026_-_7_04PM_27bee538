@@ -1,0 +1,827 @@
+# MAQUINARIAS Y PROPIEDAD — ACTUALIZACIÓN FINANCIERA, CLIENTES, VENTAS Y CUENTAS POR COBRAR
+
+Implementar todas las siguientes modificaciones, conservando la arquitectura, los datos existentes, las funcionalidades actuales y el diseño compacto de la aplicación.
+
+## 1. CORREGIR BANDERAS DEL SELECTOR DE IDIOMA
+
+Actualmente, en algunos dispositivos aparecen las letras ES y US en lugar de las banderas.
+
+Reemplazar los emojis de banderas por imágenes SVG locales:
+
+- Bandera de España para Español.
+- Bandera de Estados Unidos para English.
+
+Mantener el diseño actual del selector de idioma y el indicador verde de selección.
+
+Garantizar su visualización correcta en Windows, Android, iOS y macOS.
+
+Todas las nuevas funcionalidades descritas en este prompt deben estar completamente disponibles en español e inglés mediante el sistema centralizado de traducciones existente.
+
+## 2. REORGANIZAR ADMINISTRACIÓN
+
+Cambiar el nombre «Reporte general» por «Finanzas».
+
+En inglés: Finances.
+
+Reorganizar los accesos de Administración en el siguiente orden exacto:
+
+1. Finanzas.
+2. Patrimonio.
+3. Cuentas por cobrar.
+4. Máquinas e implementos.
+5. Lotes.
+6. Clientes.
+7. Conceptos.
+8. Tipo de cambio.
+9. Campañas.
+10. Configuración de cobros.
+11. Usuarios.
+12. Idioma.
+
+Los primeros tres accesos deben formar un grupo financiero, con una separación visual discreta del resto.
+
+Utilizar iconos claros y uniformes.
+
+No añadir tarjetas grandes ni encabezados innecesarios.
+
+Dentro de Finanzas conservar las funcionalidades actuales:
+
+- Consolidado.
+- Maquinarias.
+- Propiedad.
+- Filtros.
+- Reportes.
+- Impresión y exportación.
+
+## 3. PERMISOS DE ADMINISTRACIÓN
+
+Las siguientes funcionalidades deben estar disponibles exclusivamente cuando el acceso Admin esté habilitado:
+
+- Finanzas.
+- Patrimonio.
+- Cuentas por cobrar.
+- Ventas de cosecha.
+- Asignación de precios.
+- Asignación de compradores.
+- Registro y edición de cobros.
+- Configuración de cobros.
+- Administración de clientes.
+- Generación de notas de débito.
+- Generación de notas de cobro.
+
+Cuando el acceso Admin esté deshabilitado, ocultar completamente estos accesos.
+
+No mostrar botones deshabilitados.
+
+Al deshabilitar el acceso Admin mientras se encuentra abierta una pantalla restringida, regresar a una pantalla permitida.
+
+Validar los permisos también en Google Apps Script mediante el mecanismo administrativo existente.
+
+Los usuarios normales deben poder continuar registrando trabajos y cosechas según sus permisos actuales.
+
+No modificar innecesariamente el sistema de autenticación recientemente corregido.
+
+## 4. REGISTRO DE CLIENTES
+
+Crear Administración → Clientes.
+
+En inglés: Customers.
+
+Crear un catálogo centralizado de clientes que pueda utilizarse tanto en Maquinarias como en Propiedad.
+
+Campos:
+
+- ID interno automático e invisible.
+- Nombre o razón social: obligatorio.
+- Teléfono / WhatsApp: opcional.
+- Dirección: opcional.
+
+No incluir carnet de identidad, NIT ni observaciones.
+
+Permitir:
+
+- Registrar clientes.
+- Editar clientes.
+- Buscar clientes por nombre.
+- Eliminar clientes sin registros vinculados.
+
+Si un cliente tiene registros históricos, impedir su eliminación definitiva y permitir desactivarlo cuando corresponda.
+
+Evitar nombres duplicados mediante una comparación normalizada.
+
+Si se modifica el nombre de un cliente, actualizar su presentación en todos los registros vinculados mediante su ID, sin duplicar ni alterar movimientos financieros.
+
+Los compradores y clientes deben seleccionarse desde este catálogo.
+
+Para utilizar un nuevo cliente, primero debe registrarse en Administración → Clientes.
+
+No utilizar texto libre como identificador de cliente en los nuevos registros.
+
+Conservar y migrar correctamente los nombres de clientes existentes.
+
+## 5. SERVICIOS DE MAQUINARIA
+
+En los servicios para terceros, sustituir la entrada libre del nombre del cliente por un selector del catálogo de clientes.
+
+Permitir registrar el cliente pendiente cuando todavía no se conozca, manteniendo el registro identificable para su posterior asignación administrativa.
+
+Los trabajos realizados para lotes propios no deben generar cuentas por cobrar a clientes.
+
+Conservar la lógica existente:
+
+- Servicio para terceros: ingreso en Maquinarias.
+- Trabajo para propiedad propia: ingreso en Maquinarias y gasto vinculado en Propiedad.
+
+No duplicar los movimientos financieros existentes.
+
+Las cuentas por cobrar de servicios externos deben integrarse en el nuevo sistema centralizado de cuentas por cobrar por cliente.
+
+Eliminar el acceso independiente «Por cobrar» del menú de Maquinarias.
+
+## 6. VENTAS DE COSECHA
+
+Cambiar el nombre «Pendientes de precio» por «Ventas de cosecha».
+
+En inglés: Harvest Sales.
+
+Este apartado permanecerá dentro de Propiedad y será exclusivo del acceso Admin habilitado.
+
+Permitir registrar ventas parciales o totales de las toneladas cosechadas.
+
+Una cosecha puede venderse a diferentes compradores, en diferentes cantidades y a diferentes precios.
+
+Cada venta debe conservar:
+
+- ID de venta.
+- ID de cosecha de origen.
+- Fecha de venta.
+- Campaña de origen.
+- Lote.
+- Producto cosechado.
+- Cantidad vendida.
+- Unidad.
+- Comprador vinculado mediante ID de cliente.
+- Precio unitario.
+- Moneda.
+- Tipo de cambio histórico.
+- Importe total.
+- Plazo de pago.
+- Fecha de vencimiento.
+- Condiciones de interés.
+- Observación.
+- Estado del comprador.
+- Estado del precio.
+
+### Comprador obligatorio
+
+El comprador es obligatorio para considerar completa una venta.
+
+Sin embargo, debe existir la opción explícita «Comprador pendiente», que permita guardar temporalmente una venta sin comprador asignado.
+
+El precio también podrá quedar pendiente.
+
+Ambos datos deben poder completarse independientemente.
+
+Estados posibles:
+
+- Comprador y precio pendientes.
+- Comprador pendiente.
+- Precio pendiente.
+- Venta completa.
+
+Las toneladas asignadas a una venta deben quedar reservadas desde el momento de guardar, aunque el comprador o el precio estén pendientes.
+
+No permitir vender nuevamente las mismas toneladas.
+
+Validar esta restricción también en el backend.
+
+Cuando se edite o anule una venta, recalcular correctamente las toneladas disponibles.
+
+No generar importes económicos ficticios para ventas sin precio.
+
+Una venta con precio registrado, pero comprador pendiente, podrá generar su ingreso correspondiente y deberá permanecer identificable como deuda sin cliente asignado, hasta completar el comprador.
+
+Asignar posteriormente el comprador no debe generar un segundo ingreso.
+
+## 7. DISEÑO DEL LISTADO DE VENTAS
+
+Mantener el icono correspondiente al producto cosechado.
+
+Cambiar el título principal de cada registro:
+
+- Si existe comprador, mostrar el nombre del comprador.
+- Si no existe comprador, mostrar «Comprador pendiente».
+
+El producto cosechado ya no debe ser el título principal.
+
+Debajo mostrar de forma compacta:
+
+- Producto.
+- Lote.
+- Campaña.
+- Fecha.
+
+En el lado derecho mostrar las toneladas y el estado correspondiente.
+
+Utilizar un diseño de filas compactas, evitando tarjetas excesivamente grandes.
+
+Permitir identificar fácilmente las toneladas disponibles, las ventas pendientes y las ventas completas.
+
+Mantener orden cronológico descendente.
+
+## 8. PANTALLAS INDEPENDIENTES DE VENTAS
+
+Al pulsar sobre una venta, abrir una nueva pantalla interna de detalle.
+
+No expandir los detalles dentro del listado.
+
+La pantalla de detalle debe mostrar toda la información de la venta.
+
+Incluir un botón «Editar venta».
+
+Al pulsar Editar, abrir otra pantalla interna con el formulario editable.
+
+No utilizar ventanas emergentes para estos formularios.
+
+Permitir completar el comprador y precio pendientes.
+
+Mantener:
+
+- Botón para regresar.
+- Menú inferior fijo.
+- Filtros anteriores.
+- Posición anterior del listado.
+- Caché temporal existente.
+
+## 9. CONFIGURACIÓN DE COBROS
+
+Crear Administración → Configuración de cobros.
+
+En inglés: Payment Settings.
+
+Campos configurables:
+
+- Plazo predeterminado de pago, expresado en días.
+- Aplicar interés por mora por defecto: Sí / No.
+- Porcentaje de interés mensual.
+
+No establecer valores comerciales definitivos sin que el administrador los configure.
+
+Mientras no exista una configuración de intereses, mantener los intereses desactivados.
+
+Al registrar una deuda por servicio de maquinaria o venta de cosecha, cargar automáticamente estas condiciones.
+
+Permitir modificar individualmente:
+
+- Días de plazo.
+- Aplicación de intereses.
+- Porcentaje de interés.
+
+Calcular la fecha de vencimiento a partir de la fecha de la operación y el plazo establecido.
+
+Si el precio se asigna posteriormente, conservar la fecha original y permitir al administrador revisar y ajustar el vencimiento antes de activar el importe por cobrar.
+
+Guardar las condiciones de cada deuda individualmente.
+
+Modificar la configuración general no debe alterar retroactivamente las condiciones de las deudas anteriores.
+
+No aplicar intereses retroactivos a registros históricos que no tenían condiciones de mora definidas.
+
+## 10. CUENTAS POR COBRAR CENTRALIZADAS POR CLIENTE
+
+Crear Administración → Cuentas por cobrar.
+
+En inglés: Accounts Receivable.
+
+Este será el único apartado centralizado para gestionar los cobros de clientes.
+
+Reunir en un mismo lugar:
+
+- Deudas por servicios externos de maquinaria.
+- Deudas por ventas de cosechas.
+- Intereses pendientes.
+
+Agrupar todos los registros por ID de cliente, independientemente del módulo, campaña, año o lote de origen.
+
+El listado principal debe mostrar:
+
+- Nombre del cliente como título.
+- Cantidad de registros pendientes.
+- Cantidad de registros vencidos.
+- Saldo pendiente.
+- Moneda.
+- Icono para abrir el detalle.
+
+Incluir buscador por nombre del cliente.
+
+Mostrar los saldos en USD y Bs por separado cuando corresponda.
+
+No sumar directamente importes de diferentes monedas.
+
+Mostrar también una sección identificable de deudas pendientes de asignación de cliente, para que ningún importe quede oculto por no tener comprador asignado.
+
+Permitir completar el cliente desde el registro correspondiente.
+
+## 11. DETALLE DE CUENTA DEL CLIENTE
+
+Al seleccionar un cliente, abrir una nueva pantalla interna.
+
+Mostrar:
+
+- Nombre del cliente.
+- Teléfono, si existe.
+- Capital pendiente.
+- Intereses acumulados.
+- Total por cobrar por moneda.
+- Registros pendientes.
+- Registros vencidos.
+
+Para cada deuda mostrar:
+
+- Fecha.
+- Concepto.
+- Origen: Maquinarias o Propiedad.
+- Campaña.
+- Lote, cuando corresponda.
+- Cantidad.
+- Precio.
+- Importe original.
+- Pagos anteriores.
+- Capital pendiente.
+- Fecha de vencimiento.
+- Días de atraso.
+- Intereses acumulados.
+- Total pendiente.
+
+Permitir seleccionar uno, varios o todos los registros.
+
+Incluir los siguientes accesos:
+
+- Generar nota de débito.
+- Registrar cobro.
+- Historial de cobros.
+
+Permitir consultar también clientes sin saldo pendiente desde el catálogo de clientes, para acceder a su historial y recuperar notas de cobro anteriores.
+
+## 12. CÁLCULO AUTOMÁTICO DE INTERESES
+
+Implementar interés simple por mora.
+
+El interés comienza a calcularse después del vencimiento del plazo de pago, únicamente cuando la deuda tenga habilitada esta condición.
+
+Utilizar la siguiente fórmula proporcional:
+
+Interés = capital pendiente × (porcentaje mensual / 100) × (días de atraso / 30).
+
+No aplicar interés compuesto.
+
+No calcular intereses sobre intereses pendientes.
+
+Los intereses deben calcularse sobre el capital pendiente correspondiente a cada período.
+
+Cuando se realiza un pago parcial, conservar el interés acumulado hasta esa fecha y calcular los intereses posteriores únicamente sobre el capital restante.
+
+No recalcular todo el historial utilizando el saldo actual.
+
+Conservar las fechas de pagos, cambios autorizados de condiciones y períodos necesarios para reproducir correctamente el cálculo histórico.
+
+No crear movimientos financieros diarios únicamente para representar intereses acumulados.
+
+Calcular los intereses al consultar la cuenta, generar una nota de débito o registrar un cobro.
+
+El cálculo definitivo debe validarse en Google Apps Script.
+
+## 13. REGISTRO DE COBROS
+
+Permitir realizar cobros parciales y totales.
+
+Un mismo cobro puede aplicarse a una o varias deudas del mismo cliente, incluso cuando correspondan a diferentes módulos, campañas o lotes.
+
+Permitir seleccionar las deudas y distribuir el pago entre ellas.
+
+Mostrar claramente cuánto se aplica a cada deuda antes de confirmar.
+
+Para cada deuda, aplicar el pago en el siguiente orden:
+
+1. Intereses acumulados pendientes.
+2. Capital pendiente.
+
+Si el pago no alcanza para cubrir todos los intereses, conservar los intereses restantes como pendientes.
+
+No permitir saldos negativos ni cobros superiores al total seleccionado.
+
+Registrar el cobro como una operación única, con sus respectivas aplicaciones individuales a las deudas seleccionadas.
+
+## 14. COBROS EN USD Y BS
+
+Mantener siempre la deuda en su moneda original.
+
+Permitir pagar en USD o Bs, independientemente de la moneda original de la deuda.
+
+Reglas:
+
+- Deuda USD, pago USD: descuento directo.
+- Deuda USD, pago Bs: dividir el importe pagado entre el tipo de cambio.
+- Deuda Bs, pago Bs: descuento directo.
+- Deuda Bs, pago USD: multiplicar el importe pagado por el tipo de cambio.
+
+Ejemplo:
+
+Deuda original: 5.000 USD.
+Pago: 23.560 Bs.
+Tipo de cambio: 11,78.
+Equivalente pagado: 2.000 USD.
+Saldo pendiente: 3.000 USD.
+
+Cargar automáticamente el tipo de cambio actual configurado en la aplicación.
+
+Permitir editarlo en cada cobro.
+
+Validar que el tipo de cambio sea positivo.
+
+Guardar:
+
+- Importe original pagado.
+- Moneda de pago.
+- Tipo de cambio histórico aplicado.
+- Importe equivalente en la moneda de cada deuda.
+- Capital descontado.
+- Intereses descontados.
+- Saldo anterior.
+- Saldo restante.
+- Fecha del cobro.
+- Usuario que registró el cobro.
+
+Conservar la conversión automática de monedas existente y evitar conversiones dobles o diferencias acumuladas por redondeo.
+
+Los cambios futuros del tipo de cambio no deben modificar los cobros históricos.
+
+## 15. REGISTRO AUTOMÁTICO DE INGRESOS POR INTERESES
+
+Crear automáticamente el concepto de sistema «Interés por mora».
+
+En inglés: Late Payment Interest.
+
+No exigir que el administrador lo cree manualmente.
+
+Evitar duplicar este concepto si ya existe.
+
+Proteger su identificador interno y su vinculación contable.
+
+Los intereses acumulados deben aparecer en las cuentas por cobrar, pero solamente se contabilizarán como ingresos cuando sean efectivamente cobrados.
+
+Distribuir automáticamente los ingresos por intereses según el origen de cada deuda:
+
+- Servicio de maquinaria: ingreso en Maquinarias.
+- Venta de cosecha: ingreso en Propiedad, vinculado al lote y campaña de origen.
+
+Ejemplo:
+
+Interés cobrado por servicio de maquinaria: 50 USD.
+Interés cobrado por venta del lote 2: 120 USD.
+Interés cobrado por venta del lote 9: 30 USD.
+
+Registrar automáticamente:
+
+- Maquinarias: ingreso por intereses de 50 USD.
+- Propiedad, lote 2: ingreso por intereses de 120 USD.
+- Propiedad, lote 9: ingreso por intereses de 30 USD.
+
+Todo debe generarse desde un único cobro al cliente.
+
+El capital cobrado no debe contabilizarse nuevamente como ingreso, porque ya fue registrado al realizar el servicio o la venta.
+
+Vincular los movimientos de intereses al ID del cobro para evitar duplicaciones.
+
+Si un cobro se corrige o anula mediante una operación administrativa autorizada, actualizar coherentemente sus aplicaciones, saldos e ingresos por intereses.
+
+## 16. CONTINUIDAD ENTRE GESTIONES Y CAMPAÑAS
+
+Las cuentas por cobrar deben permanecer pendientes hasta su cancelación total, independientemente del cambio de año o campaña.
+
+No duplicar ni trasladar físicamente las deudas a nuevos registros.
+
+Conservar:
+
+- Fecha original.
+- Campaña original.
+- Lote original.
+- Moneda original.
+- Capital pendiente.
+- Intereses pendientes.
+- Condiciones de pago.
+- Historial de cobros.
+
+El cambio de campaña o año no debe reiniciar el plazo de pago ni los intereses.
+
+Ejemplo:
+
+Una venta realizada en 2026 se cobra en 2027.
+
+- El ingreso original de la venta permanece en 2026.
+- El cobro se registra con fecha de 2027.
+- El capital cobrado reduce la deuda sin generar otro ingreso.
+- Los intereses efectivamente cobrados se contabilizan como ingreso del período de cobro en 2027.
+
+Conservar adicionalmente la campaña y lote de origen de la deuda para permitir su trazabilidad.
+
+Distinguir el período contable del cobro de la campaña de origen, evitando modificar los resultados históricos.
+
+Cuentas por cobrar no debe limitarse automáticamente a la campaña activa.
+
+## 17. NOTA DE DÉBITO
+
+Crear un documento denominado:
+
+Español: NOTA DE DÉBITO.
+English: DEBIT NOTE.
+
+La nota de débito sirve para comunicar al cliente los importes pendientes de pago.
+
+Permitir seleccionar uno, varios o todos los registros pendientes del cliente.
+
+Generar una sola nota consolidada, incluso cuando existan servicios de maquinaria y ventas de cosechas.
+
+### Diseño del documento
+
+Utilizar formato A4 horizontal.
+
+Diseño profesional, administrativo, compacto y principalmente blanco y negro.
+
+No utilizar tarjetas grandes, fondos de colores ni elementos decorativos innecesarios.
+
+Encabezado:
+
+- Logo actual de la aplicación.
+- Nombre de la aplicación.
+- Título NOTA DE DÉBITO.
+- Número del documento.
+- Fecha.
+- Nombre del cliente.
+- Teléfono, si existe.
+- Dirección, si existe.
+
+Utilizar una tabla horizontal amplia, con una línea por cada deuda seleccionada.
+
+Columnas:
+
+- Fecha.
+- Concepto / Descripción.
+- Cantidad.
+- Precio unitario.
+- Vencimiento.
+- Moneda.
+- Saldo pendiente.
+- Interés.
+- Total por cobrar.
+
+Mostrar los totales claramente en la parte inferior.
+
+Si existen importes en USD y Bs, mostrar totales independientes por moneda.
+
+Permitir varias líneas y paginación automática cuando sea necesario, repitiendo el encabezado de la tabla en páginas adicionales.
+
+No generar una nueva deuda ni un ingreso al emitir la nota de débito.
+
+Conservar una copia de los importes y condiciones incluidos al emitir cada nota, para que pueda volver a imprimirse sin cambiar sus valores históricos.
+
+## 18. NOTA DE COBRO
+
+Crear un segundo documento denominado:
+
+Español: NOTA DE COBRO.
+English: PAYMENT RECEIPT.
+
+La nota de cobro se genera exclusivamente después de registrar un pago parcial o total.
+
+Mantener el mismo estilo horizontal, compacto y profesional de la nota de débito.
+
+Mostrar:
+
+- Logo.
+- Nombre de la aplicación.
+- Número de nota de cobro.
+- Fecha.
+- Nombre del cliente.
+- Conceptos pagados.
+- Importe anterior.
+- Capital pagado.
+- Intereses pagados.
+- Total pagado.
+- Saldo restante.
+
+Cuando el pago se realice en una moneda diferente a la deuda, mostrar también:
+
+- Importe original pagado.
+- Moneda de pago.
+- Tipo de cambio aplicado.
+- Equivalente descontado en la moneda de la deuda.
+
+Permitir incluir varias deudas en una misma nota de cobro.
+
+Mostrar claramente si corresponde a un pago parcial o total.
+
+La nota de cobro debe vincularse al ID del cobro registrado.
+
+Permitir volver a imprimirla desde el historial de cobros sin registrar nuevamente el pago.
+
+Utilizar numeración independiente para notas de débito y notas de cobro, generada de forma segura en el backend.
+
+No presentar estos documentos como facturas fiscales.
+
+## 19. IMPRESIÓN, PDF Y WHATSAPP
+
+Para ambos documentos implementar:
+
+- Vista previa.
+- Imprimir.
+- Descargar PDF.
+- Compartir por WhatsApp.
+
+Generar documentos en el idioma seleccionado en la aplicación.
+
+Utilizar el sistema de impresión existente cuando sea compatible.
+
+Para compartir archivos PDF, utilizar las capacidades nativas de compartir del dispositivo cuando estén disponibles.
+
+Si el navegador no admite compartir archivos directamente, permitir descargar el PDF y abrir WhatsApp con el cliente correspondiente y un mensaje preparado.
+
+No afirmar que el PDF fue enviado automáticamente si el usuario todavía debe adjuntarlo o confirmar el envío.
+
+Si el cliente no tiene teléfono registrado, permitir compartir manualmente.
+
+Garantizar que los documentos puedan utilizarse desde Android, iOS y computadora.
+
+## 20. FINANZAS Y REPORTES
+
+Actualizar Administración → Finanzas para incluir los ingresos efectivamente cobrados por intereses.
+
+Mantener separados:
+
+- Ingresos por servicios.
+- Ingresos por cosechas.
+- Ingresos por intereses.
+- Gastos.
+- Resultados económicos.
+
+No sumar nuevamente el capital cobrado como ingreso.
+
+Mantener correctamente los resultados de Maquinarias, Propiedad y Consolidado.
+
+Los intereses correspondientes a Propiedad deben conservar la vinculación con el lote de origen.
+
+Respetar el período contable del cobro y el tipo de cambio histórico.
+
+No contabilizar intereses pendientes como ingresos realizados.
+
+Conservar los filtros y criterios financieros unificados existentes.
+
+## 21. GOOGLE SHEETS Y GOOGLE APPS SCRIPT
+
+Esta actualización requiere ampliar el backend y la estructura de datos.
+
+Antes de implementar, revisar exhaustivamente la estructura existente del proyecto, especialmente:
+
+- Trabajos.
+- Movimientos.
+- Cobros.
+- Cosechas.
+- AsignacionesPrecio.
+- Configuracion.
+- Auditoria.
+- Campañas.
+- Usuarios.
+- Cualquier otra hoja relacionada.
+
+Reutilizar las hojas y registros existentes cuando sea posible.
+
+Ampliar la estructura para gestionar:
+
+- Catálogo de clientes.
+- Ventas de cosechas.
+- Compradores.
+- Condiciones de cobro.
+- Vencimientos.
+- Intereses.
+- Aplicaciones de cobros a múltiples deudas.
+- Notas de débito.
+- Notas de cobro.
+
+No crear sistemas paralelos que dupliquen las deudas, ventas, cobros o movimientos financieros existentes.
+
+Diseñar una migración compatible, idempotente y no destructiva.
+
+Conservar todos los IDs y relaciones históricas.
+
+Migrar los clientes existentes y vincularlos mediante identificadores estables, sin fusionar automáticamente clientes cuya identidad sea ambigua.
+
+No generar nuevamente ingresos de operaciones históricas durante la migración.
+
+No asignar compradores ficticios a registros anteriores.
+
+Conservar los cobros anteriores y sus tipos de cambio históricos.
+
+No inventar datos que falten en los registros históricos.
+
+Implementar las validaciones financieras y de permisos en Google Apps Script.
+
+Utilizar mecanismos de bloqueo y operaciones idempotentes para evitar cobros duplicados, numeraciones duplicadas y ventas de toneladas simultáneas superiores al saldo disponible.
+
+Garantizar consistencia entre movimientos, cobros, aplicaciones e ingresos por intereses, incluyendo recuperación ante errores parciales.
+
+Si el código actual de Google Apps Script no está disponible dentro del proyecto, no inventar una implementación incompatible.
+
+En ese caso, identificar exactamente qué código y estructura se necesitan, preparar el contrato de API y solicitar el código actual antes de finalizar la integración.
+
+Entregar las modificaciones completas de Google Apps Script y una función de actualización de las hojas que pueda ejecutarse sin eliminar los datos existentes.
+
+## 22. ARQUITECTURA Y RENDIMIENTO
+
+Conservar la arquitectura actual:
+
+- React y TypeScript.
+- PWA instalable.
+- Netlify.
+- Google Apps Script Web App.
+- Google Sheets como única fuente de verdad.
+- Proxy /api/gas.
+- API centralizada en src/services/backend.ts.
+
+No utilizar Firebase, Supabase ni datos simulados.
+
+No almacenar datos financieros, clientes, contraseñas o sesiones en localStorage, sessionStorage o IndexedDB.
+
+Conservar la excepción existente para guardar exclusivamente la preferencia de idioma.
+
+Mantener la caché temporal en memoria, reutilización de datos, deduplicación de solicitudes e invalidación selectiva.
+
+Al registrar una venta, cobro o modificación de cliente, actualizar únicamente los datos afectados.
+
+No recargar toda la aplicación innecesariamente.
+
+## 23. CONSERVAR LAS FUNCIONALIDADES ACTUALES
+
+No eliminar ni deteriorar:
+
+- Inicio de sesión recientemente corregido.
+- Acceso administrativo.
+- Aplicación bilingüe.
+- Dictado por voz en observaciones.
+- Conversión automática USD ↔ Bs.
+- Tipo de cambio histórico.
+- Superficie automática en hectáreas.
+- Toneladas como unidad predeterminada de cosechas.
+- Pantallas independientes de detalles y edición.
+- Historiales ordenados por fecha descendente.
+- Iconos correspondientes a máquinas y productos.
+- Menú inferior fijo.
+- Diseño compacto.
+- Instalación y actualización de la PWA.
+
+Utilizar el componente reutilizable de observaciones con teclado y dictado por voz en los nuevos formularios que tengan observación.
+
+## 24. VERIFICACIÓN FINAL
+
+Implementar por etapas coherentes, reutilizando el código existente y evitando reescrituras innecesarias.
+
+Verificar especialmente:
+
+- Registro y edición de clientes.
+- Ventas parciales a diferentes compradores.
+- Comprador pendiente.
+- Precio pendiente.
+- Reserva correcta de toneladas.
+- Agrupación de deudas por cliente.
+- Deudas de diferentes campañas.
+- Cobros parciales.
+- Cobros totales.
+- Cobros de varias deudas.
+- Cobros en diferentes monedas.
+- Intereses antes y después de un pago parcial.
+- Distribución de intereses entre Maquinarias y Propiedad.
+- Continuidad de deudas entre años y campañas.
+- Ausencia de ingresos duplicados.
+- Notas de débito.
+- Notas de cobro.
+- Reimpresión de documentos históricos.
+- Permisos administrativos.
+- Inicio de sesión.
+- Traducciones completas.
+- Compatibilidad móvil.
+
+Ejecutar la compilación y la verificación de TypeScript.
+
+Corregir los errores encontrados.
+
+Al finalizar, informar claramente:
+
+1. Funcionalidades completadas.
+2. Archivos modificados.
+3. Hojas y columnas nuevas o modificadas.
+4. Acciones nuevas o modificadas de Google Apps Script.
+5. Procedimiento de migración de los registros existentes.
+6. Código de Google Apps Script que debo actualizar.
+7. Pasos exactos para completar la implementación.
+8. Funcionalidades pendientes o limitaciones reales.
+
+No declarar la integración completa si todavía falta actualizar Google Apps Script o Google Sheets.

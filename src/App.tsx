@@ -17,6 +17,8 @@ import {
   getExchangeRateConfig,
   syncExchangeRateDailyAuto,
   getMachineJobTypes,
+  getCustomers,
+  getPaymentSettings,
   invalidateBackendDomains,
   resetAllPrivateMemoryData,
 } from './services/backend';
@@ -32,6 +34,8 @@ import {
   Income,
   ItemConfig,
   Asset,
+  Customer,
+  PaymentSettings,
   ExchangeRateConfig,
   Currency,
   MainView,
@@ -46,11 +50,14 @@ import { AdminView } from './views/AdminView';
 import { AppsScriptModal } from './components/AppsScriptModal';
 import { PWAUpdateNotification } from './components/PWAUpdateNotification';
 import { BottomNav } from './components/BottomNav';
+import { useI18n } from './services/i18n';
 
 export type RefreshScope =
   | 'all'
   | 'catalogs'
   | 'catalogs_and_assets'
+  | 'customers'
+  | 'paymentSettings'
   | 'jobs'
   | 'movements'
   | 'assets'
@@ -64,6 +71,7 @@ const INITIAL_EXCHANGE_RATE: ExchangeRateConfig = {
 };
 
 export default function App() {
+  const { t, tf, translateError } = useI18n();
   const [session, setSession] = useState<UserSession | null>(getActiveSession());
   const [isAdmin, setIsAdmin] = useState<boolean>(hasAdminAuthorization());
   const [currentView, setCurrentView] = useState<MainView>('inicio');
@@ -80,6 +88,8 @@ export default function App() {
   const [incomes, setIncomes] = useState<Income[]>([]);
   const [itemsConfig, setItemsConfig] = useState<ItemConfig[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [paymentSettings, setPaymentSettings] = useState<PaymentSettings | null>(null);
   const [exchangeRate, setExchangeRate] = useState<ExchangeRateConfig>(INITIAL_EXCHANGE_RATE);
   const exchangeRateRef = useRef<ExchangeRateConfig>(exchangeRate);
   useEffect(() => {
@@ -91,6 +101,8 @@ export default function App() {
   const activeLoadsCountRef = useRef(0);
   const domainSeqRef = useRef({
     catalogs: 0,
+    customers: 0,
+    paymentSettings: 0,
     jobs: 0,
     movements: 0,
     assets: 0,
@@ -100,6 +112,8 @@ export default function App() {
   // Clear all private in-memory UI state when logging out or switching users
   const clearAllLocalState = useCallback(() => {
     domainSeqRef.current.catalogs += 1;
+    domainSeqRef.current.customers += 1;
+    domainSeqRef.current.paymentSettings += 1;
     domainSeqRef.current.jobs += 1;
     domainSeqRef.current.movements += 1;
     domainSeqRef.current.assets += 1;
@@ -114,6 +128,8 @@ export default function App() {
     setIncomes([]);
     setItemsConfig([]);
     setAssets([]);
+    setCustomers([]);
+    setPaymentSettings(null);
     setExchangeRate(INITIAL_EXCHANGE_RATE);
     setHasLoadedCoreData(false);
     setFetchError(null);
@@ -154,12 +170,16 @@ export default function App() {
 
       const reqGen = getCacheSessionGeneration();
       const loadCatalogs = scope === 'all' || scope === 'catalogs' || scope === 'catalogs_and_assets';
+      const loadCustomers = scope === 'all' || scope === 'catalogs' || scope === 'customers';
+      const loadPaymentSettings = scope === 'all' || scope === 'paymentSettings';
       const loadJobs = scope === 'all' || scope === 'jobs';
       const loadMovements = scope === 'all' || scope === 'jobs' || scope === 'movements';
       const loadAssets = scope === 'all' || scope === 'assets' || scope === 'catalogs_and_assets';
       const loadFx = scope === 'all' || scope === 'fx';
 
       const seqCatalogs = loadCatalogs ? ++domainSeqRef.current.catalogs : 0;
+      const seqCustomers = loadCustomers ? ++domainSeqRef.current.customers : 0;
+      const seqPaymentSettings = loadPaymentSettings ? ++domainSeqRef.current.paymentSettings : 0;
       const seqJobs = loadJobs ? ++domainSeqRef.current.jobs : 0;
       const seqMovements = loadMovements ? ++domainSeqRef.current.movements : 0;
       const seqAssets = loadAssets ? ++domainSeqRef.current.assets : 0;
@@ -203,6 +223,39 @@ export default function App() {
                 setMachineJobTypes(jobTypesRes.value || []);
               }
             })
+          );
+        }
+
+        if (loadCustomers) {
+          tasks.push(
+            getCustomers(useCache)
+              .then((list) => {
+                if (reqGen !== getCacheSessionGeneration() || seqCustomers !== domainSeqRef.current.customers) {
+                  return;
+                }
+                setCustomers(list || []);
+              })
+              .catch(() => {
+                // Preserve existing customers on transient failure
+              })
+          );
+        }
+
+        if (loadPaymentSettings) {
+          tasks.push(
+            getPaymentSettings(useCache)
+              .then((cfg) => {
+                if (
+                  reqGen !== getCacheSessionGeneration() ||
+                  seqPaymentSettings !== domainSeqRef.current.paymentSettings
+                ) {
+                  return;
+                }
+                setPaymentSettings(cfg);
+              })
+              .catch(() => {
+                // Preserve existing settings on transient failure
+              })
           );
         }
 
@@ -356,7 +409,16 @@ export default function App() {
   };
 
   const handleManualGlobalRefresh = () => {
-    invalidateBackendDomains(['cobros.', 'harvest.', 'expense.allocations', 'machineType.']);
+    invalidateBackendDomains([
+      'cobros.',
+      'ar.',
+      'customer.',
+      'paymentSettings.',
+      'harvest.',
+      'harvestSale.',
+      'expense.allocations',
+      'machineType.',
+    ]);
     loadData(false, 'all');
   };
 
@@ -381,20 +443,20 @@ export default function App() {
 
   const viewTitles: Record<MainView, { title: string; subtitle: string }> = {
     inicio: {
-      title: 'Inicio',
-      subtitle: 'Accesos principales',
+      title: t('nav.home'),
+      subtitle: t('nav.homeSubtitle'),
     },
     maquinarias: {
-      title: 'Maquinarias',
-      subtitle: 'Movimientos de trabajos y equipos',
+      title: t('nav.machinery'),
+      subtitle: t('nav.machinerySubtitle'),
     },
     propiedad: {
-      title: 'Propiedad',
-      subtitle: 'Movimientos, lotes y cosechas',
+      title: t('nav.property'),
+      subtitle: t('nav.propertySubtitle'),
     },
     administracion: {
-      title: 'Administración',
-      subtitle: 'Configuración y reportes',
+      title: t('nav.admin'),
+      subtitle: t('nav.adminSubtitle'),
     },
   };
 
@@ -434,15 +496,15 @@ export default function App() {
             <div className="no-print mb-4 rounded-xl border border-[#C44545]/30 bg-[#FCECEC] px-4 py-3 text-sm text-[#C44545] font-medium flex items-center justify-between gap-3">
               <span className="min-w-0 break-words">
                 {hasLoadedCoreData
-                  ? `No se pudo actualizar (${fetchError}). Mostrando los últimos datos cargados.`
-                  : fetchError}
+                  ? tf('sync.errorUpdating', { error: translateError(fetchError) })
+                  : translateError(fetchError)}
               </span>
               <button
                 type="button"
                 onClick={handleManualGlobalRefresh}
                 className="shrink-0 text-xs font-bold underline cursor-pointer"
               >
-                Reintentar
+                {t('sync.retry')}
               </button>
             </div>
           )}
@@ -466,6 +528,8 @@ export default function App() {
               expenses={expenses}
               itemsConfig={itemsConfig}
               assets={assets}
+              customers={customers}
+              paymentSettings={paymentSettings}
               currency={currency}
               exchangeRate={exchangeRate}
               isAdmin={isAdmin}
@@ -487,6 +551,8 @@ export default function App() {
               incomes={incomes}
               jobs={jobs}
               itemsConfig={itemsConfig}
+              customers={customers}
+              paymentSettings={paymentSettings}
               currency={currency}
               exchangeRate={exchangeRate}
               isAdmin={isAdmin}
@@ -510,6 +576,8 @@ export default function App() {
               incomes={incomes}
               itemsConfig={itemsConfig}
               assets={assets}
+              customers={customers}
+              paymentSettings={paymentSettings}
               exchangeRate={exchangeRate}
               onExchangeRateUpdated={setExchangeRate}
               currency={currency}

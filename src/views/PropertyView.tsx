@@ -45,8 +45,10 @@ import {
   CurrencySelect,
   FORM_INPUT_CLASS,
   FORM_LABEL_CLASS,
-  FORM_TEXTAREA_CLASS,
 } from '../components/AppSelect';
+import { ObservationField } from '../components/ObservationField';
+import { Switch } from '../components/Switch';
+import { useI18n } from '../services/i18n';
 import { getIconDefinition } from '../services/iconCatalog';
 import {
   Campaign,
@@ -61,7 +63,10 @@ import {
   ExpenseAllocationGroup,
   Machine,
   MachineJobType,
+  Customer,
+  PaymentSettings,
 } from '../types';
+import { HarvestSalesView } from './HarvestSalesView';
 import {
   createExpense,
   updateExpense,
@@ -84,6 +89,7 @@ import {
   getMachineIcon,
 } from '../services/backend';
 import { isDirectPropertyIncome } from '../services/financialSummary';
+import { countAvailableHarvests } from '../services/harvestAvailability';
 import {
   CurrencyConversionAnchor,
   convertFormCurrencyValue,
@@ -114,6 +120,8 @@ interface Props {
   incomes: Income[];
   jobs: MachineryJob[];
   itemsConfig: ItemConfig[];
+  customers?: Customer[];
+  paymentSettings?: PaymentSettings | null;
   currency: Currency;
   exchangeRate: ExchangeRateConfig;
   isAdmin?: boolean;
@@ -166,17 +174,27 @@ export const PropertyView: React.FC<Props> = ({
   incomes,
   jobs,
   itemsConfig = [],
+  customers = [],
+  paymentSettings = null,
   currency,
   exchangeRate,
   isAdmin,
   onRefreshData,
 }) => {
+  const { bi, t, translateUnit, translateError } = useI18n();
   const effectiveIsAdmin = isAdmin ?? hasAdminAuthorization();
   const [currentScreen, setCurrentScreen] = useState<PropertyScreen>('main');
   const [saving, setSaving] = useState(false);
   const [savingProgress, setSavingProgress] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  // Strict admin guard: if admin authorization is revoked while on Ventas de cosecha, redirect to main
+  useEffect(() => {
+    if (!effectiveIsAdmin && currentScreen === 'pendientes_precio') {
+      setCurrentScreen('main');
+    }
+  }, [effectiveIsAdmin, currentScreen]);
 
   // Search & Filters for Movimientos (persisted in memory across navigation)
   const [historialSearch, setHistorialSearch] = usePersistedMemoryState<string>('property.historial.search', '');
@@ -228,7 +246,15 @@ export const PropertyView: React.FC<Props> = ({
   const [showAllocationsPanelInGasto, setShowAllocationsPanelInGasto] = useState(false);
 
   // Form State for Agricultural Income (Direct sale with price — sin preselección de catálogo)
-  const [ingresoMode, setIngresoMode] = useState<'venta_directa' | 'sin_precio' | 'asignar_precio'>('venta_directa');
+  const [ingresoMode, setIngresoMode] = useState<'venta_directa' | 'sin_precio' | 'asignar_precio'>(
+    effectiveIsAdmin ? 'venta_directa' : 'sin_precio'
+  );
+
+  useEffect(() => {
+    if (!effectiveIsAdmin && ingresoMode !== 'sin_precio') {
+      setIngresoMode('sin_precio');
+    }
+  }, [effectiveIsAdmin, ingresoMode]);
   const [incFecha, setIncFecha] = useState(new Date().toISOString().slice(0, 10));
   const [incLotId, setIncLotId] = useState('');
   const [incConcepto, setIncConcepto] = useState('');
@@ -363,7 +389,7 @@ export const PropertyView: React.FC<Props> = ({
       anchor: incCurrencyAnchorRef.current,
     });
     if (res.error) {
-      setErrorMsg(res.error);
+      setErrorMsg(translateError(res.error));
       return;
     }
     if (!res.converted) return;
@@ -382,7 +408,7 @@ export const PropertyView: React.FC<Props> = ({
       anchor: expCurrencyAnchorRef.current,
     });
     if (res.error) {
-      setErrorMsg(res.error);
+      setErrorMsg(translateError(res.error));
       return;
     }
     if (!res.converted) return;
@@ -401,7 +427,7 @@ export const PropertyView: React.FC<Props> = ({
       anchor: editMovCurrencyAnchorRef.current,
     });
     if (res.error) {
-      setErrorMsg(res.error);
+      setErrorMsg(translateError(res.error));
       return;
     }
     if (!res.converted) return;
@@ -420,7 +446,7 @@ export const PropertyView: React.FC<Props> = ({
       anchor: priceCurrencyAnchorRef.current,
     });
     if (res.error) {
-      setPriceModalError(res.error);
+      setPriceModalError(translateError(res.error));
       return;
     }
     if (!res.converted) return;
@@ -489,7 +515,7 @@ export const PropertyView: React.FC<Props> = ({
 
   const pendingHarvestsCount = useMemo(() => {
     if (!pendingHarvestsQuery.hasLoaded) return null;
-    return (pendingHarvestsQuery.data || []).filter((h) => h.pendiente > 0.0001).length;
+    return countAvailableHarvests(pendingHarvestsQuery.data || []);
   }, [pendingHarvestsQuery.hasLoaded, pendingHarvestsQuery.data]);
 
   const allHarvestsList = allHarvestsQuery.data ?? [];
@@ -577,9 +603,9 @@ export const PropertyView: React.FC<Props> = ({
       tipo: 'ingreso' as const,
       fecha: i.fecha,
       loteId: i.loteId,
-      loteNombre: i.loteNombre || (lots.find((l) => l.id === i.loteId)?.nombre) || 'Lote',
+      loteNombre: i.loteNombre || (lots.find((l) => l.id === i.loteId)?.nombre) || bi('Lote', 'Lot'),
       titulo: formatConcept(i.concepto),
-      detalle: `${i.cantidad} ${i.unidad || ''} ${i.precio ? `@ ${i.moneda === 'USD' ? 'USD' : 'Bs'} ${i.precio}` : ''} ${i.observacion ? `• ${i.observacion}` : ''}`.trim(),
+      detalle: `${i.cantidad} ${translateUnit(i.unidad || '')} ${i.precio ? `@ ${i.moneda === 'USD' ? 'USD' : 'Bs'} ${i.precio}` : ''} ${i.observacion ? `• ${i.observacion}` : ''}`.trim(),
       monto: i.total,
       moneda: (i.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
       tipoCambio: i.tipoCambio || i.tc || exchangeRate?.tasaBobPerUsd,
@@ -598,9 +624,9 @@ export const PropertyView: React.FC<Props> = ({
       tipo: 'gasto_directo' as const,
       fecha: e.fecha,
       loteId: e.loteId,
-      loteNombre: e.loteNombre || (lots.find((l) => l.id === e.loteId)?.nombre) || 'Lote',
+      loteNombre: e.loteNombre || (lots.find((l) => l.id === e.loteId)?.nombre) || bi('Lote', 'Lot'),
       titulo: formatConcept(e.itemGasto),
-      detalle: `${e.cantidad} ${e.unidad || ''} ${e.precio ? `@ ${e.moneda === 'USD' ? 'USD' : 'Bs'} ${e.precio}` : ''} ${e.observacion ? `• ${e.observacion}` : ''}`.trim(),
+      detalle: `${e.cantidad} ${translateUnit(e.unidad || '')} ${e.precio ? `@ ${e.moneda === 'USD' ? 'USD' : 'Bs'} ${e.precio}` : ''} ${e.observacion ? `• ${e.observacion}` : ''}`.trim(),
       monto: e.total,
       moneda: (e.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
       tipoCambio: e.tipoCambio || e.tc || exchangeRate?.tasaBobPerUsd,
@@ -620,11 +646,17 @@ export const PropertyView: React.FC<Props> = ({
         tipo: 'cosecha' as const,
         fecha: h.fecha,
         loteId: h.loteId,
-        loteNombre: h.loteNombre || (lots.find((l) => String(l.id) === String(h.loteId))?.nombre) || 'Lote',
-        titulo: `Cosecha ${formatConcept(h.producto)}`,
+        loteNombre: h.loteNombre || (lots.find((l) => String(l.id) === String(h.loteId))?.nombre) || bi('Lote', 'Lot'),
+        titulo: `${bi('Cosecha', 'Harvest')} ${formatConcept(h.producto)}`,
         detalle: h.asignadas > 0
-          ? `${h.toneladas} t totales · ${h.asignadas} t asignadas · ${h.pendiente} t pendientes${h.observacion ? ` • ${h.observacion}` : ''}`
-          : `${h.toneladas} t · Sin precio${h.observacion ? ` • ${h.observacion}` : ''}`,
+          ? bi(
+              `${h.toneladas} t totales · ${h.asignadas} t asignadas · ${h.pendiente} t pendientes${h.observacion ? ` • ${h.observacion}` : ''}`,
+              `${h.toneladas} t total · ${h.asignadas} t priced · ${h.pendiente} t pending${h.observacion ? ` • ${h.observacion}` : ''}`
+            )
+          : bi(
+              `${h.toneladas} t · Sin precio${h.observacion ? ` • ${h.observacion}` : ''}`,
+              `${h.toneladas} t · Unpriced${h.observacion ? ` • ${h.observacion}` : ''}`
+            ),
         monto: 0,
         moneda: 'USD' as Currency,
         cantidad: h.toneladas,
@@ -718,29 +750,29 @@ export const PropertyView: React.FC<Props> = ({
     setSuccessMsg(null);
 
     if (!activeCampaign) {
-      setErrorMsg('Debes seleccionar o activar una campaña activa.');
+      setErrorMsg(bi('Debes seleccionar o activar una campaña activa.', 'You must select or activate an active campaign.'));
       return;
     }
 
     if (!expItem.trim()) {
-      setErrorMsg('Selecciona un insumo o concepto de gasto.');
+      setErrorMsg(bi('Selecciona un insumo o concepto de gasto.', 'Select an input or expense concept.'));
       return;
     }
 
     if (!expPrecio || Number(expPrecio) <= 0) {
-      setErrorMsg('Ingresa un precio unitario válido.');
+      setErrorMsg(bi('Ingresa un precio unitario válido.', 'Enter a valid unit price.'));
       return;
     }
 
     const cantNum = Number(expCantidad) || 1;
     if (cantNum <= 0) {
-      setErrorMsg('La cantidad debe ser mayor a 0.');
+      setErrorMsg(bi('La cantidad debe ser mayor a 0.', 'Quantity must be greater than 0.'));
       return;
     }
 
     const tcNum = parseDecimalNumber(expTc);
     if (tcNum <= 0) {
-      setErrorMsg('Ingresa un tipo de cambio válido mayor a 0.');
+      setErrorMsg(bi('Ingresa un tipo de cambio válido mayor a 0.', 'Enter a valid exchange rate greater than 0.'));
       return;
     }
 
@@ -752,7 +784,7 @@ export const PropertyView: React.FC<Props> = ({
     // MODE A: Single lot (preserves exact existing behavior)
     if (expLotMode === 'single') {
       if (!expLotId) {
-        setErrorMsg('Selecciona un lote obligatorio para el gasto agrícola.');
+        setErrorMsg(bi('Selecciona un lote obligatorio para el gasto agrícola.', 'Select a required lot for the agricultural expense.'));
         return;
       }
 
@@ -776,7 +808,7 @@ export const PropertyView: React.FC<Props> = ({
           observacion: expObs.trim(),
         });
 
-        setSuccessMsg('Gasto agrícola registrado en el lote seleccionado.');
+        setSuccessMsg(bi('Gasto agrícola registrado en el lote seleccionado.', 'Agricultural expense recorded for the selected lot.'));
         setExpLotId('');
         setExpItem('');
         setExpCantidad(1);
@@ -791,7 +823,11 @@ export const PropertyView: React.FC<Props> = ({
         setCurrentScreen('main');
         onRefreshData('movements');
       } catch (err: unknown) {
-        setErrorMsg(err instanceof Error ? err.message : 'Error al registrar el gasto agrícola');
+        setErrorMsg(
+          err instanceof Error
+            ? translateError(err.message)
+            : bi('Error al registrar el gasto agrícola', 'Error recording the agricultural expense')
+        );
       } finally {
         setSaving(false);
       }
@@ -801,7 +837,10 @@ export const PropertyView: React.FC<Props> = ({
     // MODE B: Multiple lots (2+) — EXCLUSIVELY via single backend call expense.allocate
     if (selectedMultiLots.length < 2) {
       setErrorMsg(
-        'Selecciona al menos 2 lotes para distribuir el gasto. Para registrar en un solo lote, utiliza la opción «Un lote».'
+        bi(
+          'Selecciona al menos 2 lotes para distribuir el gasto. Para registrar en un solo lote, utiliza la opción «Un lote».',
+          'Select at least 2 lots to distribute the expense. To record on a single lot, use the "One lot" option.'
+        )
       );
       return;
     }
@@ -811,18 +850,33 @@ export const PropertyView: React.FC<Props> = ({
       return isNaN(ha) || ha <= 0;
     });
     if (invalidLot) {
-      setErrorMsg(`Ingresa las hectáreas trabajadas (mayores a 0) para ${invalidLot.nombre}.`);
+      setErrorMsg(
+        bi(
+          `Ingresa las hectáreas trabajadas (mayores a 0) para ${invalidLot.nombre}.`,
+          `Enter worked hectares (greater than 0) for ${invalidLot.nombre}.`
+        )
+      );
       return;
     }
 
     if (totalMultiLotHa <= 0 || multiLotBreakdown.length < 2) {
-      setErrorMsg('El total de hectáreas trabajadas debe ser mayor a 0 en al menos dos lotes.');
+      setErrorMsg(
+        bi(
+          'El total de hectáreas trabajadas debe ser mayor a 0 en al menos dos lotes.',
+          'Total worked hectares must be greater than 0 across at least two lots.'
+        )
+      );
       return;
     }
 
     if (saving) return;
     setSaving(true);
-    setSavingProgress(`Distribuyendo gasto entre ${multiLotBreakdown.length} lotes...`);
+    setSavingProgress(
+      bi(
+        `Distribuyendo gasto entre ${multiLotBreakdown.length} lotes...`,
+        `Distributing expense across ${multiLotBreakdown.length} lots...`
+      )
+    );
     try {
       await allocateExpense({
         fecha: expFecha,
@@ -839,8 +893,12 @@ export const PropertyView: React.FC<Props> = ({
         observacion: expObs.trim(),
       });
 
+      const formattedAmt = `${expMoneda === 'USD' ? 'USD' : 'Bs'} ${totalExp.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
       setSuccessMsg(
-        `Gasto distribuido proporcionalmente en ${multiLotBreakdown.length} lotes (${expMoneda === 'USD' ? 'USD' : 'Bs'} ${totalExp.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}).`
+        bi(
+          `Gasto distribuido proporcionalmente en ${multiLotBreakdown.length} lotes (${formattedAmt}).`,
+          `Expense proportionally distributed across ${multiLotBreakdown.length} lots (${formattedAmt}).`
+        )
       );
       setExpLotId('');
       setExpItem('');
@@ -862,8 +920,11 @@ export const PropertyView: React.FC<Props> = ({
     } catch (err: unknown) {
       setErrorMsg(
         err instanceof Error
-          ? err.message
-          : 'Error al registrar el gasto distribuido en el backend (expense.allocate).'
+          ? translateError(err.message)
+          : bi(
+              'Error al registrar el gasto distribuido en el backend (expense.allocate).',
+              'Error recording distributed expense on the server (expense.allocate).'
+            )
       );
     } finally {
       setSavingProgress(null);
@@ -880,20 +941,20 @@ export const PropertyView: React.FC<Props> = ({
 
     const targetCampId = harvCampanaId || activeCampaign?.id || '';
     if (!targetCampId) {
-      setErrorMsg('Selecciona una campaña para registrar la cosecha.');
+      setErrorMsg(bi('Selecciona una campaña para registrar la cosecha.', 'Select a campaign to record the harvest.'));
       return;
     }
     if (!harvLotId) {
-      setErrorMsg('Selecciona el lote donde se realizó la cosecha.');
+      setErrorMsg(bi('Selecciona el lote donde se realizó la cosecha.', 'Select the lot where the harvest took place.'));
       return;
     }
     if (!harvProducto.trim()) {
-      setErrorMsg('Ingresa el producto cosechado.');
+      setErrorMsg(bi('Ingresa el producto cosechado.', 'Enter the harvested product.'));
       return;
     }
     const tonsNum = parseDecimalNumber(harvToneladas);
     if (tonsNum <= 0) {
-      setErrorMsg('Ingresa una cantidad válida de toneladas mayores a 0.');
+      setErrorMsg(bi('Ingresa una cantidad válida de toneladas mayores a 0.', 'Enter a valid quantity of tons greater than 0.'));
       return;
     }
 
@@ -911,8 +972,12 @@ export const PropertyView: React.FC<Props> = ({
       if (createdHarvest?.id) {
         patchHarvestAcrossCaches(createdHarvest);
       }
+      const tonsStr = tonsNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       setSuccessMsg(
-        `Cosecha sin precio registrada (${tonsNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t de ${harvProducto.trim()}). No se creó ingreso financiero todavía.`
+        bi(
+          `Cosecha sin precio registrada (${tonsStr} t de ${harvProducto.trim()}). No se creó ingreso financiero todavía.`,
+          `Unpriced harvest recorded (${tonsStr} t of ${harvProducto.trim()}). No financial income was created yet.`
+        )
       );
       setHarvLotId('');
       setHarvProducto('');
@@ -927,8 +992,11 @@ export const PropertyView: React.FC<Props> = ({
     } catch (err: unknown) {
       setErrorMsg(
         err instanceof Error
-          ? err.message
-          : 'Error al registrar cosecha sin precio (harvest.create).'
+          ? translateError(err.message)
+          : bi(
+              'Error al registrar cosecha sin precio (harvest.create).',
+              'Error recording unpriced harvest (harvest.create).'
+            )
       );
     } finally {
       setSaving(false);
@@ -965,25 +1033,35 @@ export const PropertyView: React.FC<Props> = ({
     const targetCampId = priceCampanaId || activeCampaign?.id || selectedHarvestForPrice.campanaId || '';
 
     if (!targetCampId) {
-      setPriceModalError('Selecciona la campaña para registrar el ingreso.');
+      setPriceModalError(bi('Selecciona la campaña para registrar el ingreso.', 'Select the campaign to record the income.'));
       return;
     }
     if (tonsNum <= 0) {
-      setPriceModalError('Ingresa una cantidad de toneladas mayor a 0.');
+      setPriceModalError(bi('Ingresa una cantidad de toneladas mayor a 0.', 'Enter a quantity of tons greater than 0.'));
       return;
     }
     if (tonsNum > selectedHarvestForPrice.pendiente + 0.0001) {
+      const pendStr = selectedHarvestForPrice.pendiente.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 3 });
       setPriceModalError(
-        `No puedes asignar más de ${selectedHarvestForPrice.pendiente.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 3 })} t pendientes.`
+        bi(
+          `No puedes asignar más de ${pendStr} t pendientes.`,
+          `You cannot assign more than ${pendStr} pending t.`
+        )
       );
       return;
     }
     if (precioInputNum <= 0) {
-      setPriceModalError(`Ingresa un precio ${priceMoneda === 'USD' ? 'USD' : 'Bs'}/tonelada mayor a 0.`);
+      const currStr = priceMoneda === 'USD' ? 'USD' : 'Bs';
+      setPriceModalError(
+        bi(
+          `Ingresa un precio ${currStr}/tonelada mayor a 0.`,
+          `Enter a ${currStr}/ton price greater than 0.`
+        )
+      );
       return;
     }
     if (tcNum <= 0) {
-      setPriceModalError('Ingresa un tipo de cambio válido mayor a 0.');
+      setPriceModalError(bi('Ingresa un tipo de cambio válido mayor a 0.', 'Enter a valid exchange rate greater than 0.'));
       return;
     }
 
@@ -1018,8 +1096,14 @@ export const PropertyView: React.FC<Props> = ({
         patchHarvestAcrossCaches(priceRes.cosecha);
       }
       const totalUsd = tonsNum * precioUsdTonToSend;
+      const tonsStr = tonsNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const priceStr = precioUsdTonToSend.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const totalStr = totalUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       setSuccessMsg(
-        `Precio asignado: ${tonsNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t a USD ${precioUsdTonToSend.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/t (USD ${totalUsd.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}). El ingreso fue generado por el servidor.`
+        bi(
+          `Precio asignado: ${tonsStr} t a USD ${priceStr}/t (USD ${totalStr}). El ingreso fue generado por el servidor.`,
+          `Price assigned: ${tonsStr} t at USD ${priceStr}/t (USD ${totalStr}). Income was generated by the server.`
+        )
       );
       priceCurrencyAnchorRef.current = null;
       setSelectedHarvestForPrice(null);
@@ -1037,8 +1121,11 @@ export const PropertyView: React.FC<Props> = ({
     } catch (err: unknown) {
       setPriceModalError(
         err instanceof Error
-          ? err.message
-          : 'Error al asignar precio a la cosecha (harvest.price).'
+          ? translateError(err.message)
+          : bi(
+              'Error al asignar precio a la cosecha (harvest.price).',
+              'Error assigning price to harvest (harvest.price).'
+            )
       );
     } finally {
       setSavingHarvestPrice(false);
@@ -1047,7 +1134,7 @@ export const PropertyView: React.FC<Props> = ({
 
   const handleOpenEditHarvest = (harvest: HarvestRecord) => {
     if (!effectiveIsAdmin) {
-      setErrorMsg('Solo el Administrador puede editar cosechas registradas.');
+      setErrorMsg(bi('Solo el Administrador puede editar cosechas registradas.', 'Only the Administrator can edit recorded harvests.'));
       return;
     }
     setEditingHarvest(harvest);
@@ -1064,7 +1151,7 @@ export const PropertyView: React.FC<Props> = ({
     e.preventDefault();
     if (!editingHarvest || savingEditHarvest) return;
     if (!effectiveIsAdmin) {
-      setEditHarvestError('Solo el Administrador puede editar cosechas registradas.');
+      setEditHarvestError(bi('Solo el Administrador puede editar cosechas registradas.', 'Only the Administrator can edit recorded harvests.'));
       return;
     }
     setEditHarvestError(null);
@@ -1075,28 +1162,32 @@ export const PropertyView: React.FC<Props> = ({
     const tonsNum = parseDecimalNumber(editHarvToneladas);
 
     if (!editHarvFecha) {
-      setEditHarvestError('La fecha de cosecha es obligatoria.');
+      setEditHarvestError(bi('La fecha de cosecha es obligatoria.', 'Harvest date is required.'));
       return;
     }
     if (!editHarvCampanaId) {
-      setEditHarvestError('Selecciona la campaña.');
+      setEditHarvestError(bi('Selecciona la campaña.', 'Select the campaign.'));
       return;
     }
     if (!editHarvLotId) {
-      setEditHarvestError('Selecciona el lote.');
+      setEditHarvestError(bi('Selecciona el lote.', 'Select the lot.'));
       return;
     }
     if (!editHarvProducto.trim()) {
-      setEditHarvestError('Indica el producto cosechado.');
+      setEditHarvestError(bi('Indica el producto cosechado.', 'Enter the harvested product.'));
       return;
     }
     if (tonsNum <= 0) {
-      setEditHarvestError('Las toneladas deben ser mayores a 0.');
+      setEditHarvestError(bi('Las toneladas deben ser mayores a 0.', 'Tons must be greater than 0.'));
       return;
     }
     if (hasAsignaciones && tonsNum + 0.0001 < editingHarvest.asignadas) {
+      const assignedStr = editingHarvest.asignadas.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 3 });
       setEditHarvestError(
-        `No puedes reducir las toneladas por debajo de las ya asignadas con precio (${editingHarvest.asignadas.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 3 })} t).`
+        bi(
+          `No puedes reducir las toneladas por debajo de las ya asignadas con precio (${assignedStr} t).`,
+          `You cannot reduce tons below the amount already assigned a price (${assignedStr} t).`
+        )
       );
       return;
     }
@@ -1116,7 +1207,12 @@ export const PropertyView: React.FC<Props> = ({
         patchHarvestAcrossCaches(updatedHarvest);
       }
       setEditingHarvest(null);
-      setSuccessMsg('Cosecha actualizada correctamente. Las asignaciones históricas de precio se conservaron intactas.');
+      setSuccessMsg(
+        bi(
+          'Cosecha actualizada correctamente. Las asignaciones históricas de precio se conservaron intactas.',
+          'Harvest updated successfully. Historical price assignments were kept intact.'
+        )
+      );
       invalidateQueries(['harvest.']);
       await loadPendingHarvests();
       if (pendientesMode === 'todas' || allHarvestsQuery.hasLoaded) {
@@ -1124,7 +1220,9 @@ export const PropertyView: React.FC<Props> = ({
       }
     } catch (err: unknown) {
       setEditHarvestError(
-        err instanceof Error ? err.message : 'Error al actualizar la cosecha (harvest.update).'
+        err instanceof Error
+          ? translateError(err.message)
+          : bi('Error al actualizar la cosecha (harvest.update).', 'Error updating harvest (harvest.update).')
       );
     } finally {
       setSavingEditHarvest(false);
@@ -1138,33 +1236,33 @@ export const PropertyView: React.FC<Props> = ({
     setSuccessMsg(null);
 
     if (!activeCampaign) {
-      setErrorMsg('Debes seleccionar o activar una campaña activa.');
+      setErrorMsg(bi('Debes seleccionar o activar una campaña activa.', 'You must select or activate an active campaign.'));
       return;
     }
 
     if (!incLotId) {
-      setErrorMsg('Selecciona el lote de donde proviene la cosecha.');
+      setErrorMsg(bi('Selecciona el lote de donde proviene la cosecha.', 'Select the lot where the harvest comes from.'));
       return;
     }
 
     if (!incConcepto.trim()) {
-      setErrorMsg('Selecciona un producto o concepto de venta.');
+      setErrorMsg(bi('Selecciona un producto o concepto de venta.', 'Select a product or sale concept.'));
       return;
     }
 
     if (!incCantidad || Number(incCantidad) <= 0) {
-      setErrorMsg('Ingresa una cantidad válida mayor a 0.');
+      setErrorMsg(bi('Ingresa una cantidad válida mayor a 0.', 'Enter a valid quantity greater than 0.'));
       return;
     }
 
     if (!incPrecio || Number(incPrecio) <= 0) {
-      setErrorMsg('Ingresa el precio unitario de venta.');
+      setErrorMsg(bi('Ingresa el precio unitario de venta.', 'Enter the unit sale price.'));
       return;
     }
 
     const tcNum = parseDecimalNumber(incTc);
     if (tcNum <= 0) {
-      setErrorMsg('Ingresa un tipo de cambio válido mayor a 0.');
+      setErrorMsg(bi('Ingresa un tipo de cambio válido mayor a 0.', 'Enter a valid exchange rate greater than 0.'));
       return;
     }
 
@@ -1195,11 +1293,11 @@ export const PropertyView: React.FC<Props> = ({
         observacion: incObs.trim(),
       });
 
-      setSuccessMsg('Ingreso de cosecha registrado exitosamente.');
+      setSuccessMsg(bi('Ingreso de cosecha registrado exitosamente.', 'Harvest income recorded successfully.'));
       setIncLotId('');
       setIncConcepto('');
       setIncCantidad('');
-      setIncUnidad('');
+      setIncUnidad('toneladas');
       setIncPrecio('');
       setIncObs('');
       setIncTc(
@@ -1210,7 +1308,11 @@ export const PropertyView: React.FC<Props> = ({
       setCurrentScreen('main');
       onRefreshData('movements');
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al registrar el ingreso');
+      setErrorMsg(
+        err instanceof Error
+          ? translateError(err.message)
+          : bi('Error al registrar el ingreso', 'Error recording income')
+      );
     } finally {
       setSaving(false);
     }
@@ -1219,7 +1321,7 @@ export const PropertyView: React.FC<Props> = ({
   // Open Edit Modal for a manual expense or income (Admin only)
   const handleOpenEditMovement = (m: MovementItem) => {
     if (!effectiveIsAdmin) {
-      setErrorMsg('Solo el Administrador puede editar movimientos guardados.');
+      setErrorMsg(bi('Solo el Administrador puede editar movimientos guardados.', 'Only the Administrator can edit saved records.'));
       return;
     }
     editMovCurrencyAnchorRef.current = null;
@@ -1245,7 +1347,7 @@ export const PropertyView: React.FC<Props> = ({
     e.preventDefault();
     if (!editingMovement) return;
     if (!effectiveIsAdmin) {
-      setErrorMsg('Solo el Administrador puede modificar movimientos guardados.');
+      setErrorMsg(bi('Solo el Administrador puede modificar movimientos guardados.', 'Only the Administrator can modify saved records.'));
       setEditingMovement(null);
       return;
     }
@@ -1255,11 +1357,11 @@ export const PropertyView: React.FC<Props> = ({
     const cantNum = Number(editCantidad);
     const precioNum = Number(editPrecio);
     if (isNaN(cantNum) || cantNum <= 0) {
-      setErrorMsg('La cantidad debe ser mayor a 0.');
+      setErrorMsg(bi('La cantidad debe ser mayor a 0.', 'Quantity must be greater than 0.'));
       return;
     }
     if (isNaN(precioNum) || precioNum < 0) {
-      setErrorMsg('El precio unitario no puede ser negativo.');
+      setErrorMsg(bi('El precio unitario no puede ser negativo.', 'Unit price cannot be negative.'));
       return;
     }
     const totalCalc = cantNum * precioNum;
@@ -1282,7 +1384,7 @@ export const PropertyView: React.FC<Props> = ({
           total: totalCalc,
           observacion: editObs.trim(),
         });
-        setSuccessMsg('Gasto agrícola actualizado en Google Sheets.');
+        setSuccessMsg(bi('Gasto agrícola actualizado en Google Sheets.', 'Agricultural expense updated in Google Sheets.'));
       } else if (editingMovement.tipo === 'ingreso') {
         await updateIncome(editingMovement.id, {
           fecha: editFecha,
@@ -1297,13 +1399,17 @@ export const PropertyView: React.FC<Props> = ({
           total: totalCalc,
           observacion: editObs.trim(),
         });
-        setSuccessMsg('Ingreso de cosecha actualizado en Google Sheets.');
+        setSuccessMsg(bi('Ingreso de cosecha actualizado en Google Sheets.', 'Harvest income updated in Google Sheets.'));
       }
 
       setEditingMovement(null);
       onRefreshData('movements');
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al actualizar el registro');
+      setErrorMsg(
+        err instanceof Error
+          ? translateError(err.message)
+          : bi('Error al actualizar el registro', 'Error updating the record')
+      );
     } finally {
       setSavingEdit(false);
     }
@@ -1311,7 +1417,7 @@ export const PropertyView: React.FC<Props> = ({
 
   const handlePromptDeleteExp = (id: string, titulo: string) => {
     if (!effectiveIsAdmin) {
-      setErrorMsg('Solo el Administrador puede eliminar gastos guardados.');
+      setErrorMsg(bi('Solo el Administrador puede eliminar gastos guardados.', 'Only the Administrator can delete saved expenses.'));
       return;
     }
     setItemToDelete({ id, tipo: 'gasto', titulo });
@@ -1319,7 +1425,7 @@ export const PropertyView: React.FC<Props> = ({
 
   const handlePromptDeleteInc = (id: string, titulo: string) => {
     if (!effectiveIsAdmin) {
-      setErrorMsg('Solo el Administrador puede eliminar ingresos guardados.');
+      setErrorMsg(bi('Solo el Administrador puede eliminar ingresos guardados.', 'Only the Administrator can delete saved income.'));
       return;
     }
     setItemToDelete({ id, tipo: 'ingreso', titulo });
@@ -1328,7 +1434,7 @@ export const PropertyView: React.FC<Props> = ({
   const handleConfirmDeleteItem = async () => {
     if (!itemToDelete) return;
     if (!effectiveIsAdmin) {
-      setErrorMsg('Solo el Administrador puede eliminar registros guardados.');
+      setErrorMsg(bi('Solo el Administrador puede eliminar registros guardados.', 'Only the Administrator can delete saved records.'));
       setItemToDelete(null);
       return;
     }
@@ -1337,15 +1443,19 @@ export const PropertyView: React.FC<Props> = ({
     try {
       if (itemToDelete.tipo === 'gasto') {
         await deleteExpense(itemToDelete.id);
-        setSuccessMsg('Gasto agrícola eliminado de Google Sheets.');
+        setSuccessMsg(bi('Gasto agrícola eliminado de Google Sheets.', 'Agricultural expense deleted from Google Sheets.'));
       } else {
         await deleteIncome(itemToDelete.id);
-        setSuccessMsg('Ingreso de cosecha eliminado de Google Sheets.');
+        setSuccessMsg(bi('Ingreso de cosecha eliminado de Google Sheets.', 'Harvest income deleted from Google Sheets.'));
       }
       setItemToDelete(null);
       onRefreshData('movements');
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Error al eliminar');
+      setErrorMsg(
+        err instanceof Error
+          ? translateError(err.message)
+          : bi('Error al eliminar', 'Error deleting record')
+      );
     } finally {
       setDeletingItem(false);
     }
@@ -1395,7 +1505,7 @@ export const PropertyView: React.FC<Props> = ({
 
   return (
     <div className="w-full max-w-full space-y-4">
-      {currentScreen !== 'main' && (
+      {currentScreen !== 'main' && currentScreen !== 'pendientes_precio' && (
         <div className="flex items-center gap-3 my-1">
           <button
             type="button"
@@ -1406,23 +1516,27 @@ export const PropertyView: React.FC<Props> = ({
                 setCurrentScreen('main');
               }
             }}
-            aria-label={isLotSubScreen ? 'Volver a Mis lotes' : 'Volver a Propiedad'}
+            aria-label={
+              isLotSubScreen
+                ? bi('Volver a Mis lotes', 'Back to My lots')
+                : bi('Volver a Propiedad', 'Back to Property')
+            }
             className="min-h-[44px] min-w-[44px] px-3 rounded-xl bg-white border border-slate-200 flex items-center justify-center gap-1.5 text-slate-800 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer shrink-0"
           >
             <ArrowLeft className="h-4 w-4 text-slate-800 shrink-0" />
-            <span className="text-sm font-semibold text-slate-800">Volver</span>
+            <span className="text-sm font-semibold text-slate-800">{t('common.back')}</span>
           </button>
           <div className="min-w-0 flex-1">
             <h2 className="text-lg sm:text-xl font-bold text-slate-900 truncate">
-              {currentScreen === 'ingreso' && 'Venta / Cosecha'}
-              {currentScreen === 'gasto' && 'Registrar gasto'}
-              {currentScreen === 'lotes' && 'Mis lotes'}
-              {currentScreen === 'pendientes_precio' && 'Pendientes de precio'}
-              {currentScreen === 'maquinaria_recibida' && 'Trabajos de maquinaria'}
-              {currentScreen === 'historial' && 'Historial'}
-              {currentScreen === 'lote_trabajos' && 'Trabajos de maquinaria'}
-              {currentScreen === 'lote_cosechas' && 'Cosechas e ingresos'}
-              {currentScreen === 'lote_gastos' && 'Gastos directos'}
+              {currentScreen === 'ingreso' &&
+                (effectiveIsAdmin ? bi('Venta / Cosecha', 'Sale / Harvest') : bi('Cosecha', 'Harvest'))}
+              {currentScreen === 'gasto' && bi('Registrar gasto', 'Record expense')}
+              {currentScreen === 'lotes' && bi('Mis lotes', 'My lots')}
+              {currentScreen === 'maquinaria_recibida' && bi('Trabajos de maquinaria', 'Machinery jobs')}
+              {currentScreen === 'historial' && bi('Historial', 'History')}
+              {currentScreen === 'lote_trabajos' && bi('Trabajos de maquinaria', 'Machinery jobs')}
+              {currentScreen === 'lote_cosechas' && bi('Cosechas e ingresos', 'Harvests & income')}
+              {currentScreen === 'lote_gastos' && bi('Gastos directos', 'Direct expenses')}
             </h2>
             {isLotSubScreen && activeLotForScreen && (
               <p className="text-xs font-semibold text-[#24875B] truncate">
@@ -1474,19 +1588,19 @@ export const PropertyView: React.FC<Props> = ({
       {currentScreen === 'main' && (
         <div className="space-y-6">
           {/* SECCIÓN A: REGISTRAR */}
-          <section className="space-y-2.5" aria-label="Registrar movimiento agrícola">
+          <section className="space-y-2.5" aria-label={bi('Registrar movimiento agrícola', 'Record agricultural entry')}>
             <h2 className="text-sm font-bold text-slate-600 px-0.5">
-              Registrar
+              {bi('Registrar', 'Record')}
             </h2>
 
             <div className="grid grid-cols-2 gap-3 w-full">
-              {/* Botón VENTA / COSECHA */}
+              {/* Botón VENTA / COSECHA (Solo Cosecha para usuario normal) */}
               <button
                 type="button"
                 onClick={() => {
                   resetNewIncomeForm();
                   resetNewHarvestForm();
-                  setIngresoMode('venta_directa');
+                  setIngresoMode(effectiveIsAdmin ? 'venta_directa' : 'sin_precio');
                   setCurrentScreen('ingreso');
                 }}
                 className="w-full px-3.5 py-3 rounded-2xl bg-[#2D7D2C] hover:bg-[#256624] active:bg-[#1D541C] text-white flex flex-col items-center justify-center gap-1 transition active:scale-[0.98] cursor-pointer select-none shadow-xs"
@@ -1494,11 +1608,11 @@ export const PropertyView: React.FC<Props> = ({
                 <div className="flex items-center justify-center gap-2">
                   <Wheat className="h-5 w-5 text-white shrink-0" strokeWidth={2.2} />
                   <span className="text-sm sm:text-base font-bold tracking-tight text-white leading-tight text-center">
-                    Venta / Cosecha
+                    {effectiveIsAdmin ? bi('Venta / Cosecha', 'Sale / Harvest') : bi('Cosecha', 'Harvest')}
                   </span>
                 </div>
                 <span className="text-[11px] text-white/90 font-medium text-center leading-tight">
-                  Ingreso del lote
+                  {effectiveIsAdmin ? bi('Ingreso del lote', 'Lot income') : bi('Registrar cosecha', 'Record harvest')}
                 </span>
               </button>
 
@@ -1514,20 +1628,20 @@ export const PropertyView: React.FC<Props> = ({
                 <div className="flex items-center justify-center gap-2">
                   <CircleMinus className="h-5 w-5 text-white shrink-0" strokeWidth={2.2} />
                   <span className="text-sm sm:text-base font-bold tracking-tight text-white leading-tight text-center">
-                    Gasto
+                    {bi('Gasto', 'Expense')}
                   </span>
                 </div>
                 <span className="text-[11px] text-white/90 font-medium text-center leading-tight">
-                  Insumos del lote
+                  {bi('Insumos del lote', 'Lot inputs')}
                 </span>
               </button>
             </div>
           </section>
 
           {/* SECCIÓN B: CONSULTAR */}
-          <section className="space-y-2.5" aria-label="Consultar registros de propiedad">
+          <section className="space-y-2.5" aria-label={bi('Consultar registros de propiedad', 'View property records')}>
             <h2 className="text-sm font-bold text-slate-600 px-0.5">
-              Consultar
+              {bi('Consultar', 'Browse')}
             </h2>
 
             <div className="rounded-2xl border border-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
@@ -1543,11 +1657,13 @@ export const PropertyView: React.FC<Props> = ({
                   </div>
                   <div className="min-w-0 flex-1">
                     <h3 className="text-base font-bold text-slate-900 leading-snug">
-                      Historial
+                      {bi('Historial', 'History')}
                     </h3>
                     <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
                       {totalMovementsCount}{' '}
-                      {totalMovementsCount === 1 ? 'movimiento' : 'movimientos'}
+                      {totalMovementsCount === 1
+                        ? bi('movimiento', 'record')
+                        : bi('movimientos', 'records')}
                     </p>
                   </div>
                 </div>
@@ -1566,13 +1682,13 @@ export const PropertyView: React.FC<Props> = ({
                   </div>
                   <div className="min-w-0 flex-1">
                     <h3 className="text-base font-bold text-slate-900 leading-snug">
-                      Historial maquinaria
+                      {bi('Historial maquinaria', 'Machinery history')}
                     </h3>
                     <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
                       {linkedPropertyJobs.length}{' '}
                       {linkedPropertyJobs.length === 1
-                        ? 'labor recibida en lotes'
-                        : 'labores recibidas en lotes'}
+                        ? bi('labor recibida en lotes', 'job received on lots')
+                        : bi('labores recibidas en lotes', 'jobs received on lots')}
                     </p>
                   </div>
                 </div>
@@ -1591,409 +1707,137 @@ export const PropertyView: React.FC<Props> = ({
                   </div>
                   <div className="min-w-0 flex-1">
                     <h3 className="text-base font-bold text-slate-900 leading-snug">
-                      Mis lotes
+                      {bi('Mis lotes', 'My lots')}
                     </h3>
                     <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
                       {lots.length}{' '}
-                      {lots.length === 1 ? 'lote registrado' : 'lotes registrados'}
+                      {lots.length === 1
+                        ? bi('lote registrado', 'registered lot')
+                        : bi('lotes registrados', 'registered lots')}
                     </p>
                   </div>
                 </div>
                 <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
               </button>
 
-              {/* 4. Pendientes de precio */}
-              <button
-                type="button"
-                onClick={() => setCurrentScreen('pendientes_precio')}
-                className="w-full px-4 py-4 flex items-center justify-between gap-3 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[72px]"
-              >
-                <div className="flex items-center gap-3.5 min-w-0">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-amber-50 border border-amber-200/80 text-amber-700 shrink-0">
-                    <Clock className="h-5 w-5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <h3 className="text-base font-bold text-slate-900 leading-snug">
-                        Pendientes de precio
-                      </h3>
-                      <span className="text-sm font-bold text-slate-600 tabular-nums shrink-0">
-                        {pendingHarvestsCount !== null ? pendingHarvestsCount : '—'}
-                      </span>
+              {/* 4. Ventas de cosecha (Solo Administrador — completamente oculto para usuarios normales) */}
+              {effectiveIsAdmin && (
+                <button
+                  type="button"
+                  onClick={() => setCurrentScreen('pendientes_precio')}
+                  className="w-full px-4 py-4 flex items-center justify-between gap-3 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer text-left min-h-[72px]"
+                >
+                  <div className="flex items-center gap-3.5 min-w-0">
+                    <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-amber-50 border border-amber-200/80 text-amber-700 shrink-0">
+                      <Wheat className="h-5 w-5" />
                     </div>
-                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
-                      {pendingHarvestsCount !== null && pendingHarvestsCount > 0
-                        ? `${pendingHarvestsCount} ${pendingHarvestsCount === 1 ? 'cosecha con toneladas por fijar' : 'cosechas con toneladas por fijar'}`
-                        : 'Cosechas con toneladas sin precio asignado'}
-                    </p>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <h3 className="text-base font-bold text-slate-900 leading-snug">
+                          {t('harvestSales.title')}
+                        </h3>
+                        <span className="text-sm font-bold text-slate-600 tabular-nums shrink-0">
+                          {pendingHarvestsCount !== null ? pendingHarvestsCount : '—'}
+                        </span>
+                      </div>
+                      <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
+                        {pendingHarvestsCount !== null && pendingHarvestsCount > 0
+                          ? `${pendingHarvestsCount} ${
+                              pendingHarvestsCount === 1
+                                ? bi('cosecha con toneladas disponibles', 'harvest with available tons')
+                                : bi('cosechas con toneladas disponibles', 'harvests with available tons')
+                            }`
+                          : bi('Ventas parciales o totales, compradores y precios', 'Partial or full sales, buyers and prices')}
+                      </p>
+                    </div>
                   </div>
-                </div>
-                <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
-              </button>
+                  <ChevronRight className="h-5 w-5 text-slate-400 shrink-0" />
+                </button>
+              )}
             </div>
           </section>
         </div>
       )}
 
       {/* ============================================================ */}
-      {/* SUB-VISTA: PENDIENTES DE PRECIO (harvest.pending / list / price) */}
+      {/* SUB-VISTA: VENTAS DE COSECHA (Solo Administrador)            */}
       {/* ============================================================ */}
-      {currentScreen === 'pendientes_precio' && (() => {
-        const sourceList = pendientesMode === 'pendientes' ? pendingHarvests : allHarvestsList;
-        const qHarv = pendientesSearch.trim().toLowerCase();
-        const filteredHarvests = sourceList
-          .filter((h) => {
-            if (pendientesCampaignId !== 'all' && h.campanaId && String(h.campanaId) !== String(pendientesCampaignId)) {
-              return false;
-            }
-            if (!qHarv) return true;
-            const lotName = h.loteNombre || lots.find((l) => String(l.id) === String(h.loteId))?.nombre || '';
-            const campName = h.campanaNombre || campaigns.find((c) => String(c.id) === String(h.campanaId))?.nombre || '';
-            return `${h.producto} ${lotName} ${campName} ${formatDateDDMMAAAA(h.fecha)} ${h.observacion || ''}`
-              .toLowerCase()
-              .includes(qHarv);
-          })
-          .sort(compareChronologicalDesc);
-
-        const totalPendingTons = filteredHarvests.reduce((sum, h) => sum + (Number(h.pendiente) || 0), 0);
-        const totalHarvestedTons = filteredHarvests.reduce((sum, h) => sum + (Number(h.toneladas) || 0), 0);
-        const totalAssignedTons = filteredHarvests.reduce((sum, h) => sum + (Number(h.asignadas) || 0), 0);
-
-        return (
-          <div className="space-y-3.5">
-            {/* Resumen de cosechas pendientes */}
-            <div className="rounded-2xl border border-[#E2E7E3] bg-white p-4 space-y-2">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <p className="text-xs font-semibold text-[#5E6D64]">
-                      Toneladas pendientes
-                    </p>
-                    {harvestsRevalidating && (
-                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#24875B]">
-                        <RefreshCw className="h-3 w-3 animate-spin" />
-                        <span>Actualizando...</span>
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-xl sm:text-2xl font-extrabold text-[#24875B] tabular-nums mt-0.5">
-                    {totalPendingTons.toLocaleString('es-BO', {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}{' '}
-                    <span className="text-sm font-bold text-[#5E6D64]">t</span>
-                  </p>
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      pendientesMode === 'pendientes'
-                        ? loadPendingHarvests()
-                        : loadAllHarvests()
-                    }
-                    disabled={harvestsLoading}
-                    title="Actualizar cosechas"
-                    className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EAF5EE] text-[#24875B] hover:bg-[#DCEFE4] transition cursor-pointer disabled:opacity-50"
-                  >
-                    <RefreshCw className={`h-4 w-4 ${harvestsLoading ? 'animate-spin' : ''}`} />
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {harvestsError && (
-              <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 flex items-start justify-between gap-2.5">
-                <div className="flex items-start gap-2 min-w-0 flex-1">
-                  <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
-                  <div className="text-xs text-red-900 space-y-0.5 min-w-0 flex-1">
-                    <p className="font-bold">
-                      {harvestsHasLoaded
-                        ? 'No se pudo actualizar. Mostrando los últimos datos cargados.'
-                        : 'Error al consultar cosechas en Google Apps Script'}
-                    </p>
-                    <p className="break-words text-red-800/90">{harvestsError}</p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    pendientesMode === 'pendientes'
-                      ? loadPendingHarvests()
-                      : loadAllHarvests()
-                  }
-                  disabled={harvestsLoading}
-                  className="text-xs font-bold text-red-700 hover:text-red-900 underline shrink-0 cursor-pointer disabled:opacity-50"
-                >
-                  Reintentar
-                </button>
-              </div>
-            )}
-
-            <ListToolbar
-              title="Cosechas"
-              countLabel={`${filteredHarvests.length} reg.`}
-              searchValue={pendientesSearch}
-              onSearchChange={setPendientesSearch}
-              searchPlaceholder="Buscar producto, lote o campaña..."
-              filters={
-                <div className="flex items-center gap-1.5">
-                  <CompactFilter
-                    value={pendientesMode}
-                    onChange={(val) => setPendientesMode(val as 'pendientes' | 'todas')}
-                    ariaLabel="Filtrar cosechas"
-                    options={[
-                      { value: 'pendientes', label: 'Pendientes' },
-                      { value: 'todas', label: 'Todas' },
-                    ]}
-                  />
-                  {campaigns.length > 0 && (
-                    <CompactFilter
-                      value={pendientesCampaignId}
-                      onChange={(val) => setPendientesCampaignId(val)}
-                      ariaLabel="Filtrar por campaña"
-                      options={[
-                        { value: 'all', label: 'Todas' },
-                        ...campaigns.map((c) => ({
-                          value: String(c.id),
-                          label: c.activa ? `${c.nombre} (Activa)` : c.nombre,
-                        })),
-                      ]}
-                    />
-                  )}
-                </div>
-              }
-            />
-
-            {harvestsInitialLoading || (!harvestsHasLoaded && !harvestsError) ? (
-              <div className="rounded-2xl border border-[#E2E7E3] bg-white p-8 text-center text-xs text-[#5E6D64] flex items-center justify-center gap-2">
-                <RefreshCw className="h-4 w-4 animate-spin text-[#24875B]" />
-                <span>Consultando cosechas...</span>
-              </div>
-            ) : (
-              <CompactList
-                isEmpty={filteredHarvests.length === 0}
-                emptyMessage={
-                  !harvestsHasLoaded && harvestsError
-                    ? 'No se pudieron cargar las cosechas.'
-                    : qHarv
-                    ? 'No se encontraron cosechas con esa búsqueda.'
-                    : pendientesMode === 'pendientes'
-                    ? 'No hay cosechas pendientes de precio.'
-                    : 'No hay cosechas registradas para este filtro.'
-                }
-              >
-                {filteredHarvests.map((h) => {
-                  const isExpanded = expandedHarvestId === h.id;
-                  const lotName =
-                    h.loteNombre || lots.find((l) => String(l.id) === String(h.loteId))?.nombre || 'Lote';
-                  const campName =
-                    h.campanaNombre ||
-                    campaigns.find((c) => String(c.id) === String(h.campanaId))?.nombre ||
-                    'Sin campaña';
-                  const hasPending = h.pendiente > 0.0001;
-
-                  return (
-                    <CompactListRow
-                      key={h.id}
-                      icon={
-                        <div className="w-8 h-8 rounded-lg bg-[#EAF5EE] border border-[#BFE0CD]/70 flex items-center justify-center">
-                          <VisualIcon name={getIconDefinition(h.producto, 'ingreso').id || 'granos'} size="xs" />
-                        </div>
-                      }
-                      title={
-                        <span className="flex items-center gap-1.5 flex-wrap">
-                          <span>{formatConcept(h.producto)}</span>
-                          <span
-                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md ${
-                              hasPending
-                                ? 'bg-amber-50 text-amber-800 border border-amber-200'
-                                : 'bg-[#EAF5EE] text-[#1D5C3F] border border-[#BFE0CD]'
-                            }`}
-                          >
-                            {hasPending ? 'Sin precio' : 'Completa'}
-                          </span>
-                        </span>
-                      }
-                      subtitle={
-                        <span>
-                          {formatDateDDMMAAAA(h.fecha)} ·{' '}
-                          <span className="font-semibold text-[#24875B]">{lotName}</span> · {campName}
-                        </span>
-                      }
-                      rightPrimary={
-                        <span className={`font-mono ${hasPending ? 'text-amber-700' : 'text-[#24875B]'}`}>
-                          {h.pendiente.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t
-                        </span>
-                      }
-                      rightSecondary={`de ${h.toneladas.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t`}
-                      isExpanded={isExpanded}
-                      onClick={() => setExpandedHarvestId(isExpanded ? null : h.id)}
-                      expandedContent={
-                        <div className="space-y-3 text-xs">
-                          <div className="grid grid-cols-3 divide-x divide-[#E6EBE7] rounded-xl border border-[#E2E7E3] bg-white py-2 text-center">
-                            <div className="px-1.5">
-                              <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Total</span>
-                              <span className="text-xs font-bold text-[#26352D] font-mono">
-                                {h.toneladas.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t
-                              </span>
-                            </div>
-                            <div className="px-1.5">
-                              <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Asignadas</span>
-                              <span className="text-xs font-bold text-[#24875B] font-mono">
-                                {h.asignadas.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t
-                              </span>
-                            </div>
-                            <div className="px-1.5">
-                              <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Pendientes</span>
-                              <span className={`text-xs font-black font-mono ${hasPending ? 'text-amber-700' : 'text-[#24875B]'}`}>
-                                {h.pendiente.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t
-                              </span>
-                            </div>
-                          </div>
-
-                          {h.observacion && (
-                            <p className="text-[11px] text-[#5E6D64] italic px-1">
-                              Obs.: {h.observacion}
-                            </p>
-                          )}
-
-                          <div className={`flex items-center gap-2 ${hasPending && effectiveIsAdmin ? 'flex-wrap sm:flex-nowrap' : ''}`}>
-                            {hasPending && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleOpenAssignPrice(h);
-                                }}
-                                className="flex-1 min-h-[42px] px-4 py-2.5 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer shadow-2xs"
-                              >
-                                <DollarSign className="h-4 w-4 shrink-0" />
-                                <span>Asignar precio ({h.pendiente.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t disp.)</span>
-                              </button>
-                            )}
-                            {effectiveIsAdmin && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleOpenEditHarvest(h);
-                                }}
-                                className={`${hasPending ? 'px-3.5' : 'w-full px-4'} min-h-[42px] py-2.5 rounded-xl bg-white hover:bg-[#F2F5F3] text-[#26352D] border border-[#D4DDD6] text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer`}
-                              >
-                                <Edit3 className="h-3.5 w-3.5 shrink-0" />
-                                <span>Editar</span>
-                              </button>
-                            )}
-                          </div>
-
-                          {/* Historial de asignaciones de precio (Solo cuando existan asignaciones) */}
-                          {h.asignaciones && h.asignaciones.length > 0 && (
-                            <div className="rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
-                              <div className="px-3 py-2 bg-[#F8FAF8] border-b border-[#EFF2EF]">
-                                <span className="text-[11px] font-bold text-[#26352D]">
-                                  Asignaciones de precio ({h.asignaciones.length})
-                                </span>
-                              </div>
-                              <div className="divide-y divide-[#EFF2EF]">
-                                {h.asignaciones.map((asig) => (
-                                  <div
-                                    key={asig.id}
-                                    className="px-3 py-2 flex items-center justify-between gap-2"
-                                  >
-                                    <div className="min-w-0">
-                                      <p className="text-xs font-semibold text-[#26352D]">
-                                        {formatDateDDMMAAAA(asig.fecha)} ·{' '}
-                                        {asig.toneladas.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t × USD{' '}
-                                        {asig.precioUsdTon.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/t
-                                      </p>
-                                      {asig.tc > 0 && (
-                                        <p className="text-[11px] text-[#7A8780]">
-                                          TC: {formatTC(asig.tc)}
-                                        </p>
-                                      )}
-                                    </div>
-                                    <span className="font-mono font-bold text-[#24875B] shrink-0">
-                                      USD{' '}
-                                      {Number(asig.totalUsd ?? asig.toneladas * asig.precioUsdTon).toLocaleString('es-BO', {
-                                        minimumFractionDigits: 2,
-                                        maximumFractionDigits: 2,
-                                      })}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      }
-                    />
-                  );
-                })}
-              </CompactList>
-            )}
-          </div>
-        );
-      })()}
+      {currentScreen === 'pendientes_precio' && effectiveIsAdmin && (
+        <HarvestSalesView
+          customers={customers}
+          campaigns={campaigns}
+          lots={lots}
+          itemsConfig={itemsConfig}
+          exchangeRate={exchangeRate}
+          paymentSettings={paymentSettings}
+          activeCampaignId={activeCampaign?.id}
+          isAdmin={effectiveIsAdmin}
+          initialAvailableHarvests={pendingHarvestsQuery.hasLoaded ? pendingHarvests : undefined}
+          onBack={() => setCurrentScreen('main')}
+          onDataMutated={async () => {
+            invalidateQueries(['harvest.', 'harvestSale.', 'ar.']);
+            await pendingHarvestsQuery.refresh();
+            onRefreshData('movements');
+          }}
+        />
+      )}
 
       {/* ============================================================ */}
-      {/* FORMULARIO: VENTA / COSECHA (DIRECTA | SIN PRECIO | ASIGNAR) */}
+      {/* FORMULARIO: VENTA / COSECHA                                  */}
       {/* ============================================================ */}
       {currentScreen === 'ingreso' && (
         <div className="space-y-3">
-          {/* Selector de operación dentro de Venta / Cosecha */}
-          <div className="flex p-1 bg-[#F2F5F3] rounded-xl gap-1 border border-[#E2E7E3]">
-            <button
-              type="button"
-              onClick={() => {
-                setErrorMsg(null);
-                setIngresoMode('venta_directa');
-              }}
-              className={`flex-1 h-[36px] px-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
-                ingresoMode === 'venta_directa'
-                  ? 'bg-white text-[#24875B] shadow-xs border border-[#BFE0CD]'
-                  : 'text-[#5E6D64] hover:text-[#26352D]'
-              }`}
-            >
-              Venta directa
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setErrorMsg(null);
-                setIngresoMode('sin_precio');
-              }}
-              className={`flex-1 h-[36px] px-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
-                ingresoMode === 'sin_precio'
-                  ? 'bg-white text-[#24875B] shadow-xs border border-[#BFE0CD]'
-                  : 'text-[#5E6D64] hover:text-[#26352D]'
-              }`}
-            >
-              Sin precio
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setErrorMsg(null);
-                setIngresoMode('asignar_precio');
-              }}
-              className={`flex-1 h-[36px] px-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
-                ingresoMode === 'asignar_precio'
-                  ? 'bg-white text-[#24875B] shadow-xs border border-[#BFE0CD]'
-                  : 'text-[#5E6D64] hover:text-[#26352D]'
-              }`}
-            >
-              Asignar precio{pendingHarvestsCount ? ` (${pendingHarvestsCount})` : ''}
-            </button>
-          </div>
+          {/* Selector de operación dentro de Venta / Cosecha (Solo visible para Admin; usuarios normales solo registran cosecha) */}
+          {effectiveIsAdmin && (
+            <div className="flex p-1 bg-[#F2F5F3] rounded-xl gap-1 border border-[#E2E7E3]">
+              <button
+                type="button"
+                onClick={() => {
+                  setErrorMsg(null);
+                  setIngresoMode('venta_directa');
+                }}
+                className={`flex-1 h-[36px] px-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
+                  ingresoMode === 'venta_directa'
+                    ? 'bg-white text-[#24875B] shadow-xs border border-[#BFE0CD]'
+                    : 'text-[#5E6D64] hover:text-[#26352D]'
+                }`}
+              >
+                {bi('Venta directa', 'Direct sale')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setErrorMsg(null);
+                  setIngresoMode('sin_precio');
+                }}
+                className={`flex-1 h-[36px] px-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
+                  ingresoMode === 'sin_precio'
+                    ? 'bg-white text-[#24875B] shadow-xs border border-[#BFE0CD]'
+                    : 'text-[#5E6D64] hover:text-[#26352D]'
+                }`}
+              >
+                {bi('Sin precio', 'Unpriced')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setErrorMsg(null);
+                  setCurrentScreen('pendientes_precio');
+                }}
+                className="flex-1 h-[36px] px-2 text-xs font-semibold rounded-lg transition cursor-pointer text-[#5E6D64] hover:text-[#26352D]"
+              >
+                {t('harvestSales.title')}{pendingHarvestsCount ? ` (${pendingHarvestsCount})` : ''}
+              </button>
+            </div>
+          )}
 
-          {/* MODO 1: VENTA DIRECTA CON PRECIO */}
-          {ingresoMode === 'venta_directa' && (() => {
+          {/* MODO 1: VENTA DIRECTA CON PRECIO (Solo Admin) */}
+          {effectiveIsAdmin && ingresoMode === 'venta_directa' && (() => {
             const standardSaleUnits = [
-              { val: 'toneladas', label: 'Toneladas (t)' },
-              { val: 'quintales', label: 'Quintales (qq)' },
-              { val: 'kg', label: 'Kilos (kg)' },
-              { val: 'bolsas', label: 'Bolsas' },
+              { val: 'toneladas', label: bi('Toneladas (t)', 'Tons (t)') },
+              { val: 'quintales', label: bi('Quintales (qq)', 'Quintals (qq)') },
+              { val: 'kg', label: bi('Kilos (kg)', 'Kilograms (kg)') },
+              { val: 'bolsas', label: bi('Bolsas', 'Bags') },
             ];
             const hasCustomSaleUnit =
               Boolean(incUnidad) &&
@@ -2007,7 +1851,7 @@ export const PropertyView: React.FC<Props> = ({
                     lots={lots}
                     selectedLotId={incLotId}
                     onSelect={(id) => setIncLotId(id)}
-                    label="Lote"
+                    label={bi('Lote', 'Lot')}
                     required
                   />
 
@@ -2026,14 +1870,14 @@ export const PropertyView: React.FC<Props> = ({
                         setIncMoneda(item.moneda);
                       }
                     }}
-                    label="Producto / Concepto"
+                    label={bi('Producto / Concepto', 'Product / Concept')}
                     required
                   />
 
                   {/* Fecha */}
                   <div>
                     <label className={FORM_LABEL_CLASS}>
-                      Fecha <span className="text-[#C44545]">*</span>
+                      {bi('Fecha', 'Date')} <span className="text-[#C44545]">*</span>
                     </label>
                     <div className="relative">
                       <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 h-[17px] w-[17px] text-[#64746B] pointer-events-none" />
@@ -2051,7 +1895,7 @@ export const PropertyView: React.FC<Props> = ({
                   <div className="grid grid-cols-2 gap-2.5 items-end">
                     <div>
                       <label className={FORM_LABEL_CLASS}>
-                        Cantidad <span className="text-[#C44545]">*</span>
+                        {bi('Cantidad', 'Quantity')} <span className="text-[#C44545]">*</span>
                       </label>
                       <input
                         type="number"
@@ -2066,18 +1910,18 @@ export const PropertyView: React.FC<Props> = ({
                       />
                     </div>
                     <AppSelect
-                      label="Unidad"
+                      label={bi('Unidad', 'Unit')}
                       icon={<List className="h-[17px] w-[17px]" />}
                       value={incUnidad}
                       onChange={(e) => setIncUnidad(e.target.value)}
                     >
-                      <option value="">Seleccionar unidad</option>
+                      <option value="">{bi('Seleccionar unidad', 'Select unit')}</option>
                       {standardSaleUnits.map((u) => (
                         <option key={u.val} value={u.val}>
                           {u.label}
                         </option>
                       ))}
-                      {hasCustomSaleUnit && <option value={incUnidad}>{incUnidad}</option>}
+                      {hasCustomSaleUnit && <option value={incUnidad}>{translateUnit(incUnidad)}</option>}
                     </AppSelect>
                   </div>
 
@@ -2085,7 +1929,7 @@ export const PropertyView: React.FC<Props> = ({
                   <div className="grid grid-cols-2 gap-2.5 items-end">
                     <div>
                       <label className={FORM_LABEL_CLASS}>
-                        Precio unitario <span className="text-[#C44545]">*</span>
+                        {bi('Precio unitario', 'Unit price')} <span className="text-[#C44545]">*</span>
                       </label>
                       <input
                         type="number"
@@ -2103,7 +1947,7 @@ export const PropertyView: React.FC<Props> = ({
                       />
                     </div>
                     <CurrencySelect
-                      label="Moneda"
+                      label={bi('Moneda', 'Currency')}
                       required
                       value={incMoneda}
                       onChange={handleIncCurrencyChange}
@@ -2113,7 +1957,7 @@ export const PropertyView: React.FC<Props> = ({
                   {/* Tipo de cambio editable */}
                   <div>
                     <label className={FORM_LABEL_CLASS}>
-                      Tipo de cambio (Bs/USD) <span className="text-[#C44545]">*</span>
+                      {bi('Tipo de cambio (Bs/USD)', 'Exchange rate (Bs/USD)')} <span className="text-[#C44545]">*</span>
                     </label>
                     <input
                       type="number"
@@ -2130,26 +1974,19 @@ export const PropertyView: React.FC<Props> = ({
 
                   {/* Importe total */}
                   <div className="bg-[#EAF5EE] px-3.5 py-2.5 rounded-xl border border-[#BFE0CD] flex items-center justify-between">
-                    <span className="text-[13px] font-bold text-[#175B3D]">Importe total</span>
-                    <span className="text-base font-extrabold text-[#175B3D] font-mono tabular-nums">
+                    <span className="text-[13px] font-bold text-[#175B3D]">{bi('Importe total', 'Total amount')}</span>
+                    <span className="text-base font-extrabold text-[#175B3D] tabular-nums">
                       {incMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
                       {incCalculatedTotal.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </span>
                   </div>
 
                   {/* Observación */}
-                  <div>
-                    <label className={FORM_LABEL_CLASS}>
-                      Observación <span className="text-[#7A8780] font-normal">(opcional)</span>
-                    </label>
-                    <textarea
-                      rows={2}
-                      placeholder="Comprador, silo, remisión..."
-                      value={incObs}
-                      onChange={(e) => setIncObs(e.target.value)}
-                      className={FORM_TEXTAREA_CLASS}
-                    />
-                  </div>
+                  <ObservationField
+                    value={incObs}
+                    onChange={setIncObs}
+                    placeholder={bi('Comprador, silo, remisión...', 'Buyer, silo, delivery note...')}
+                  />
 
                   {/* Botones */}
                   <div className="flex gap-2.5 pt-1">
@@ -2159,14 +1996,14 @@ export const PropertyView: React.FC<Props> = ({
                       className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-[#24875B] h-[42px] text-sm font-bold text-white shadow-xs hover:bg-[#1D704B] active:bg-[#175B3D] transition disabled:opacity-50 cursor-pointer"
                     >
                       <Save className="h-4 w-4 shrink-0" />
-                      <span>{saving ? 'Guardando...' : 'Guardar ingreso'}</span>
+                      <span>{saving ? t('common.saving') : bi('Guardar ingreso', 'Save income')}</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => setCurrentScreen('main')}
                       className="px-4 h-[42px] rounded-xl border border-[#D4DDD6] bg-white hover:bg-[#F5F7F5] text-[#26352D] text-sm font-semibold cursor-pointer"
                     >
-                      Cancelar
+                      {t('common.cancel')}
                     </button>
                   </div>
                 </form>
@@ -2195,16 +2032,16 @@ export const PropertyView: React.FC<Props> = ({
                 <form onSubmit={handleCreateHarvestSubmit} className="space-y-3">
                   {/* Campaña */}
                   <AppSelect
-                    label="Campaña"
+                    label={bi('Campaña', 'Campaign')}
                     required
                     icon={<Calendar className="h-[17px] w-[17px]" />}
                     value={harvCampanaId}
                     onChange={(e) => setHarvCampanaId(e.target.value)}
                   >
-                    <option value="">Seleccionar campaña</option>
+                    <option value="">{bi('Seleccionar campaña', 'Select campaign')}</option>
                     {campaigns.map((c) => (
                       <option key={c.id} value={c.id}>
-                        {c.nombre} {c.activa ? '(Activa)' : ''}
+                        {c.nombre} {c.activa ? `(${bi('Activa', 'Active')})` : ''}
                       </option>
                     ))}
                   </AppSelect>
@@ -2214,14 +2051,14 @@ export const PropertyView: React.FC<Props> = ({
                     lots={lots}
                     selectedLotId={harvLotId}
                     onSelect={(id) => setHarvLotId(id)}
-                    label="Lote"
+                    label={bi('Lote', 'Lot')}
                     required
                   />
 
                   {/* Producto (selector compacto sin preselección) */}
                   {!harvUseCustomProduct ? (
                     <AppSelect
-                      label="Producto"
+                      label={bi('Producto', 'Product')}
                       required
                       icon={<Wheat className="h-[17px] w-[17px]" />}
                       value={isProductInList ? harvProducto : ''}
@@ -2234,19 +2071,19 @@ export const PropertyView: React.FC<Props> = ({
                         }
                       }}
                     >
-                      <option value="">Seleccionar producto</option>
+                      <option value="">{bi('Seleccionar producto', 'Select product')}</option>
                       {productOptions.map((prod) => (
                         <option key={prod} value={prod}>
                           {prod}
                         </option>
                       ))}
-                      <option value="__otro__">Otro producto...</option>
+                      <option value="__otro__">{bi('Otro producto...', 'Other product...')}</option>
                     </AppSelect>
                   ) : (
                     <div>
                       <div className="flex items-center justify-between gap-2 mb-1">
                         <label className="text-[13px] font-semibold text-[#26352D]">
-                          Producto <span className="text-[#C44545]">*</span>
+                          {bi('Producto', 'Product')} <span className="text-[#C44545]">*</span>
                         </label>
                         <button
                           type="button"
@@ -2256,7 +2093,7 @@ export const PropertyView: React.FC<Props> = ({
                           }}
                           className="text-[11px] font-semibold text-[#24875B] hover:underline cursor-pointer"
                         >
-                          Elegir de la lista
+                          {bi('Elegir de la lista', 'Choose from list')}
                         </button>
                       </div>
                       <input
@@ -2264,7 +2101,7 @@ export const PropertyView: React.FC<Props> = ({
                         required
                         value={harvProducto}
                         onChange={(e) => setHarvProducto(e.target.value)}
-                        placeholder="Escribir nombre del producto"
+                        placeholder={bi('Escribir nombre del producto', 'Enter product name')}
                         className={`${FORM_INPUT_CLASS} font-semibold`}
                       />
                     </div>
@@ -2274,7 +2111,7 @@ export const PropertyView: React.FC<Props> = ({
                   <div className="grid grid-cols-2 gap-2.5 items-end">
                     <div>
                       <label className={FORM_LABEL_CLASS}>
-                        Fecha de cosecha <span className="text-[#C44545]">*</span>
+                        {bi('Fecha de cosecha', 'Harvest date')} <span className="text-[#C44545]">*</span>
                       </label>
                       <input
                         type="date"
@@ -2286,7 +2123,7 @@ export const PropertyView: React.FC<Props> = ({
                     </div>
                     <div>
                       <label className={FORM_LABEL_CLASS}>
-                        Toneladas (t) <span className="text-[#C44545]">*</span>
+                        {bi('Toneladas (t)', 'Tons (t)')} <span className="text-[#C44545]">*</span>
                       </label>
                       <input
                         type="number"
@@ -2303,18 +2140,11 @@ export const PropertyView: React.FC<Props> = ({
                   </div>
 
                   {/* Observación */}
-                  <div>
-                    <label className={FORM_LABEL_CLASS}>
-                      Observación <span className="text-[#7A8780] font-normal">(opcional)</span>
-                    </label>
-                    <textarea
-                      rows={2}
-                      placeholder="Silo de acopio, humedad, remisión..."
-                      value={harvObs}
-                      onChange={(e) => setHarvObs(e.target.value)}
-                      className={FORM_TEXTAREA_CLASS}
-                    />
-                  </div>
+                  <ObservationField
+                    value={harvObs}
+                    onChange={setHarvObs}
+                    placeholder={bi('Silo de acopio, humedad, remisión...', 'Storage silo, moisture, delivery note...')}
+                  />
 
                   <div className="flex gap-2.5 pt-1">
                     <button
@@ -2323,14 +2153,14 @@ export const PropertyView: React.FC<Props> = ({
                       className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-[#24875B] h-[42px] text-sm font-bold text-white shadow-xs hover:bg-[#1D704B] transition disabled:opacity-50 cursor-pointer"
                     >
                       <Save className="h-4 w-4 shrink-0" />
-                      <span>{saving ? 'Guardando...' : 'Guardar cosecha'}</span>
+                      <span>{saving ? t('common.saving') : bi('Guardar cosecha', 'Save harvest')}</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => setCurrentScreen('main')}
                       className="px-4 h-[42px] rounded-xl border border-[#D4DDD6] bg-white hover:bg-[#F5F7F5] text-[#26352D] text-sm font-semibold cursor-pointer"
                     >
-                      Cancelar
+                      {t('common.cancel')}
                     </button>
                   </div>
                 </form>
@@ -2345,27 +2175,22 @@ export const PropertyView: React.FC<Props> = ({
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <h2 className="text-sm font-bold text-stone-900">
-                      Cosechas con toneladas pendientes ({pendingHarvests.filter((h) => h.pendiente > 0.0001).length})
+                      {bi('Cosechas con toneladas pendientes', 'Harvests with pending tons')} ({pendingHarvests.filter((h) => h.pendiente > 0.0001).length})
                     </h2>
                     {pendingHarvestsRevalidating && (
                       <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#24875B]">
                         <RefreshCw className="h-3 w-3 animate-spin" />
-                        <span>Actualizando...</span>
+                        <span>{bi('Actualizando...', 'Updating...')}</span>
                       </span>
                     )}
                   </div>
                   <p className="text-xs text-stone-500 mt-0.5">
-                    Incluye cosechas de campañas anteriores. Selecciona una para fijar precio total o parcial.
+                    {bi(
+                      'Incluye cosechas de campañas anteriores. Selecciona una para fijar precio total o parcial.',
+                      'Includes harvests from previous campaigns. Select one to set a full or partial price.'
+                    )}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => loadPendingHarvests()}
-                  disabled={pendingHarvestsLoading}
-                  className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#EAF5EE] text-[#24875B] hover:bg-[#DCEFE4] transition cursor-pointer shrink-0 disabled:opacity-50"
-                >
-                  <RefreshCw className={`h-4 w-4 ${pendingHarvestsLoading ? 'animate-spin' : ''}`} />
-                </button>
               </div>
 
               {pendingHarvestsError && (
@@ -2375,10 +2200,10 @@ export const PropertyView: React.FC<Props> = ({
                     <div className="text-xs text-red-900 space-y-0.5 min-w-0 flex-1">
                       <p className="font-bold">
                         {pendingHarvestsHasLoaded
-                          ? 'No se pudo actualizar. Mostrando los últimos datos cargados.'
-                          : 'Error al consultar cosechas pendientes'}
+                          ? bi('No se pudo actualizar. Mostrando los últimos datos cargados.', 'Could not refresh. Showing latest loaded data.')
+                          : bi('Error al consultar cosechas pendientes', 'Error loading pending harvests')}
                       </p>
-                      <p className="break-words text-red-800/90">{pendingHarvestsError}</p>
+                      <p className="break-words text-red-800/90">{translateError(pendingHarvestsError)}</p>
                     </div>
                   </div>
                   <button
@@ -2387,7 +2212,7 @@ export const PropertyView: React.FC<Props> = ({
                     disabled={pendingHarvestsLoading}
                     className="text-xs font-bold text-red-700 hover:text-red-900 underline shrink-0 cursor-pointer disabled:opacity-50"
                   >
-                    Reintentar
+                    {bi('Reintentar', 'Retry')}
                   </button>
                 </div>
               )}
@@ -2395,15 +2220,15 @@ export const PropertyView: React.FC<Props> = ({
               {pendingHarvestsInitialLoading || (!pendingHarvestsHasLoaded && !pendingHarvestsError) ? (
                 <div className="rounded-2xl border border-[#E2E7E3] bg-white p-8 text-center text-xs text-[#5E6D64] flex items-center justify-center gap-2">
                   <RefreshCw className="h-4 w-4 animate-spin text-[#24875B]" />
-                  <span>Consultando cosechas pendientes...</span>
+                  <span>{bi('Consultando cosechas pendientes...', 'Loading pending harvests...')}</span>
                 </div>
               ) : (
                 <CompactList
                   isEmpty={pendingHarvests.filter((h) => h.pendiente > 0.0001).length === 0}
                   emptyMessage={
                     !pendingHarvestsHasLoaded && pendingHarvestsError
-                      ? 'No se pudieron cargar las cosechas pendientes.'
-                      : 'No hay cosechas con toneladas pendientes de precio.'
+                      ? bi('No se pudieron cargar las cosechas pendientes.', 'Could not load pending harvests.')
+                      : bi('No hay cosechas con toneladas pendientes de precio.', 'No harvests with pending tons to price.')
                   }
                 >
                   {pendingHarvests
@@ -2411,11 +2236,11 @@ export const PropertyView: React.FC<Props> = ({
                     .sort(compareChronologicalDesc)
                     .map((h) => {
                       const lotName =
-                        h.loteNombre || lots.find((l) => String(l.id) === String(h.loteId))?.nombre || 'Lote';
+                        h.loteNombre || lots.find((l) => String(l.id) === String(h.loteId))?.nombre || bi('Lote', 'Lot');
                       const campName =
                         h.campanaNombre ||
                         campaigns.find((c) => String(c.id) === String(h.campanaId))?.nombre ||
-                        'Sin campaña';
+                        bi('Sin campaña', 'No campaign');
                       return (
                         <CompactListRow
                           key={h.id}
@@ -2434,11 +2259,11 @@ export const PropertyView: React.FC<Props> = ({
                             </span>
                           }
                           rightPrimary={
-                            <span className="font-mono text-amber-700">
+                            <span className="tabular-nums text-amber-700">
                               {h.pendiente.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t
                             </span>
                           }
-                          rightSecondary={`Asign.: ${h.asignadas.toLocaleString('es-BO', { minimumFractionDigits: 1, maximumFractionDigits: 2 })} / ${h.toneladas.toLocaleString('es-BO', { minimumFractionDigits: 1, maximumFractionDigits: 2 })} t`}
+                          rightSecondary={`${bi('Asign.:', 'Priced:')} ${h.asignadas.toLocaleString('es-BO', { minimumFractionDigits: 1, maximumFractionDigits: 2 })} / ${h.toneladas.toLocaleString('es-BO', { minimumFractionDigits: 1, maximumFractionDigits: 2 })} t`}
                         />
                       );
                     })}
@@ -2454,12 +2279,12 @@ export const PropertyView: React.FC<Props> = ({
       {/* ============================================================ */}
       {currentScreen === 'gasto' && (() => {
         const standardExpUnits = [
-          { val: 'ha', label: 'Hectáreas (ha)' },
-          { val: 'kg', label: 'Kilogramos (kg)' },
-          { val: 'litros', label: 'Litros (l)' },
-          { val: 'bolsas', label: 'Bolsas' },
-          { val: 'toneladas', label: 'Toneladas (t)' },
-          { val: 'unidades', label: 'Unidades' },
+          { val: 'ha', label: bi('Hectáreas (ha)', 'Hectares (ha)') },
+          { val: 'kg', label: bi('Kilogramos (kg)', 'Kilograms (kg)') },
+          { val: 'litros', label: bi('Litros (l)', 'Liters (l)') },
+          { val: 'bolsas', label: bi('Bolsas', 'Bags') },
+          { val: 'toneladas', label: bi('Toneladas (t)', 'Tons (t)') },
+          { val: 'unidades', label: bi('Unidades', 'Units') },
         ];
         const hasCustomExpUnit =
           Boolean(expUnidad) &&
@@ -2470,41 +2295,20 @@ export const PropertyView: React.FC<Props> = ({
           <div className="rounded-2xl border border-[#E2E7E3] bg-white p-4 shadow-xs">
             <form onSubmit={handleExpenseSubmit} className="space-y-3">
               {/* Modo de asignación: Un lote o Varios lotes */}
-              <div>
-                <label className={FORM_LABEL_CLASS}>
-                  Asignación <span className="text-[#C44545]">*</span>
-                </label>
-                <div className="flex p-1 bg-[#F2F5F3] rounded-xl gap-1 border border-[#E2E7E3]">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setExpLotMode('single');
-                      if (expLotId && isHectareUnit(expUnidad)) {
-                        const ha = getLotSurfaceHa(lots, expLotId);
-                        if (ha !== null) setExpCantidad(ha);
-                      }
-                    }}
-                    className={`flex-1 h-[36px] text-xs font-semibold rounded-lg transition cursor-pointer ${
-                      expLotMode === 'single'
-                        ? 'bg-white text-[#26352D] shadow-xs border border-[#D4DDD6]'
-                        : 'text-[#5E6D64] hover:text-[#26352D]'
-                    }`}
-                  >
-                    Un lote
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setExpLotMode('multi')}
-                    className={`flex-1 h-[36px] text-xs font-semibold rounded-lg transition cursor-pointer ${
-                      expLotMode === 'multi'
-                        ? 'bg-white text-[#C44545] shadow-xs border border-[#F2C6C6]'
-                        : 'text-[#5E6D64] hover:text-[#26352D]'
-                    }`}
-                  >
-                    Varios lotes (por ha)
-                  </button>
-                </div>
-              </div>
+              <Switch<'single' | 'multi'>
+                label={bi('Asignación', 'Assignment')}
+                required
+                value={expLotMode}
+                onChange={(mode) => {
+                  setExpLotMode(mode);
+                  if (mode === 'single' && expLotId && isHectareUnit(expUnidad)) {
+                    const ha = getLotSurfaceHa(lots, expLotId);
+                    if (ha !== null) setExpCantidad(ha);
+                  }
+                }}
+                leftOption={{ value: 'single', label: bi('Un lote', 'One lot') }}
+                rightOption={{ value: 'multi', label: bi('Varios lotes', 'Multiple lots') }}
+              />
 
               {/* Lote Destino (Simple o Múltiple con hectáreas trabajadas) */}
               {expLotMode === 'single' ? (
@@ -2518,14 +2322,14 @@ export const PropertyView: React.FC<Props> = ({
                       if (ha !== null) setExpCantidad(ha);
                     }
                   }}
-                  label="Lote"
+                  label={bi('Lote', 'Lot')}
                   required
                 />
               ) : (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <label className="text-[13px] font-semibold text-[#26352D]">
-                      Lotes y hectáreas <span className="text-[#C44545]">*</span>
+                      {bi('Lotes y hectáreas', 'Lots and hectares')} <span className="text-[#C44545]">*</span>
                     </label>
                     {lots.length > 1 && (
                       <button
@@ -2544,14 +2348,16 @@ export const PropertyView: React.FC<Props> = ({
                         }}
                         className="text-[11px] font-semibold text-[#24875B] hover:underline cursor-pointer"
                       >
-                        {selectedMultiLots.length === lots.length ? 'Limpiar' : 'Seleccionar todos'}
+                        {selectedMultiLots.length === lots.length
+                          ? bi('Limpiar', 'Clear')
+                          : bi('Seleccionar todos', 'Select all')}
                       </button>
                     )}
                   </div>
 
                   {lots.length === 0 ? (
                     <div className="rounded-xl border border-stone-200 bg-stone-50 p-3 text-xs text-stone-600">
-                      No hay lotes registrados. Agrega lotes en Administración.
+                      {bi('No hay lotes registrados. Agrega lotes en Administración.', 'No lots registered. Add lots in Administration.')}
                     </div>
                   ) : (
                     <div className="rounded-xl border border-[#DCE2DD] bg-[#FAFBF8] divide-y divide-[#E6EBE7] overflow-hidden">
@@ -2593,7 +2399,7 @@ export const PropertyView: React.FC<Props> = ({
                                   step="any"
                                   min="0.01"
                                   placeholder="ha"
-                                  aria-label={`Hectáreas trabajadas en ${lot.nombre}`}
+                                  aria-label={bi(`Hectáreas trabajadas en ${lot.nombre}`, `Worked hectares on ${lot.nombre}`)}
                                   value={haVal ?? ''}
                                   onChange={(e) =>
                                     updateMultiLotHa(
@@ -2633,7 +2439,7 @@ export const PropertyView: React.FC<Props> = ({
                   }
                   if (item.moneda) setExpMoneda(item.moneda);
                 }}
-                label="Concepto de gasto"
+                label={bi('Concepto de gasto', 'Expense concept')}
                 defaultIcon="semillas"
                 required
               />
@@ -2641,7 +2447,7 @@ export const PropertyView: React.FC<Props> = ({
               {/* Fecha */}
               <div>
                 <label className={FORM_LABEL_CLASS}>
-                  Fecha <span className="text-[#C44545]">*</span>
+                  {bi('Fecha', 'Date')} <span className="text-[#C44545]">*</span>
                 </label>
                 <div className="relative">
                   <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 h-[17px] w-[17px] text-[#64746B] pointer-events-none" />
@@ -2659,7 +2465,7 @@ export const PropertyView: React.FC<Props> = ({
               <div className="grid grid-cols-2 gap-2.5 items-end">
                 <div>
                   <label className={FORM_LABEL_CLASS}>
-                    Cantidad <span className="text-[#C44545]">*</span>
+                    {bi('Cantidad', 'Quantity')} <span className="text-[#C44545]">*</span>
                   </label>
                   <input
                     type="number"
@@ -2674,7 +2480,7 @@ export const PropertyView: React.FC<Props> = ({
                   />
                 </div>
                 <AppSelect
-                  label="Unidad"
+                  label={bi('Unidad', 'Unit')}
                   icon={<List className="h-[17px] w-[17px]" />}
                   value={expUnidad}
                   onChange={(e) => {
@@ -2686,13 +2492,13 @@ export const PropertyView: React.FC<Props> = ({
                     }
                   }}
                 >
-                  <option value="">Seleccionar unidad</option>
+                  <option value="">{bi('Seleccionar unidad', 'Select unit')}</option>
                   {standardExpUnits.map((u) => (
                     <option key={u.val} value={u.val}>
                       {u.label}
                     </option>
                   ))}
-                  {hasCustomExpUnit && <option value={expUnidad}>{expUnidad}</option>}
+                  {hasCustomExpUnit && <option value={expUnidad}>{translateUnit(expUnidad)}</option>}
                 </AppSelect>
               </div>
 
@@ -2700,7 +2506,7 @@ export const PropertyView: React.FC<Props> = ({
               <div className="grid grid-cols-2 gap-2.5 items-end">
                 <div>
                   <label className={FORM_LABEL_CLASS}>
-                    Precio unitario <span className="text-[#C44545]">*</span>
+                    {bi('Precio unitario', 'Unit price')} <span className="text-[#C44545]">*</span>
                   </label>
                   <input
                     type="number"
@@ -2718,7 +2524,7 @@ export const PropertyView: React.FC<Props> = ({
                   />
                 </div>
                 <CurrencySelect
-                  label="Moneda"
+                  label={bi('Moneda', 'Currency')}
                   required
                   value={expMoneda}
                   onChange={handleExpCurrencyChange}
@@ -2728,7 +2534,7 @@ export const PropertyView: React.FC<Props> = ({
               {/* Tipo de cambio editable */}
               <div>
                 <label className={FORM_LABEL_CLASS}>
-                  Tipo de cambio (Bs/USD) <span className="text-[#C44545]">*</span>
+                  {bi('Tipo de cambio (Bs/USD)', 'Exchange rate (Bs/USD)')} <span className="text-[#C44545]">*</span>
                 </label>
                 <input
                   type="number"
@@ -2746,8 +2552,8 @@ export const PropertyView: React.FC<Props> = ({
               {/* Importe total */}
               <div className="px-3.5 py-2.5 rounded-xl bg-[#FCECEC] border border-[#F2C6C6] space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-[13px] font-bold text-[#9F2D2D]">Importe total</span>
-                  <span className="text-base font-extrabold text-[#9F2D2D] font-mono tabular-nums">
+                  <span className="text-[13px] font-bold text-[#9F2D2D]">{bi('Importe total', 'Total amount')}</span>
+                  <span className="text-base font-extrabold text-[#9F2D2D] tabular-nums">
                     {expMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
                     {expCalculatedTotal.toLocaleString('es-BO', {
                       minimumFractionDigits: 2,
@@ -2760,13 +2566,13 @@ export const PropertyView: React.FC<Props> = ({
                 {expLotMode === 'multi' && selectedMultiLots.length > 0 && (
                   <div className="pt-2 border-t border-[#F2C6C6] space-y-1.5">
                     <div className="flex items-center justify-between text-[11px] font-bold text-[#9F2D2D]">
-                      <span>Desglose proporcional</span>
+                      <span>{bi('Desglose proporcional', 'Proportional breakdown')}</span>
                       <span className="tabular-nums">
                         {totalMultiLotHa.toLocaleString('es-BO', {
                           minimumFractionDigits: 1,
                           maximumFractionDigits: 2,
                         })}{' '}
-                        ha totales
+                        {bi('ha totales', 'total ha')}
                       </span>
                     </div>
                     {multiLotBreakdown.length > 0 ? (
@@ -2782,7 +2588,7 @@ export const PropertyView: React.FC<Props> = ({
                                 ({item.ha} ha · {item.pct.toFixed(1)}%)
                               </span>
                             </div>
-                            <span className="font-mono font-bold text-[#C44545] shrink-0">
+                            <span className="tabular-nums font-bold text-[#C44545] shrink-0">
                               {expMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
                               {item.amount.toLocaleString('es-BO', {
                                 minimumFractionDigits: 2,
@@ -2794,7 +2600,10 @@ export const PropertyView: React.FC<Props> = ({
                       </div>
                     ) : (
                       <p className="text-[11px] text-[#9F2D2D]">
-                        Ingresa las hectáreas trabajadas de cada lote para ver el reparto proporcional.
+                        {bi(
+                          'Ingresa las hectáreas trabajadas de cada lote para ver el reparto proporcional.',
+                          'Enter worked hectares for each lot to view the proportional split.'
+                        )}
                       </p>
                     )}
                   </div>
@@ -2802,18 +2611,11 @@ export const PropertyView: React.FC<Props> = ({
               </div>
 
               {/* Observación */}
-              <div>
-                <label className={FORM_LABEL_CLASS}>
-                  Observación <span className="text-[#7A8780] font-normal">(opcional)</span>
-                </label>
-                <textarea
-                  rows={2}
-                  placeholder="Dosis aplicada, proveedor, factura o remisión..."
-                  value={expObs}
-                  onChange={(e) => setExpObs(e.target.value)}
-                  className={FORM_TEXTAREA_CLASS}
-                />
-              </div>
+              <ObservationField
+                value={expObs}
+                onChange={setExpObs}
+                placeholder={bi('Dosis aplicada, proveedor, factura o remisión...', 'Applied rate, supplier, invoice, or delivery note...')}
+              />
 
               {/* Botones */}
               <div className="flex gap-2.5 pt-1">
@@ -2825,10 +2627,10 @@ export const PropertyView: React.FC<Props> = ({
                   <Save className="h-4 w-4 shrink-0" />
                   <span>
                     {saving
-                      ? savingProgress || 'Guardando...'
+                      ? savingProgress || t('common.saving')
                       : expLotMode === 'multi' && multiLotBreakdown.length > 1
-                      ? `Guardar en ${multiLotBreakdown.length} lotes`
-                      : 'Guardar gasto'}
+                      ? bi(`Guardar en ${multiLotBreakdown.length} lotes`, `Save across ${multiLotBreakdown.length} lots`)
+                      : bi('Guardar gasto', 'Save expense')}
                   </span>
                 </button>
                 <button
@@ -2836,7 +2638,7 @@ export const PropertyView: React.FC<Props> = ({
                   onClick={() => setCurrentScreen('main')}
                   className="px-4 h-[42px] rounded-xl border border-[#D4DDD6] bg-white hover:bg-[#F5F7F5] text-[#26352D] text-sm font-semibold cursor-pointer"
                 >
-                  Cancelar
+                  {t('common.cancel')}
                 </button>
               </div>
             </form>
@@ -2852,7 +2654,7 @@ export const PropertyView: React.FC<Props> = ({
               <div className="flex items-center gap-2 min-w-0">
                 <Layers className="h-4 w-4 text-[#C44545] shrink-0" />
                 <span className="text-xs font-bold text-[#26352D] truncate">
-                  Gastos distribuidos registrados ({expenseAllocations.length})
+                  {bi('Gastos distribuidos registrados', 'Recorded distributed expenses')} ({expenseAllocations.length})
                 </span>
               </div>
               {showAllocationsPanelInGasto ? (
@@ -2866,7 +2668,11 @@ export const PropertyView: React.FC<Props> = ({
               <div className="border-t border-[#E2E7E3] p-3 space-y-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-[11px] text-[#5E6D64]">
-                    Grupos consultados directamente desde el servidor (<code>expense.allocations</code>).
+                    {bi(
+                      'Grupos consultados directamente desde el servidor',
+                      'Groups loaded directly from the server'
+                    )}{' '}
+                    (<code>expense.allocations</code>).
                   </p>
                   <button
                     type="button"
@@ -2875,7 +2681,7 @@ export const PropertyView: React.FC<Props> = ({
                     className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[#D4DDD6] bg-white hover:bg-[#F5F7F4] text-[11px] font-semibold text-[#26352D] cursor-pointer disabled:opacity-50"
                   >
                     <RefreshCw className={`h-3 w-3 ${allocationsLoading ? 'animate-spin' : ''}`} />
-                    <span>Actualizar</span>
+                    <span>{bi('Actualizar', 'Refresh')}</span>
                   </button>
                 </div>
 
@@ -2885,8 +2691,11 @@ export const PropertyView: React.FC<Props> = ({
                       <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
                       <span className="break-words">
                         {allocationsHasLoaded
-                          ? `No se pudo actualizar (${allocationsError}). Mostrando últimos datos.`
-                          : allocationsError}
+                          ? bi(
+                              `No se pudo actualizar (${translateError(allocationsError)}). Mostrando últimos datos.`,
+                              `Could not refresh (${translateError(allocationsError)}). Showing latest data.`
+                            )
+                          : translateError(allocationsError)}
                       </span>
                     </div>
                     <button
@@ -2895,7 +2704,7 @@ export const PropertyView: React.FC<Props> = ({
                       disabled={allocationsLoading}
                       className="text-xs font-bold text-red-700 underline shrink-0 cursor-pointer"
                     >
-                      Reintentar
+                      {bi('Reintentar', 'Retry')}
                     </button>
                   </div>
                 )}
@@ -2904,8 +2713,8 @@ export const PropertyView: React.FC<Props> = ({
                   isEmpty={expenseAllocations.length === 0}
                   emptyMessage={
                     allocationsInitialLoading || (!allocationsHasLoaded && !allocationsError)
-                      ? 'Consultando gastos distribuidos...'
-                      : 'No hay gastos distribuidos registrados en esta campaña.'
+                      ? bi('Consultando gastos distribuidos...', 'Loading distributed expenses...')
+                      : bi('No hay gastos distribuidos registrados en esta campaña.', 'No distributed expenses recorded in this campaign.')
                   }
                 >
                   {expenseAllocations.map((g) => {
@@ -2922,12 +2731,12 @@ export const PropertyView: React.FC<Props> = ({
                         title={formatConcept(g.descripcion)}
                         subtitle={
                           <span>
-                            {formatDateDDMMAAAA(g.fecha)} · {g.lotes.length} lotes
+                            {formatDateDDMMAAAA(g.fecha)} · {g.lotes.length} {bi('lotes', 'lots')}
                             {g.hectareasTotales ? ` · ${g.hectareasTotales.toLocaleString('es-BO', { minimumFractionDigits: 1, maximumFractionDigits: 2 })} ha` : ''}
                           </span>
                         }
                         rightPrimary={
-                          <span className="font-mono text-[#C44545]">
+                          <span className="tabular-nums text-[#C44545]">
                             {curLabel}{' '}
                             {g.importe.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </span>
@@ -2937,7 +2746,7 @@ export const PropertyView: React.FC<Props> = ({
                         expandedContent={
                           <div className="space-y-2 text-xs">
                             {g.observacion && (
-                              <p className="text-[11px] italic text-[#5E6D64]">Obs.: {g.observacion}</p>
+                              <p className="text-[11px] italic text-[#5E6D64]">{bi('Obs.:', 'Note:')} {g.observacion}</p>
                             )}
                             <div className="rounded-xl border border-[#E2E7E3] bg-white divide-y divide-[#EFF2EF]">
                               {g.lotes.map((lt, idx) => {
@@ -2954,7 +2763,7 @@ export const PropertyView: React.FC<Props> = ({
                                       </span>
                                     </span>
                                     {lt.importe !== undefined && (
-                                      <span className="font-mono font-bold text-[#C44545]">
+                                      <span className="tabular-nums font-bold text-[#C44545]">
                                         {curLabel}{' '}
                                         {lt.importe.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                       </span>
@@ -2995,17 +2804,19 @@ export const PropertyView: React.FC<Props> = ({
         return (
           <div className="space-y-3">
             <ListToolbar
-              title="Mis lotes"
+              title={bi('Mis lotes', 'My lots')}
               countLabel={`${filteredLots.length} · ${totalHa.toFixed(1)} ha`}
               searchValue={lotsSearch}
               onSearchChange={setLotsSearch}
-              searchPlaceholder="Buscar lote, cultivo o ubicación..."
+              searchPlaceholder={bi('Buscar lote, cultivo o ubicación...', 'Search lot, crop, or location...')}
             />
 
             <CompactList
               isEmpty={filteredLots.length === 0}
               emptyMessage={
-                q ? 'No se encontraron lotes con esa búsqueda.' : 'No hay lotes registrados aún.'
+                q
+                  ? bi('No se encontraron lotes con esa búsqueda.', 'No lots matched that search.')
+                  : bi('No hay lotes registrados aún.', 'No lots registered yet.')
               }
             >
               {filteredLots.map((lot) => {
@@ -3044,7 +2855,7 @@ export const PropertyView: React.FC<Props> = ({
                         <div className="grid grid-cols-2 gap-2 bg-white p-2.5 rounded-xl border border-[#E2E7E3]">
                           <div>
                             <span className="text-[10px] text-[#7A8780] block uppercase font-semibold">
-                              Superficie
+                              {bi('Superficie', 'Area')}
                             </span>
                             <span className="font-bold text-[#26352D]">
                               {lot.superficieHectareas} ha
@@ -3052,16 +2863,16 @@ export const PropertyView: React.FC<Props> = ({
                           </div>
                           <div>
                             <span className="text-[10px] text-[#7A8780] block uppercase font-semibold">
-                              Cultivo actual
+                              {bi('Cultivo actual', 'Current crop')}
                             </span>
                             <span className="font-bold text-[#24875B]">
-                              {lot.cultivoActual || 'Sin cultivo'}
+                              {lot.cultivoActual || bi('Sin cultivo', 'No crop')}
                             </span>
                           </div>
                           {lot.ubicacion && (
                             <div className="col-span-full pt-1.5 border-t border-[#EFF2EF]">
                               <span className="text-[10px] text-[#7A8780] block uppercase font-semibold">
-                                Ubicación
+                                {bi('Ubicación', 'Location')}
                               </span>
                               <span className="text-[#26352D]">{lot.ubicacion}</span>
                             </div>
@@ -3081,7 +2892,7 @@ export const PropertyView: React.FC<Props> = ({
                             <div className="flex items-center gap-2 min-w-0">
                               <Tractor className="h-4 w-4 text-amber-600 shrink-0" />
                               <span className="text-xs font-semibold text-[#26352D] truncate">
-                                Trabajos de maquinaria ({lotMachineryJobs.length})
+                                {bi('Trabajos de maquinaria', 'Machinery jobs')} ({lotMachineryJobs.length})
                               </span>
                             </div>
                             <ChevronRight className="h-4 w-4 text-[#8A968F] shrink-0" />
@@ -3098,7 +2909,7 @@ export const PropertyView: React.FC<Props> = ({
                             <div className="flex items-center gap-2 min-w-0">
                               <Wheat className="h-4 w-4 text-[#24875B] shrink-0" />
                               <span className="text-xs font-semibold text-[#26352D] truncate">
-                                Cosechas e ingresos ({lotHarvestsAndIncomesCount})
+                                {bi('Cosechas e ingresos', 'Harvests & income')} ({lotHarvestsAndIncomesCount})
                               </span>
                             </div>
                             <ChevronRight className="h-4 w-4 text-[#8A968F] shrink-0" />
@@ -3115,7 +2926,7 @@ export const PropertyView: React.FC<Props> = ({
                             <div className="flex items-center gap-2 min-w-0">
                               <Receipt className="h-4 w-4 text-[#C44545] shrink-0" />
                               <span className="text-xs font-semibold text-[#26352D] truncate">
-                                Gastos directos ({lotExpensesDirect.length})
+                                {bi('Gastos directos', 'Direct expenses')} ({lotExpensesDirect.length})
                               </span>
                             </div>
                             <ChevronRight className="h-4 w-4 text-[#8A968F] shrink-0" />
@@ -3149,25 +2960,31 @@ export const PropertyView: React.FC<Props> = ({
         return (
           <div className="space-y-3">
             <ListToolbar
-              title={activeLotForScreen ? `${activeLotForScreen.nombre} · Maquinaria` : 'Trabajos de maquinaria'}
-              countLabel={`${lotJobs.length} reg.`}
+              title={
+                activeLotForScreen
+                  ? `${activeLotForScreen.nombre} · ${bi('Maquinaria', 'Machinery')}`
+                  : bi('Trabajos de maquinaria', 'Machinery jobs')
+              }
+              countLabel={`${lotJobs.length} ${bi('reg.', 'rec.')}`}
               searchValue={lotDetailSearch}
               onSearchChange={setLotDetailSearch}
-              searchPlaceholder="Buscar labor, máquina o fecha..."
+              searchPlaceholder={bi('Buscar labor, máquina o fecha...', 'Search job, machine, or date...')}
             />
 
             <CompactList
               isEmpty={lotJobs.length === 0}
               emptyMessage={
                 q
-                  ? 'No se encontraron trabajos con esa búsqueda.'
-                  : 'Sin labores de maquinaria registradas en este lote.'
+                  ? bi('No se encontraron trabajos con esa búsqueda.', 'No jobs matched that search.')
+                  : bi('Sin labores de maquinaria registradas en este lote.', 'No machinery jobs recorded on this lot.')
               }
             >
               {lotJobs.map((j) => {
                 const fullLabor =
                   j.trabajoNombre ||
-                  (j.maquinariaNombre ? `Labor con ${j.maquinariaNombre}` : 'Trabajo de Maquinaria');
+                  (j.maquinariaNombre
+                    ? bi(`Labor con ${j.maquinariaNombre}`, `Job with ${j.maquinariaNombre}`)
+                    : bi('Trabajo de Maquinaria', 'Machinery Job'));
                 const unitLabel =
                   j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'h';
                 return (
@@ -3181,12 +2998,12 @@ export const PropertyView: React.FC<Props> = ({
                     title={fullLabor}
                     subtitle={
                       <span>
-                        {formatDateDDMMAAAA(j.fecha)} · {j.maquinariaNombre || 'Maquinaria'} · {j.cantidad}{' '}
+                        {formatDateDDMMAAAA(j.fecha)} · {j.maquinariaNombre || bi('Maquinaria', 'Machinery')} · {j.cantidad}{' '}
                         {unitLabel}
                       </span>
                     }
                     rightPrimary={
-                      <span className="text-[#C44545] font-mono">
+                      <span className="text-[#C44545] tabular-nums">
                         - {j.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
                         {(Number(j.total) || 0).toLocaleString('es-BO', {
                           minimumFractionDigits: 2,
@@ -3216,9 +3033,9 @@ export const PropertyView: React.FC<Props> = ({
               tipo: 'ingreso' as const,
               fecha: i.fecha,
               loteId: i.loteId,
-              loteNombre: i.loteNombre || activeLotForScreen?.nombre || 'Lote',
+              loteNombre: i.loteNombre || activeLotForScreen?.nombre || bi('Lote', 'Lot'),
               titulo: formatConcept(i.concepto),
-              detalle: `${i.cantidad} ${i.unidad || ''} ${i.precio ? `@ ${i.moneda === 'USD' ? 'USD' : 'Bs'} ${i.precio}` : ''} ${i.observacion ? `• ${i.observacion}` : ''}`.trim(),
+              detalle: `${i.cantidad} ${translateUnit(i.unidad || '')} ${i.precio ? `@ ${i.moneda === 'USD' ? 'USD' : 'Bs'} ${i.precio}` : ''} ${i.observacion ? `• ${i.observacion}` : ''}`.trim(),
               monto: i.total,
               moneda: (i.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
               tipoCambio: i.tipoCambio || i.tc || exchangeRate?.tasaBobPerUsd,
@@ -3241,12 +3058,15 @@ export const PropertyView: React.FC<Props> = ({
               tipo: 'cosecha' as const,
               fecha: h.fecha,
               loteId: h.loteId,
-              loteNombre: h.loteNombre || activeLotForScreen?.nombre || 'Lote',
-              titulo: `Cosecha ${formatConcept(h.producto)}`,
+              loteNombre: h.loteNombre || activeLotForScreen?.nombre || bi('Lote', 'Lot'),
+              titulo: `${bi('Cosecha', 'Harvest')} ${formatConcept(h.producto)}`,
               detalle:
                 h.asignadas > 0
-                  ? `${h.toneladas} t totales · ${h.asignadas} t asignadas · ${h.pendiente} t pendientes`
-                  : `${h.toneladas} t · Sin precio`,
+                  ? bi(
+                      `${h.toneladas} t totales · ${h.asignadas} t asignadas · ${h.pendiente} t pendientes`,
+                      `${h.toneladas} t total · ${h.asignadas} t priced · ${h.pendiente} t pending`
+                    )
+                  : bi(`${h.toneladas} t · Sin precio`, `${h.toneladas} t · Unpriced`),
               monto: 0,
               moneda: 'USD' as Currency,
               cantidad: h.toneladas,
@@ -3268,19 +3088,23 @@ export const PropertyView: React.FC<Props> = ({
         return (
           <div className="space-y-3">
             <ListToolbar
-              title={activeLotForScreen ? `${activeLotForScreen.nombre} · Cosechas e ingresos` : 'Cosechas e ingresos'}
-              countLabel={`${lotIncomeItems.length} reg.`}
+              title={
+                activeLotForScreen
+                  ? `${activeLotForScreen.nombre} · ${bi('Cosechas e ingresos', 'Harvests & income')}`
+                  : bi('Cosechas e ingresos', 'Harvests & income')
+              }
+              countLabel={`${lotIncomeItems.length} ${bi('reg.', 'rec.')}`}
               searchValue={lotDetailSearch}
               onSearchChange={setLotDetailSearch}
-              searchPlaceholder="Buscar producto, fecha u observación..."
+              searchPlaceholder={bi('Buscar producto, fecha u observación...', 'Search product, date, or note...')}
             />
 
             <CompactList
               isEmpty={lotIncomeItems.length === 0}
               emptyMessage={
                 q
-                  ? 'No se encontraron cosechas o ingresos con esa búsqueda.'
-                  : 'Sin cosechas o ingresos registrados en este lote.'
+                  ? bi('No se encontraron cosechas o ingresos con esa búsqueda.', 'No harvests or income matched that search.')
+                  : bi('Sin cosechas o ingresos registrados en este lote.', 'No harvests or income recorded on this lot.')
               }
             >
               {lotIncomeItems.map((m) => {
@@ -3307,17 +3131,21 @@ export const PropertyView: React.FC<Props> = ({
                       <span>
                         {formatDateDDMMAAAA(m.fecha)} ·{' '}
                         {isHarvest
-                          ? `${m.cosechaRecord?.pendiente} t pend. (${isUnpricedHarvest ? 'Sin precio' : 'Parcial'})`
-                          : `${m.cantidad || 0} ${m.unidad || ''}`.trim()}
+                          ? `${m.cosechaRecord?.pendiente} t ${bi('pend.', 'pend.')} (${
+                              isUnpricedHarvest ? bi('Sin precio', 'Unpriced') : bi('Parcial', 'Partial')
+                            })`
+                          : `${m.cantidad || 0} ${translateUnit(m.unidad || '')}`.trim()}
                       </span>
                     }
                     rightPrimary={
                       isHarvest ? (
                         <span className="text-xs font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200/80">
-                          {isUnpricedHarvest ? 'Sin precio' : `${m.cosechaRecord?.pendiente} t pend.`}
+                          {isUnpricedHarvest
+                            ? bi('Sin precio', 'Unpriced')
+                            : `${m.cosechaRecord?.pendiente} t ${bi('pend.', 'pend.')}`}
                         </span>
                       ) : (
-                        <span className="font-mono text-[#24875B]">
+                        <span className="tabular-nums text-[#24875B]">
                           + {m.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
                           {(Number(m.monto) || 0).toLocaleString('es-BO', {
                             minimumFractionDigits: 2,
@@ -3333,65 +3161,65 @@ export const PropertyView: React.FC<Props> = ({
                         <div className="space-y-2.5 text-xs">
                           <div className="divide-y divide-[#EFF2EF]">
                             <div className="py-1.5 flex items-center justify-between gap-2">
-                              <span className="text-[#5E6D64] font-medium">Toneladas totales</span>
+                              <span className="text-[#5E6D64] font-medium">{bi('Toneladas totales', 'Total tons')}</span>
                               <span className="font-semibold text-[#26352D]">{m.cosechaRecord.toneladas} t</span>
                             </div>
                             <div className="py-1.5 flex items-center justify-between gap-2">
-                              <span className="text-[#5E6D64] font-medium">Asignadas / Pendientes</span>
-                              <span className="font-mono font-semibold text-[#26352D]">
-                                {m.cosechaRecord.asignadas} t asig. · {m.cosechaRecord.pendiente} t pend.
+                              <span className="text-[#5E6D64] font-medium">{bi('Asignadas / Pendientes', 'Priced / Pending')}</span>
+                              <span className="tabular-nums font-semibold text-[#26352D]">
+                                {m.cosechaRecord.asignadas} t {bi('asig.', 'priced')} · {m.cosechaRecord.pendiente} t {bi('pend.', 'pend.')}
                               </span>
                             </div>
                             {m.cosechaRecord.observacion && (
                               <div className="py-1.5 flex items-center justify-between gap-2">
-                                <span className="text-[#5E6D64] font-medium">Observación</span>
+                                <span className="text-[#5E6D64] font-medium">{bi('Observación', 'Observation')}</span>
                                 <span className="italic text-[#26352D] text-right">{m.cosechaRecord.observacion}</span>
                               </div>
                             )}
                           </div>
-                          <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E6EBE7]">
-                            {m.cosechaRecord.pendiente > 0.0001 && (
-                              <button
-                                type="button"
-                                onClick={() => handleOpenAssignPrice(m.cosechaRecord!)}
-                                className="px-3.5 py-1.5 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white font-semibold text-xs transition cursor-pointer min-h-[34px]"
-                              >
-                                Asignar precio
-                              </button>
-                            )}
-                            {effectiveIsAdmin && (
+                          {effectiveIsAdmin && (
+                            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E6EBE7]">
+                              {m.cosechaRecord.pendiente > 0.0001 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setCurrentScreen('pendientes_precio')}
+                                  className="px-3.5 py-1.5 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white font-semibold text-xs transition cursor-pointer min-h-[34px]"
+                                >
+                                  {t('harvestSales.title')}
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => handleOpenEditHarvest(m.cosechaRecord!)}
                                 className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px]"
                               >
-                                Editar
+                                {t('common.edit')}
                               </button>
-                            )}
-                          </div>
+                            </div>
+                          )}
                         </div>
                       ) : (
                         <div className="space-y-2 text-xs">
                           <div className="divide-y divide-[#EFF2EF]">
                             <div className="py-1.5 flex items-center justify-between gap-2">
-                              <span className="text-[#5E6D64] font-medium">Cantidad</span>
+                              <span className="text-[#5E6D64] font-medium">{bi('Cantidad', 'Quantity')}</span>
                               <span className="font-semibold text-[#26352D]">
-                                {m.cantidad ? `${m.cantidad} ${m.unidad || ''}` : '—'}
+                                {m.cantidad ? `${m.cantidad} ${translateUnit(m.unidad || '')}` : '—'}
                               </span>
                             </div>
                             <div className="py-1.5 flex items-center justify-between gap-2">
-                              <span className="text-[#5E6D64] font-medium">Equivalencia</span>
-                              <span className="font-mono font-semibold text-[#26352D] text-right">
+                              <span className="text-[#5E6D64] font-medium">{bi('Equivalencia', 'Equivalent')}</span>
+                              <span className="tabular-nums font-semibold text-[#26352D] text-right">
                                 {m.tipoCambio && m.tipoCambio > 0
                                   ? m.moneda === 'USD'
-                                    ? `Bs ${(m.monto * m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(m.tipoCambio)})`
-                                    : `USD ${(m.monto / m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(m.tipoCambio)})`
+                                    ? `Bs ${(m.monto * m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${bi('TC', 'FX')}: ${formatTC(m.tipoCambio)})`
+                                    : `USD ${(m.monto / m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${bi('TC', 'FX')}: ${formatTC(m.tipoCambio)})`
                                   : '—'}
                               </span>
                             </div>
                             {m.observacion && (
                               <div className="py-1.5 flex items-center justify-between gap-2">
-                                <span className="text-[#5E6D64] font-medium shrink-0">Observación</span>
+                                <span className="text-[#5E6D64] font-medium shrink-0">{bi('Observación', 'Observation')}</span>
                                 <span className="italic text-[#26352D] text-right">{m.observacion}</span>
                               </div>
                             )}
@@ -3403,14 +3231,14 @@ export const PropertyView: React.FC<Props> = ({
                                 onClick={() => handleOpenEditMovement(m)}
                                 className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px]"
                               >
-                                Editar
+                                {t('common.edit')}
                               </button>
                               <button
                                 type="button"
                                 onClick={() => handlePromptDeleteInc(m.id, m.titulo)}
                                 className="px-3.5 py-1.5 rounded-xl bg-[#FCECEC] hover:bg-[#F7DCDC] text-[#C44545] font-semibold text-xs transition cursor-pointer border border-[#F2C6C6] min-h-[34px]"
                               >
-                                Eliminar
+                                {t('common.delete')}
                               </button>
                             </div>
                           )}
@@ -3443,19 +3271,23 @@ export const PropertyView: React.FC<Props> = ({
         return (
           <div className="space-y-3">
             <ListToolbar
-              title={activeLotForScreen ? `${activeLotForScreen.nombre} · Gastos directos` : 'Gastos directos'}
-              countLabel={`${lotExpenses.length} reg.`}
+              title={
+                activeLotForScreen
+                  ? `${activeLotForScreen.nombre} · ${bi('Gastos directos', 'Direct expenses')}`
+                  : bi('Gastos directos', 'Direct expenses')
+              }
+              countLabel={`${lotExpenses.length} ${bi('reg.', 'rec.')}`}
               searchValue={lotDetailSearch}
               onSearchChange={setLotDetailSearch}
-              searchPlaceholder="Buscar insumo, fecha u observación..."
+              searchPlaceholder={bi('Buscar insumo, fecha u observación...', 'Search input, date, or note...')}
             />
 
             <CompactList
               isEmpty={lotExpenses.length === 0}
               emptyMessage={
                 q
-                  ? 'No se encontraron gastos con esa búsqueda.'
-                  : 'Sin gastos directos registrados en este lote.'
+                  ? bi('No se encontraron gastos con esa búsqueda.', 'No expenses matched that search.')
+                  : bi('Sin gastos directos registrados en este lote.', 'No direct expenses recorded on this lot.')
               }
             >
               {lotExpenses.map((e) => {
@@ -3472,9 +3304,9 @@ export const PropertyView: React.FC<Props> = ({
                   tipo: 'gasto_directo',
                   fecha: e.fecha,
                   loteId: e.loteId,
-                  loteNombre: e.loteNombre || activeLotForScreen?.nombre || 'Lote',
+                  loteNombre: e.loteNombre || activeLotForScreen?.nombre || bi('Lote', 'Lot'),
                   titulo: formatConcept(e.itemGasto),
-                  detalle: `${e.cantidad} ${e.unidad || ''}`.trim(),
+                  detalle: `${e.cantidad} ${translateUnit(e.unidad || '')}`.trim(),
                   monto: e.total,
                   moneda: (e.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
                   tipoCambio: tcVal,
@@ -3497,11 +3329,11 @@ export const PropertyView: React.FC<Props> = ({
                     title={formatConcept(e.itemGasto)}
                     subtitle={
                       <span>
-                        {formatDateDDMMAAAA(e.fecha)} · {e.cantidad} {e.unidad || ''}
+                        {formatDateDDMMAAAA(e.fecha)} · {e.cantidad} {translateUnit(e.unidad || '')}
                       </span>
                     }
                     rightPrimary={
-                      <span className="font-mono text-[#C44545]">
+                      <span className="tabular-nums text-[#C44545]">
                         - {e.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
                         {(Number(e.total) || 0).toLocaleString('es-BO', {
                           minimumFractionDigits: 2,
@@ -3515,24 +3347,24 @@ export const PropertyView: React.FC<Props> = ({
                       <div className="space-y-2 text-xs">
                         <div className="divide-y divide-[#EFF2EF]">
                           <div className="py-1.5 flex items-center justify-between gap-2">
-                            <span className="text-[#5E6D64] font-medium">Cantidad</span>
+                            <span className="text-[#5E6D64] font-medium">{bi('Cantidad', 'Quantity')}</span>
                             <span className="font-semibold text-[#26352D]">
-                              {e.cantidad} {e.unidad || ''}
+                              {e.cantidad} {translateUnit(e.unidad || '')}
                             </span>
                           </div>
                           <div className="py-1.5 flex items-center justify-between gap-2">
-                            <span className="text-[#5E6D64] font-medium">Equivalencia</span>
-                            <span className="font-mono font-semibold text-[#26352D] text-right">
+                            <span className="text-[#5E6D64] font-medium">{bi('Equivalencia', 'Equivalent')}</span>
+                            <span className="tabular-nums font-semibold text-[#26352D] text-right">
                               {tcVal && tcVal > 0
                                 ? e.moneda === 'USD'
-                                  ? `Bs ${(e.total * tcVal).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(tcVal)})`
-                                  : `USD ${(e.total / tcVal).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(tcVal)})`
+                                  ? `Bs ${(e.total * tcVal).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${bi('TC', 'FX')}: ${formatTC(tcVal)})`
+                                  : `USD ${(e.total / tcVal).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${bi('TC', 'FX')}: ${formatTC(tcVal)})`
                                 : '—'}
                             </span>
                           </div>
                           {e.observacion && (
                             <div className="py-1.5 flex items-center justify-between gap-2">
-                              <span className="text-[#5E6D64] font-medium shrink-0">Observación</span>
+                              <span className="text-[#5E6D64] font-medium shrink-0">{bi('Observación', 'Observation')}</span>
                               <span className="italic text-[#26352D] text-right">{e.observacion}</span>
                             </div>
                           )}
@@ -3544,14 +3376,14 @@ export const PropertyView: React.FC<Props> = ({
                               onClick={() => handleOpenEditMovement(movItem)}
                               className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px]"
                             >
-                              Editar
+                              {t('common.edit')}
                             </button>
                             <button
                               type="button"
                               onClick={() => handlePromptDeleteExp(e.id, formatConcept(e.itemGasto))}
                               className="px-3.5 py-1.5 rounded-xl bg-[#FCECEC] hover:bg-[#F7DCDC] text-[#C44545] font-semibold text-xs transition cursor-pointer border border-[#F2C6C6] min-h-[34px]"
                             >
-                              Eliminar
+                              {t('common.delete')}
                             </button>
                           </div>
                         )}
@@ -3584,37 +3416,45 @@ export const PropertyView: React.FC<Props> = ({
             <div className="bg-[#FCECEC]/75 border border-[#F2C6C6] px-3.5 py-2.5 rounded-xl text-xs text-[#8D2C2C] flex items-center gap-2">
               <AlertCircle className="h-4 w-4 text-[#C44545] shrink-0" />
               <span className="font-medium">
-                Trabajos vinculados automáticamente como gasto del lote. Se editan en Maquinarias.
+                {bi(
+                  'Trabajos vinculados automáticamente como gasto del lote. Se editan en Maquinarias.',
+                  'Jobs automatically linked as lot expenses. Edit them in Machinery.'
+                )}
               </span>
             </div>
 
             <ListToolbar
-              title="Trabajos recibidos"
-              countLabel={`${filteredLinkedJobs.length} reg.`}
+              title={bi('Trabajos recibidos', 'Received jobs')}
+              countLabel={`${filteredLinkedJobs.length} ${bi('reg.', 'rec.')}`}
               searchValue={machineryJobsSearch}
               onSearchChange={setMachineryJobsSearch}
-              searchPlaceholder="Buscar labor, equipo o lote..."
+              searchPlaceholder={bi('Buscar labor, equipo o lote...', 'Search job, equipment, or lot...')}
             />
 
             <CompactList
               isEmpty={filteredLinkedJobs.length === 0}
               emptyMessage={
                 q
-                  ? 'No se encontraron trabajos con esa búsqueda.'
-                  : 'No hay trabajos de maquinaria propia asignados a lotes en esta campaña.'
+                  ? bi('No se encontraron trabajos con esa búsqueda.', 'No jobs matched that search.')
+                  : bi(
+                      'No hay trabajos de maquinaria propia asignados a lotes en esta campaña.',
+                      'No internal machinery jobs assigned to lots in this campaign.'
+                    )
               }
             >
               {filteredLinkedJobs.map((j) => {
                 const fullLabor =
                   j.trabajoNombre ||
-                  (j.maquinariaNombre ? `Labor con ${j.maquinariaNombre}` : 'Trabajo de Maquinaria');
+                  (j.maquinariaNombre
+                    ? bi(`Labor con ${j.maquinariaNombre}`, `Job with ${j.maquinariaNombre}`)
+                    : bi('Trabajo de Maquinaria', 'Machinery Job'));
                 const unitLabel =
                   j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'h';
                 const loteLabel = j.loteNombre
-                  ? j.loteNombre.toLowerCase().startsWith('lote')
+                  ? j.loteNombre.toLowerCase().startsWith('lote') || j.loteNombre.toLowerCase().startsWith('lot')
                     ? j.loteNombre
-                    : `Lote ${j.loteNombre}`
-                  : 'Lote propio';
+                    : `${bi('Lote', 'Lot')} ${j.loteNombre}`
+                  : bi('Lote propio', 'Own lot');
 
                 return (
                   <CompactListRow
@@ -3633,7 +3473,7 @@ export const PropertyView: React.FC<Props> = ({
                       </span>
                     }
                     rightPrimary={
-                      <span className="text-[#C44545] font-mono">
+                      <span className="text-[#C44545] tabular-nums">
                         - {j.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
                         {j.total.toLocaleString('es-BO', {
                           minimumFractionDigits: 2,
@@ -3656,18 +3496,18 @@ export const PropertyView: React.FC<Props> = ({
       {currentScreen === 'historial' && (
         <div className="space-y-3">
           <ListToolbar
-            title="Historial"
+            title={bi('Historial', 'History')}
             countLabel={
               historialFilter === 'distribuidos'
-                ? `${expenseAllocations.length} grupos`
-                : `${filteredMovements.length} reg.`
+                ? `${expenseAllocations.length} ${bi('grupos', 'groups')}`
+                : `${filteredMovements.length} ${bi('reg.', 'rec.')}`
             }
             searchValue={historialSearch}
             onSearchChange={setHistorialSearch}
             searchPlaceholder={
               historialFilter === 'distribuidos'
-                ? 'Buscar gasto distribuido o lote...'
-                : 'Buscar por concepto, lote u observación...'
+                ? bi('Buscar gasto distribuido o lote...', 'Search distributed expense or lot...')
+                : bi('Buscar por concepto, lote u observación...', 'Search by concept, lot, or note...')
             }
             filters={
               <CompactFilter
@@ -3682,12 +3522,12 @@ export const PropertyView: React.FC<Props> = ({
                     ? 'red'
                     : 'neutral'
                 }
-                ariaLabel="Filtrar movimientos por tipo"
+                ariaLabel={bi('Filtrar movimientos por tipo', 'Filter records by type')}
                 options={[
-                  { value: 'todos', label: 'Todos' },
-                  { value: 'ingresos', label: 'Ingresos' },
-                  { value: 'gastos', label: 'Gastos' },
-                  { value: 'distribuidos', label: 'Distribuidos' },
+                  { value: 'todos', label: bi('Todos', 'All') },
+                  { value: 'ingresos', label: bi('Ingresos', 'Income') },
+                  { value: 'gastos', label: bi('Gastos', 'Expenses') },
+                  { value: 'distribuidos', label: bi('Distribuidos', 'Distributed') },
                 ]}
               />
             }
@@ -3698,7 +3538,7 @@ export const PropertyView: React.FC<Props> = ({
               {allocationsRevalidating && (
                 <div className="flex items-center justify-end gap-1.5 text-[11px] font-medium text-[#5E6D64]">
                   <RefreshCw className="h-3 w-3 animate-spin text-[#24875B]" />
-                  <span>Actualizando gastos distribuidos...</span>
+                  <span>{bi('Actualizando gastos distribuidos...', 'Refreshing distributed expenses...')}</span>
                 </div>
               )}
               {allocationsError && (
@@ -3707,8 +3547,11 @@ export const PropertyView: React.FC<Props> = ({
                     <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
                     <span className="break-words">
                       {allocationsHasLoaded
-                        ? `No se pudo actualizar (${allocationsError}). Mostrando últimos datos.`
-                        : allocationsError}
+                        ? bi(
+                            `No se pudo actualizar (${translateError(allocationsError)}). Mostrando últimos datos.`,
+                            `Could not refresh (${translateError(allocationsError)}). Showing latest data.`
+                          )
+                        : translateError(allocationsError)}
                     </span>
                   </div>
                   <button
@@ -3717,14 +3560,14 @@ export const PropertyView: React.FC<Props> = ({
                     disabled={allocationsLoading}
                     className="text-xs font-bold text-red-700 underline shrink-0 cursor-pointer"
                   >
-                    Reintentar
+                    {bi('Reintentar', 'Retry')}
                   </button>
                 </div>
               )}
               {allocationsInitialLoading || (!allocationsHasLoaded && !allocationsError) ? (
                 <div className="rounded-2xl border border-[#E2E7E3] bg-white p-8 text-center text-xs text-[#5E6D64] flex items-center justify-center gap-2">
                   <RefreshCw className="h-4 w-4 animate-spin text-[#C44545]" />
-                  <span>Consultando gastos distribuidos...</span>
+                  <span>{bi('Consultando gastos distribuidos...', 'Loading distributed expenses...')}</span>
                 </div>
               ) : (
                 <CompactList
@@ -3740,7 +3583,7 @@ export const PropertyView: React.FC<Props> = ({
                         .includes(q);
                     }).length === 0
                   }
-                  emptyMessage="No hay grupos de gastos distribuidos registrados."
+                  emptyMessage={bi('No hay grupos de gastos distribuidos registrados.', 'No distributed expense groups recorded.')}
                 >
                   {expenseAllocations
                     .filter((g) => {
@@ -3767,12 +3610,12 @@ export const PropertyView: React.FC<Props> = ({
                           title={formatConcept(g.descripcion)}
                           subtitle={
                             <span>
-                              {formatDateDDMMAAAA(g.fecha)} · {g.lotes.length} lotes
+                              {formatDateDDMMAAAA(g.fecha)} · {g.lotes.length} {bi('lotes', 'lots')}
                               {g.hectareasTotales ? ` · ${g.hectareasTotales.toLocaleString('es-BO', { minimumFractionDigits: 1, maximumFractionDigits: 2 })} ha` : ''}
                             </span>
                           }
                           rightPrimary={
-                            <span className="font-mono text-[#C44545]">
+                            <span className="tabular-nums text-[#C44545]">
                               - {curLabel}{' '}
                               {g.importe.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </span>
@@ -3782,7 +3625,7 @@ export const PropertyView: React.FC<Props> = ({
                           expandedContent={
                             <div className="space-y-2 text-xs">
                               {g.observacion && (
-                                <p className="text-[11px] italic text-[#5E6D64]">Obs.: {g.observacion}</p>
+                                <p className="text-[11px] italic text-[#5E6D64]">{bi('Obs.:', 'Note:')} {g.observacion}</p>
                               )}
                               <div className="rounded-xl border border-[#E2E7E3] bg-white divide-y divide-[#EFF2EF]">
                                 {g.lotes.map((lt, idx) => {
@@ -3799,7 +3642,7 @@ export const PropertyView: React.FC<Props> = ({
                                         </span>
                                       </span>
                                       {lt.importe !== undefined && (
-                                        <span className="font-mono font-bold text-[#C44545]">
+                                        <span className="tabular-nums font-bold text-[#C44545]">
                                           {curLabel}{' '}
                                           {lt.importe.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                         </span>
@@ -3819,7 +3662,7 @@ export const PropertyView: React.FC<Props> = ({
           ) : (
             <CompactList
               isEmpty={filteredMovements.length === 0}
-              emptyMessage="No hay movimientos registrados."
+              emptyMessage={bi('No hay movimientos registrados.', 'No records found.')}
             >
             {filteredMovements.map((m) => {
               const isExpanded = expandedMovementId === m.id;
@@ -3827,10 +3670,10 @@ export const PropertyView: React.FC<Props> = ({
               const isHarvest = m.tipo === 'cosecha';
               const isUnpricedHarvest = isHarvest && m.cosechaRecord?.asignadas === 0;
               const loteLabel = m.loteNombre
-                ? m.loteNombre.toLowerCase().startsWith('lote')
+                ? m.loteNombre.toLowerCase().startsWith('lote') || m.loteNombre.toLowerCase().startsWith('lot')
                   ? m.loteNombre
-                  : `Lote ${m.loteNombre}`
-                : 'Lote';
+                  : `${bi('Lote', 'Lot')} ${m.loteNombre}`
+                : bi('Lote', 'Lot');
 
               return (
                 <CompactListRow
@@ -3868,27 +3711,27 @@ export const PropertyView: React.FC<Props> = ({
                       {formatDateDDMMAAAA(m.fecha)} ·{' '}
                       <span className="font-semibold text-[#24875B]">{loteLabel}</span> ·{' '}
                       {isIncome
-                        ? 'Cosecha'
+                        ? bi('Cosecha', 'Harvest')
                         : isHarvest
-                        ? (isUnpricedHarvest ? 'Sin precio' : 'Parcial')
+                        ? (isUnpricedHarvest ? bi('Sin precio', 'Unpriced') : bi('Parcial', 'Partial'))
                         : m.tipo === 'gasto_directo'
-                        ? 'Gasto directo'
-                        : 'Maq. propia'}
+                        ? bi('Gasto directo', 'Direct expense')
+                        : bi('Maq. propia', 'Own mach.')}
                     </span>
                   }
                   rightPrimary={
                     isHarvest ? (
                       isUnpricedHarvest ? (
                         <span className="text-xs font-semibold text-amber-700 bg-amber-50 px-2.5 py-0.5 rounded-md border border-amber-200/80">
-                          Sin importe
+                          {bi('Sin importe', 'Unpriced')}
                         </span>
                       ) : (
-                        <span className="text-xs font-mono text-stone-700 font-semibold">
-                          {m.cosechaRecord?.asignadas} t asig. · {m.cosechaRecord?.pendiente} t pend.
+                        <span className="text-xs tabular-nums text-stone-700 font-semibold">
+                          {m.cosechaRecord?.asignadas} t {bi('asig.', 'priced')} · {m.cosechaRecord?.pendiente} t {bi('pend.', 'pend.')}
                         </span>
                       )
                     ) : (
-                      <span className={`font-mono ${isIncome ? 'text-[#24875B]' : 'text-[#C44545]'}`}>
+                      <span className={`tabular-nums ${isIncome ? 'text-[#24875B]' : 'text-[#C44545]'}`}>
                         {isIncome ? '+ ' : '- '}
                         {m.moneda === 'USD' ? 'USD' : 'Bs'}{' '}
                         {m.monto.toLocaleString('es-BO', {
@@ -3905,24 +3748,24 @@ export const PropertyView: React.FC<Props> = ({
                       <div className="space-y-3 text-xs">
                         <div className="divide-y divide-[#EFF2EF]">
                           <div className="py-1.5 flex items-center justify-between gap-2">
-                            <span className="text-[#5E6D64] font-medium">Lote</span>
+                            <span className="text-[#5E6D64] font-medium">{bi('Lote', 'Lot')}</span>
                             <span className="font-semibold text-[#24875B] text-right">{loteLabel}</span>
                           </div>
                           <div className="py-1.5 flex items-center justify-between gap-2">
-                            <span className="text-[#5E6D64] font-medium">Toneladas totales</span>
+                            <span className="text-[#5E6D64] font-medium">{bi('Toneladas totales', 'Total tons')}</span>
                             <span className="font-semibold text-[#26352D] text-right">
                               {m.cosechaRecord?.toneladas} t
                             </span>
                           </div>
                           <div className="py-1.5 flex items-center justify-between gap-2">
-                            <span className="text-[#5E6D64] font-medium">Asignadas / Pendientes</span>
-                            <span className="font-mono font-semibold text-[#26352D] text-right">
-                              {m.cosechaRecord?.asignadas || 0} t asig. · {m.cosechaRecord?.pendiente || 0} t pend.
+                            <span className="text-[#5E6D64] font-medium">{bi('Asignadas / Pendientes', 'Priced / Pending')}</span>
+                            <span className="tabular-nums font-semibold text-[#26352D] text-right">
+                              {m.cosechaRecord?.asignadas || 0} t {bi('asig.', 'priced')} · {m.cosechaRecord?.pendiente || 0} t {bi('pend.', 'pend.')}
                             </span>
                           </div>
                           {m.cosechaRecord?.observacion && (
                             <div className="py-1.5 flex items-center justify-between gap-2">
-                              <span className="text-[#5E6D64] font-medium shrink-0">Observación</span>
+                              <span className="text-[#5E6D64] font-medium shrink-0">{bi('Observación', 'Observation')}</span>
                               <span className="font-normal text-[#26352D] text-right italic">
                                 {m.cosechaRecord.observacion}
                               </span>
@@ -3935,10 +3778,10 @@ export const PropertyView: React.FC<Props> = ({
                               {m.cosechaRecord.pendiente > 0.0001 && (
                                 <button
                                   type="button"
-                                  onClick={() => handleOpenAssignPrice(m.cosechaRecord!)}
+                                  onClick={() => setCurrentScreen('pendientes_precio')}
                                   className="px-3.5 py-1.5 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white font-semibold text-xs transition cursor-pointer min-h-[34px]"
                                 >
-                                  Asignar precio
+                                  {t('harvestSales.title')}
                                 </button>
                               )}
                               <button
@@ -3947,13 +3790,13 @@ export const PropertyView: React.FC<Props> = ({
                                 className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px] inline-flex items-center gap-1"
                               >
                                 <Edit3 className="h-3.5 w-3.5" />
-                                <span>Editar</span>
+                                <span>{t('common.edit')}</span>
                               </button>
                             </div>
                           ) : (
                             <div className="flex items-center gap-1.5 pt-2 border-t border-[#E6EBE7] text-[11px] text-[#7A8780]">
                               <Lock className="h-3.5 w-3.5 shrink-0" />
-                              <span>Solo el Administrador puede editar cosechas guardadas.</span>
+                              <span>{bi('Solo el Administrador puede editar cosechas guardadas.', 'Only the Administrator can edit saved harvests.')}</span>
                             </div>
                           )
                         )}
@@ -3962,30 +3805,30 @@ export const PropertyView: React.FC<Props> = ({
                       <div className="space-y-2 text-xs">
                         <div className="divide-y divide-[#EFF2EF]">
                           <div className="py-1.5 flex items-center justify-between gap-2">
-                            <span className="text-[#5E6D64] font-medium">Lote</span>
+                            <span className="text-[#5E6D64] font-medium">{bi('Lote', 'Lot')}</span>
                             <span className="font-semibold text-[#24875B] text-right">
                               {loteLabel}
                             </span>
                           </div>
                           <div className="py-1.5 flex items-center justify-between gap-2">
-                            <span className="text-[#5E6D64] font-medium">Cantidad</span>
+                            <span className="text-[#5E6D64] font-medium">{bi('Cantidad', 'Quantity')}</span>
                             <span className="font-semibold text-[#26352D] text-right">
-                              {m.cantidad ? `${m.cantidad} ${m.unidad || ''}` : '—'}
+                              {m.cantidad ? `${m.cantidad} ${translateUnit(m.unidad || '')}` : '—'}
                             </span>
                           </div>
                           <div className="py-1.5 flex items-center justify-between gap-2">
-                            <span className="text-[#5E6D64] font-medium">Equivalencia</span>
-                            <span className="font-mono font-semibold text-[#26352D] text-right">
+                            <span className="text-[#5E6D64] font-medium">{bi('Equivalencia', 'Equivalent')}</span>
+                            <span className="tabular-nums font-semibold text-[#26352D] text-right">
                               {m.tipoCambio && m.tipoCambio > 0
                                 ? m.moneda === 'USD'
-                                  ? `Bs ${(m.monto * m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(m.tipoCambio)})`
-                                  : `USD ${(m.monto / m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (TC: ${formatTC(m.tipoCambio)})`
+                                  ? `Bs ${(m.monto * m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${bi('TC', 'FX')}: ${formatTC(m.tipoCambio)})`
+                                  : `USD ${(m.monto / m.tipoCambio).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${bi('TC', 'FX')}: ${formatTC(m.tipoCambio)})`
                                 : '—'}
                             </span>
                           </div>
                           {m.detalle && (
                             <div className="py-1.5 flex items-center justify-between gap-2">
-                              <span className="text-[#5E6D64] font-medium shrink-0">Observación</span>
+                              <span className="text-[#5E6D64] font-medium shrink-0">{bi('Observación', 'Observation')}</span>
                               <span className="font-normal text-[#26352D] text-right italic">
                                 {m.detalle}
                               </span>
@@ -4001,7 +3844,7 @@ export const PropertyView: React.FC<Props> = ({
                                 onClick={() => handleOpenEditMovement(m)}
                                 className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px]"
                               >
-                                Editar
+                                {t('common.edit')}
                               </button>
                               <button
                                 type="button"
@@ -4012,13 +3855,13 @@ export const PropertyView: React.FC<Props> = ({
                                 }
                                 className="px-3.5 py-1.5 rounded-xl bg-[#FCECEC] hover:bg-[#F7DCDC] text-[#C44545] font-semibold text-xs transition cursor-pointer border border-[#F2C6C6] min-h-[34px]"
                               >
-                                Eliminar
+                                {t('common.delete')}
                               </button>
                             </div>
                           ) : (
                             <div className="flex items-center gap-1.5 pt-2 border-t border-[#E6EBE7] text-[11px] text-[#7A8780]">
                               <Lock className="h-3.5 w-3.5 shrink-0" />
-                              <span>Solo el Administrador puede editar o eliminar registros guardados.</span>
+                              <span>{bi('Solo el Administrador puede editar o eliminar registros guardados.', 'Only the Administrator can edit or delete saved records.')}</span>
                             </div>
                           )
                         )}
@@ -4042,10 +3885,12 @@ export const PropertyView: React.FC<Props> = ({
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div>
                 <h3 className="text-base font-bold text-slate-900">
-                  {editingMovement.tipo === 'gasto_directo' ? 'Editar Gasto Agrícola' : 'Editar Ingreso de Cosecha'}
+                  {editingMovement.tipo === 'gasto_directo'
+                    ? bi('Editar Gasto Agrícola', 'Edit Agricultural Expense')
+                    : bi('Editar Ingreso de Cosecha', 'Edit Harvest Income')}
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Actualiza los datos del registro en Google Sheets
+                  {bi('Actualiza los datos del registro en Google Sheets', 'Update the record details in Google Sheets')}
                 </p>
               </div>
               <button
@@ -4061,7 +3906,7 @@ export const PropertyView: React.FC<Props> = ({
               {/* Fecha */}
               <div>
                 <label className={FORM_LABEL_CLASS}>
-                  Fecha <span className="text-[#C44545]">*</span>
+                  {bi('Fecha', 'Date')} <span className="text-[#C44545]">*</span>
                 </label>
                 <input
                   type="date"
@@ -4083,21 +3928,21 @@ export const PropertyView: React.FC<Props> = ({
                     if (ha !== null) setEditCantidad(ha);
                   }
                 }}
-                label="Lote"
+                label={bi('Lote', 'Lot')}
                 required
               />
 
               {/* Concepto / Descripción */}
               <div>
                 <label className={FORM_LABEL_CLASS}>
-                  Concepto <span className="text-[#C44545]">*</span>
+                  {bi('Concepto', 'Concept')} <span className="text-[#C44545]">*</span>
                 </label>
                 <input
                   type="text"
                   required
                   value={editConcepto}
                   onChange={(e) => setEditConcepto(e.target.value)}
-                  placeholder="Semillas, Venta Cosecha..."
+                  placeholder={bi('Semillas, Venta Cosecha...', 'Seeds, Harvest Sale...')}
                   className={FORM_INPUT_CLASS}
                 />
               </div>
@@ -4106,7 +3951,7 @@ export const PropertyView: React.FC<Props> = ({
               <div className="grid grid-cols-2 gap-2.5 items-end">
                 <div>
                   <label className={FORM_LABEL_CLASS}>
-                    Cantidad <span className="text-[#C44545]">*</span>
+                    {bi('Cantidad', 'Quantity')} <span className="text-[#C44545]">*</span>
                   </label>
                   <input
                     type="number"
@@ -4120,7 +3965,7 @@ export const PropertyView: React.FC<Props> = ({
                   />
                 </div>
                 <div>
-                  <label className={FORM_LABEL_CLASS}>Unidad</label>
+                  <label className={FORM_LABEL_CLASS}>{bi('Unidad', 'Unit')}</label>
                   <input
                     type="text"
                     value={editUnidad}
@@ -4136,7 +3981,7 @@ export const PropertyView: React.FC<Props> = ({
                         if (ha !== null) setEditCantidad(ha);
                       }
                     }}
-                    placeholder="ha, kg, toneladas, bolsas"
+                    placeholder={bi('ha, kg, toneladas, bolsas', 'ha, kg, tons, bags')}
                     className={FORM_INPUT_CLASS}
                   />
                 </div>
@@ -4146,7 +3991,7 @@ export const PropertyView: React.FC<Props> = ({
               <div className="grid grid-cols-2 gap-2.5 items-end">
                 <div>
                   <label className={FORM_LABEL_CLASS}>
-                    Precio unitario <span className="text-[#C44545]">*</span>
+                    {bi('Precio unitario', 'Unit price')} <span className="text-[#C44545]">*</span>
                   </label>
                   <input
                     type="number"
@@ -4163,7 +4008,7 @@ export const PropertyView: React.FC<Props> = ({
                   />
                 </div>
                 <CurrencySelect
-                  label="Moneda"
+                  label={bi('Moneda', 'Currency')}
                   required
                   value={editMoneda}
                   onChange={handleEditMovCurrencyChange}
@@ -4172,7 +4017,7 @@ export const PropertyView: React.FC<Props> = ({
 
               {/* Tipo de Cambio */}
               <div>
-                <label className={FORM_LABEL_CLASS}>Tipo de cambio (Bs/USD)</label>
+                <label className={FORM_LABEL_CLASS}>{bi('Tipo de cambio (Bs/USD)', 'Exchange rate (Bs/USD)')}</label>
                 <input
                   type="number"
                   inputMode="decimal"
@@ -4185,23 +4030,16 @@ export const PropertyView: React.FC<Props> = ({
               </div>
 
               {/* Observaciones */}
-              <div>
-                <label className={FORM_LABEL_CLASS}>
-                  Observación <span className="text-[#7A8780] font-normal">(opcional)</span>
-                </label>
-                <textarea
-                  rows={2}
-                  value={editObs}
-                  onChange={(e) => setEditObs(e.target.value)}
-                  placeholder="Notas adicionales..."
-                  className={FORM_TEXTAREA_CLASS}
-                />
-              </div>
+              <ObservationField
+                value={editObs}
+                onChange={setEditObs}
+                placeholder={bi('Notas adicionales...', 'Additional notes...')}
+              />
 
               {/* Importe total */}
               <div className="flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-[#F4F7F5] border border-[#DCE2DD]">
-                <span className="text-[13px] font-bold text-[#26352D]">Importe total</span>
-                <span className="text-base font-extrabold text-[#1F2D25] font-mono tabular-nums">
+                <span className="text-[13px] font-bold text-[#26352D]">{bi('Importe total', 'Total amount')}</span>
+                <span className="text-base font-extrabold text-[#1F2D25] tabular-nums">
                   {editMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
                   {(Number(editCantidad || 0) * Number(editPrecio || 0)).toLocaleString('es-BO', {
                     minimumFractionDigits: 2,
@@ -4218,7 +4056,7 @@ export const PropertyView: React.FC<Props> = ({
                   onClick={() => setEditingMovement(null)}
                   className="w-full h-[42px] px-4 rounded-xl border border-[#D4DDD6] bg-white text-[#26352D] font-bold text-sm hover:bg-[#F5F7F5] transition cursor-pointer"
                 >
-                  Cancelar
+                  {t('common.cancel')}
                 </button>
                 <button
                   type="submit"
@@ -4226,7 +4064,7 @@ export const PropertyView: React.FC<Props> = ({
                   className="w-full h-[42px] px-4 rounded-xl bg-[#24875B] hover:bg-[#1D704B] active:bg-[#175B3D] text-white font-bold text-sm shadow-xs transition cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
                 >
                   <Save className="h-4 w-4 shrink-0" />
-                  <span>{savingEdit ? 'Guardando...' : 'Guardar cambios'}</span>
+                  <span>{savingEdit ? t('common.saving') : t('common.saveChanges')}</span>
                 </button>
               </div>
             </form>
@@ -4244,9 +4082,17 @@ export const PropertyView: React.FC<Props> = ({
               <AlertCircle className="h-7 w-7" />
             </div>
             <div>
-              <h3 className="text-lg font-bold text-slate-900">¿Confirmar eliminación?</h3>
+              <h3 className="text-lg font-bold text-slate-900">{bi('¿Confirmar eliminación?', 'Confirm deletion?')}</h3>
               <p className="text-xs text-slate-600 mt-1">
-                Se eliminará definitivamente el registro de {itemToDelete.tipo === 'gasto' ? 'gasto agrícola' : 'ingreso de cosecha'}:
+                {itemToDelete.tipo === 'gasto'
+                  ? bi(
+                      'Se eliminará definitivamente el registro de gasto agrícola:',
+                      'This agricultural expense record will be permanently deleted:'
+                    )
+                  : bi(
+                      'Se eliminará definitivamente el registro de ingreso de cosecha:',
+                      'This harvest income record will be permanently deleted:'
+                    )}
               </p>
               <p className="text-sm font-bold text-slate-800 mt-2 p-2.5 bg-slate-50 rounded-xl border border-slate-100 break-words">
                 {itemToDelete.titulo}
@@ -4259,7 +4105,7 @@ export const PropertyView: React.FC<Props> = ({
                 onClick={() => setItemToDelete(null)}
                 className="w-full py-3 px-4 rounded-xl border border-slate-200 text-slate-700 font-bold text-xs hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer min-h-[46px]"
               >
-                Cancelar
+                {t('common.cancel')}
               </button>
               <button
                 type="button"
@@ -4267,7 +4113,7 @@ export const PropertyView: React.FC<Props> = ({
                 onClick={handleConfirmDeleteItem}
                 className="w-full py-3 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold text-xs shadow-xs transition cursor-pointer disabled:opacity-50 min-h-[46px] flex items-center justify-center gap-1.5"
               >
-                {deletingItem ? 'Eliminando...' : 'Confirmar'}
+                {deletingItem ? t('common.deleting') : bi('Confirmar', 'Confirm')}
               </button>
             </div>
           </div>
@@ -4280,7 +4126,7 @@ export const PropertyView: React.FC<Props> = ({
         const lotName =
           selectedHarvestForPrice.loteNombre ||
           lots.find((l) => String(l.id) === String(selectedHarvestForPrice.loteId))?.nombre ||
-          'Lote';
+          bi('Lote', 'Lot');
         const tonsPreview = parseDecimalNumber(priceToneladas);
         const pricePreview = parseDecimalNumber(priceUsdTon);
         const tcPreview = parseDecimalNumber(priceTc);
@@ -4308,7 +4154,7 @@ export const PropertyView: React.FC<Props> = ({
               <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
                 <div className="min-w-0">
                   <h3 className="text-base font-bold text-slate-900 truncate">
-                    Asignar precio a cosecha
+                    {bi('Asignar precio a cosecha', 'Assign price to harvest')}
                   </h3>
                   <p className="text-xs text-slate-500 truncate mt-0.5">
                     {formatConcept(selectedHarvestForPrice.producto)} · {lotName} ·{' '}
@@ -4335,20 +4181,20 @@ export const PropertyView: React.FC<Props> = ({
 
                 <div className="grid grid-cols-3 divide-x divide-[#E6EBE7] rounded-xl border border-[#E2E7E3] bg-[#F8FAF8] py-2 text-center">
                   <div className="px-1.5">
-                    <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Total</span>
-                    <span className="text-xs font-bold text-[#26352D] font-mono">
+                    <span className="text-[10px] font-bold uppercase text-[#7A8780] block">{bi('Total', 'Total')}</span>
+                    <span className="text-xs font-bold text-[#26352D] tabular-nums">
                       {selectedHarvestForPrice.toneladas.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t
                     </span>
                   </div>
                   <div className="px-1.5">
-                    <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Asignadas</span>
-                    <span className="text-xs font-bold text-[#24875B] font-mono">
+                    <span className="text-[10px] font-bold uppercase text-[#7A8780] block">{bi('Asignadas', 'Priced')}</span>
+                    <span className="text-xs font-bold text-[#24875B] tabular-nums">
                       {selectedHarvestForPrice.asignadas.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t
                     </span>
                   </div>
                   <div className="px-1.5">
-                    <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Pendientes</span>
-                    <span className="text-xs font-black text-amber-700 font-mono">
+                    <span className="text-[10px] font-bold uppercase text-[#7A8780] block">{bi('Pendientes', 'Pending')}</span>
+                    <span className="text-xs font-black text-amber-700 tabular-nums">
                       {selectedHarvestForPrice.pendiente.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t
                     </span>
                   </div>
@@ -4356,16 +4202,16 @@ export const PropertyView: React.FC<Props> = ({
 
                 {/* Campaña */}
                 <AppSelect
-                  label="Campaña del ingreso"
+                  label={bi('Campaña del ingreso', 'Income campaign')}
                   required
                   icon={<Calendar className="h-[17px] w-[17px]" />}
                   value={priceCampanaId}
                   onChange={(e) => setPriceCampanaId(e.target.value)}
                 >
-                  <option value="">Seleccionar campaña</option>
+                  <option value="">{bi('Seleccionar campaña', 'Select campaign')}</option>
                   {campaigns.map((c) => (
                     <option key={c.id} value={c.id}>
-                      {c.nombre} {c.activa ? '(Activa)' : ''}
+                      {c.nombre} {c.activa ? `(${bi('Activa', 'Active')})` : ''}
                     </option>
                   ))}
                 </AppSelect>
@@ -4374,7 +4220,7 @@ export const PropertyView: React.FC<Props> = ({
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-[13px] font-semibold text-[#26352D]">
-                      Toneladas a fijar precio <span className="text-[#C44545]">*</span>
+                      {bi('Toneladas a fijar precio', 'Tons to price')} <span className="text-[#C44545]">*</span>
                     </label>
                     <button
                       type="button"
@@ -4383,7 +4229,7 @@ export const PropertyView: React.FC<Props> = ({
                       }
                       className="text-[11px] font-semibold text-[#24875B] hover:underline cursor-pointer"
                     >
-                      Usar todo ({selectedHarvestForPrice.pendiente.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t)
+                      {bi('Usar todo', 'Use all')} ({selectedHarvestForPrice.pendiente.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t)
                     </button>
                   </div>
                   <input
@@ -4404,7 +4250,7 @@ export const PropertyView: React.FC<Props> = ({
                 <div className="grid grid-cols-2 gap-2.5 items-end">
                   <div>
                     <label className={FORM_LABEL_CLASS}>
-                      Precio ({priceMoneda === 'USD' ? 'USD' : 'Bs'}/t){' '}
+                      {bi('Precio', 'Price')} ({priceMoneda === 'USD' ? 'USD' : 'Bs'}/t){' '}
                       <span className="text-[#C44545]">*</span>
                     </label>
                     <input
@@ -4423,7 +4269,7 @@ export const PropertyView: React.FC<Props> = ({
                     />
                   </div>
                   <CurrencySelect
-                    label="Moneda"
+                    label={bi('Moneda', 'Currency')}
                     required
                     value={priceMoneda}
                     onChange={handlePriceCurrencyChange}
@@ -4434,7 +4280,7 @@ export const PropertyView: React.FC<Props> = ({
                 <div className="grid grid-cols-2 gap-2.5 items-end">
                   <div>
                     <label className={FORM_LABEL_CLASS}>
-                      Tipo de cambio <span className="text-[#C44545]">*</span>
+                      {bi('Tipo de cambio', 'Exchange rate')} <span className="text-[#C44545]">*</span>
                     </label>
                     <input
                       type="number"
@@ -4450,7 +4296,7 @@ export const PropertyView: React.FC<Props> = ({
                   </div>
                   <div>
                     <label className={FORM_LABEL_CLASS}>
-                      Fecha de fijación <span className="text-[#C44545]">*</span>
+                      {bi('Fecha de fijación', 'Pricing date')} <span className="text-[#C44545]">*</span>
                     </label>
                     <input
                       type="date"
@@ -4465,8 +4311,8 @@ export const PropertyView: React.FC<Props> = ({
                 {/* Importe total */}
                 <div className="rounded-xl bg-[#EAF5EE] border border-[#BFE0CD] px-3.5 py-2.5 space-y-1">
                   <div className="flex items-center justify-between">
-                    <span className="text-[13px] font-bold text-[#175B3D]">Importe total</span>
-                    <span className="text-base font-extrabold text-[#175B3D] font-mono tabular-nums">
+                    <span className="text-[13px] font-bold text-[#175B3D]">{bi('Importe total', 'Total amount')}</span>
+                    <span className="text-base font-extrabold text-[#175B3D] tabular-nums">
                       {priceMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
                       {totalInSelectedCurr.toLocaleString('es-BO', {
                         minimumFractionDigits: 2,
@@ -4476,8 +4322,8 @@ export const PropertyView: React.FC<Props> = ({
                   </div>
                   {priceMoneda === 'USD' && totalBobPreview > 0 && (
                     <div className="flex items-center justify-between text-[11px] text-[#1D5C3F]">
-                      <span>Equivalente en Bs</span>
-                      <span className="font-mono font-semibold tabular-nums">
+                      <span>{bi('Equivalente en Bs', 'Equivalent in Bs')}</span>
+                      <span className="tabular-nums font-semibold">
                         Bs{' '}
                         {totalBobPreview.toLocaleString('es-BO', {
                           minimumFractionDigits: 2,
@@ -4488,8 +4334,8 @@ export const PropertyView: React.FC<Props> = ({
                   )}
                   {priceMoneda === 'BOB' && totalUsdPreview > 0 && (
                     <div className="flex items-center justify-between text-[11px] text-[#1D5C3F]">
-                      <span>Equivalente en USD</span>
-                      <span className="font-mono font-semibold tabular-nums">
+                      <span>{bi('Equivalente en USD', 'Equivalent in USD')}</span>
+                      <span className="tabular-nums font-semibold">
                         USD{' '}
                         {totalUsdPreview.toLocaleString('es-BO', {
                           minimumFractionDigits: 2,
@@ -4507,7 +4353,7 @@ export const PropertyView: React.FC<Props> = ({
                     onClick={() => setSelectedHarvestForPrice(null)}
                     className="flex-1 h-[42px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm transition cursor-pointer disabled:opacity-50"
                   >
-                    Cancelar
+                    {t('common.cancel')}
                   </button>
                   <button
                     type="submit"
@@ -4515,7 +4361,7 @@ export const PropertyView: React.FC<Props> = ({
                     className="flex-1 h-[42px] rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white font-bold text-sm transition disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
                   >
                     <Save className="h-4 w-4 shrink-0" />
-                    <span>{savingHarvestPrice ? 'Guardando...' : 'Confirmar precio'}</span>
+                    <span>{savingHarvestPrice ? t('common.saving') : bi('Confirmar precio', 'Confirm price')}</span>
                   </button>
                 </div>
               </form>
@@ -4543,11 +4389,11 @@ export const PropertyView: React.FC<Props> = ({
               <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
                 <div className="min-w-0">
                   <h3 className="text-base font-bold text-slate-900 truncate">
-                    Editar cosecha
+                    {bi('Editar cosecha', 'Edit harvest')}
                   </h3>
                   <p className="text-xs text-slate-500 truncate mt-0.5">
                     {formatConcept(editingHarvest.producto)} ·{' '}
-                    {editingHarvest.loteNombre || lots.find((l) => String(l.id) === String(editingHarvest.loteId))?.nombre || 'Lote'}
+                    {editingHarvest.loteNombre || lots.find((l) => String(l.id) === String(editingHarvest.loteId))?.nombre || bi('Lote', 'Lot')}
                   </p>
                 </div>
                 <button
@@ -4572,26 +4418,29 @@ export const PropertyView: React.FC<Props> = ({
                   <div className="rounded-xl border border-[#BFE0CD] bg-[#F5FAF7] p-3 space-y-2">
                     <div className="grid grid-cols-3 divide-x divide-[#D4E6DC] bg-white rounded-lg border border-[#D4E6DC] py-2 text-center">
                       <div className="px-1">
-                        <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Total</span>
-                        <span className="text-xs font-bold text-[#26352D] font-mono tabular-nums">
+                        <span className="text-[10px] font-bold uppercase text-[#7A8780] block">{bi('Total', 'Total')}</span>
+                        <span className="text-xs font-bold text-[#26352D] tabular-nums">
                           {tonsInput > 0 ? tonsInput.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'} t
                         </span>
                       </div>
                       <div className="px-1">
-                        <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Asignadas</span>
-                        <span className="text-xs font-bold text-[#24875B] font-mono tabular-nums">
+                        <span className="text-[10px] font-bold uppercase text-[#7A8780] block">{bi('Asignadas', 'Priced')}</span>
+                        <span className="text-xs font-bold text-[#24875B] tabular-nums">
                           {editingHarvest.asignadas.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t
                         </span>
                       </div>
                       <div className="px-1">
-                        <span className="text-[10px] font-bold uppercase text-[#7A8780] block">Pendientes</span>
-                        <span className={`text-xs font-black font-mono tabular-nums ${violatesMinTons ? 'text-red-600' : 'text-amber-700'}`}>
+                        <span className="text-[10px] font-bold uppercase text-[#7A8780] block">{bi('Pendientes', 'Pending')}</span>
+                        <span className={`text-xs font-black tabular-nums ${violatesMinTons ? 'text-red-600' : 'text-amber-700'}`}>
                           {newPendiente.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t
                         </span>
                       </div>
                     </div>
                     <p className="text-[11px] text-[#1D5C3F]">
-                      Con precios asignados no se puede cambiar campaña, lote ni producto ni reducir por debajo de{' '}
+                      {bi(
+                        'Con precios asignados no se puede cambiar campaña, lote ni producto ni reducir por debajo de',
+                        'With assigned prices, you cannot change campaign, lot, or product, nor reduce below'
+                      )}{' '}
                       <strong>{editingHarvest.asignadas.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t</strong>.
                     </p>
                   </div>
@@ -4600,7 +4449,7 @@ export const PropertyView: React.FC<Props> = ({
                 {/* Fecha de cosecha */}
                 <div>
                   <label className={FORM_LABEL_CLASS}>
-                    Fecha de cosecha <span className="text-[#C44545]">*</span>
+                    {bi('Fecha de cosecha', 'Harvest date')} <span className="text-[#C44545]">*</span>
                   </label>
                   <input
                     type="date"
@@ -4613,31 +4462,31 @@ export const PropertyView: React.FC<Props> = ({
 
                 {/* Campaña */}
                 <AppSelect
-                  label="Campaña"
+                  label={bi('Campaña', 'Campaign')}
                   required
                   disabled={hasAsignaciones}
                   icon={<Calendar className="h-[17px] w-[17px]" />}
                   value={editHarvCampanaId}
                   onChange={(e) => setEditHarvCampanaId(e.target.value)}
                 >
-                  <option value="">Seleccionar campaña</option>
+                  <option value="">{bi('Seleccionar campaña', 'Select campaign')}</option>
                   {campaigns.map((c) => (
                     <option key={c.id} value={c.id}>
-                      {c.nombre} {c.activa ? '(Activa)' : ''}
+                      {c.nombre} {c.activa ? `(${bi('Activa', 'Active')})` : ''}
                     </option>
                   ))}
                 </AppSelect>
 
                 {/* Lote */}
                 <AppSelect
-                  label="Lote"
+                  label={bi('Lote', 'Lot')}
                   required
                   disabled={hasAsignaciones}
                   icon={<LandPlot className="h-[17px] w-[17px]" />}
                   value={editHarvLotId}
                   onChange={(e) => setEditHarvLotId(e.target.value)}
                 >
-                  <option value="">Seleccionar lote</option>
+                  <option value="">{bi('Seleccionar lote', 'Select lot')}</option>
                   {lots.map((l) => (
                     <option key={l.id} value={l.id}>
                       {l.nombre}
@@ -4649,7 +4498,7 @@ export const PropertyView: React.FC<Props> = ({
                 <div className="grid grid-cols-2 gap-2.5 items-end">
                   <div>
                     <label className={FORM_LABEL_CLASS}>
-                      Producto <span className="text-[#C44545]">*</span>
+                      {bi('Producto', 'Product')} <span className="text-[#C44545]">*</span>
                     </label>
                     <input
                       type="text"
@@ -4657,13 +4506,13 @@ export const PropertyView: React.FC<Props> = ({
                       disabled={hasAsignaciones}
                       value={editHarvProducto}
                       onChange={(e) => setEditHarvProducto(e.target.value)}
-                      placeholder="Soya, Maíz..."
+                      placeholder={bi('Soya, Maíz...', 'Soy, Corn...')}
                       className={`${FORM_INPUT_CLASS} font-semibold`}
                     />
                   </div>
                   <div>
                     <label className={FORM_LABEL_CLASS}>
-                      Toneladas (t) <span className="text-[#C44545]">*</span>
+                      {bi('Toneladas (t)', 'Tons (t)')} <span className="text-[#C44545]">*</span>
                     </label>
                     <input
                       type="number"
@@ -4682,18 +4531,11 @@ export const PropertyView: React.FC<Props> = ({
                 </div>
 
                 {/* Observación */}
-                <div>
-                  <label className={FORM_LABEL_CLASS}>
-                    Observación <span className="text-[#7A8780] font-normal">(opcional)</span>
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={editHarvObs}
-                    onChange={(e) => setEditHarvObs(e.target.value)}
-                    placeholder="Silo de acopio, humedad, notas..."
-                    className={FORM_TEXTAREA_CLASS}
-                  />
-                </div>
+                <ObservationField
+                  value={editHarvObs}
+                  onChange={setEditHarvObs}
+                  placeholder={bi('Silo de acopio, humedad, notas...', 'Storage silo, moisture, notes...')}
+                />
 
                 <div className="flex items-center gap-2.5 pt-1">
                   <button
@@ -4702,7 +4544,7 @@ export const PropertyView: React.FC<Props> = ({
                     onClick={() => setEditingHarvest(null)}
                     className="flex-1 h-[42px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm transition cursor-pointer disabled:opacity-50"
                   >
-                    Cancelar
+                    {t('common.cancel')}
                   </button>
                   <button
                     type="submit"
@@ -4710,7 +4552,7 @@ export const PropertyView: React.FC<Props> = ({
                     className="flex-1 h-[42px] rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white font-bold text-sm transition disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
                   >
                     <Save className="h-4 w-4 shrink-0" />
-                    <span>{savingEditHarvest ? 'Guardando...' : 'Guardar cambios'}</span>
+                    <span>{savingEditHarvest ? t('common.saving') : t('common.saveChanges')}</span>
                   </button>
                 </div>
               </form>

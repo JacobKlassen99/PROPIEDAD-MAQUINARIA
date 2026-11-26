@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, ChevronUp, Search, X } from 'lucide-react';
+import { useI18n } from '../services/i18n';
 
 export type FilterAccent = 'neutral' | 'green' | 'red';
 
@@ -79,12 +80,15 @@ interface SearchToggleProps {
 export const SearchToggle: React.FC<SearchToggleProps> = ({
   value,
   onChange,
-  placeholder = 'Buscar...',
+  placeholder,
   isOpen: controlledOpen,
   onOpenChange,
-  ariaLabel = 'Buscar',
+  ariaLabel,
   buttonOnly = false,
 }) => {
+  const { t } = useI18n();
+  const resolvedPlaceholder = placeholder ?? t('common.searchPlaceholder');
+  const resolvedAriaLabel = ariaLabel ?? t('common.search');
   const [internalOpen, setInternalOpen] = useState(Boolean(value));
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -125,8 +129,8 @@ export const SearchToggle: React.FC<SearchToggleProps> = ({
       <button
         type="button"
         onClick={handleToggle}
-        aria-label={ariaLabel}
-        title={ariaLabel}
+        aria-label={resolvedAriaLabel}
+        title={resolvedAriaLabel}
         className={`h-[34px] w-[34px] shrink-0 rounded-xl border inline-flex items-center justify-center transition-colors ${
           active
             ? 'bg-[#EAF5EE] border-[#BFE0CD] text-[#24875B]'
@@ -146,13 +150,13 @@ export const SearchToggle: React.FC<SearchToggleProps> = ({
         type="text"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
+        placeholder={resolvedPlaceholder}
         className="w-full h-[36px] pl-8 pr-8 rounded-xl border border-[#C9D3CD] bg-white text-[13px] text-[#26352D] placeholder:text-[#8A968F] outline-none focus:border-[#24875B] transition-colors"
       />
       <button
         type="button"
         onClick={handleClose}
-        aria-label="Cerrar búsqueda"
+        aria-label={t('common.closeSearch')}
         className="absolute right-1.5 h-6 w-6 rounded-lg inline-flex items-center justify-center text-[#7A8780] hover:text-[#26352D] hover:bg-[#EFF2EF] transition-colors"
       >
         <X className="w-3.5 h-3.5" />
@@ -176,10 +180,12 @@ export const ListToolbar: React.FC<ListToolbarProps> = ({
   countLabel,
   searchValue,
   onSearchChange,
-  searchPlaceholder = 'Buscar...',
+  searchPlaceholder,
   filters,
   className = '',
 }) => {
+  const { t, bi } = useI18n();
+  const resolvedSearchPlaceholder = searchPlaceholder ?? t('common.searchPlaceholder');
   const [searchOpen, setSearchOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -223,7 +229,7 @@ export const ListToolbar: React.FC<ListToolbarProps> = ({
               isOpen={searchOpen}
               onOpenChange={setSearchOpen}
               buttonOnly
-              ariaLabel="Buscar en la lista"
+              ariaLabel={bi('Buscar en la lista', 'Search in list')}
             />
           )}
           {filters}
@@ -238,13 +244,13 @@ export const ListToolbar: React.FC<ListToolbarProps> = ({
             type="text"
             value={searchValue}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder={searchPlaceholder}
+            placeholder={resolvedSearchPlaceholder}
             className="w-full h-[38px] pl-9 pr-9 rounded-xl border border-[#C9D3CD] bg-white text-[13px] text-[#26352D] placeholder:text-[#8A968F] outline-none focus:border-[#24875B] transition-colors"
           />
           <button
             type="button"
             onClick={handleCloseSearch}
-            aria-label="Cerrar búsqueda"
+            aria-label={t('common.closeSearch')}
             className="absolute right-1.5 h-7 w-7 rounded-lg inline-flex items-center justify-center text-[#7A8780] hover:text-[#26352D] hover:bg-[#EFF2EF] transition-colors"
           >
             <X className="w-4 h-4" />
@@ -266,17 +272,19 @@ interface CompactListProps {
 export const CompactList: React.FC<CompactListProps> = ({
   children,
   isEmpty = false,
-  emptyMessage = 'No hay registros para mostrar.',
+  emptyMessage,
   emptyIcon,
   className = '',
 }) => {
+  const { t } = useI18n();
+  const resolvedEmptyMessage = emptyMessage ?? t('common.noRecords');
   if (isEmpty) {
     return (
       <div
         className={`rounded-2xl border border-[#E2E7E3] bg-white px-4 py-7 text-center ${className}`}
       >
         {emptyIcon && <div className="flex justify-center mb-2 text-[#A5B1AA]">{emptyIcon}</div>}
-        <p className="text-[13px] font-medium text-[#7A8780]">{emptyMessage}</p>
+        <p className="text-[13px] font-medium text-[#7A8780]">{resolvedEmptyMessage}</p>
       </div>
     );
   }

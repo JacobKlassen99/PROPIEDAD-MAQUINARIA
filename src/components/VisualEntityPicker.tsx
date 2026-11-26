@@ -4,6 +4,7 @@ import { VisualIcon } from './VisualIcon';
 import { sanitizeFieldLabel } from './AppSelect';
 import { Machine, MachineJobType, ItemConfig, Lot } from '../types';
 import { isTechnicalId } from '../services/backend';
+import { useI18n } from '../services/i18n';
 
 function getTriggerClasses(required: boolean, hasValue: boolean): {
   button: string;
@@ -40,8 +41,8 @@ function getTriggerClasses(required: boolean, hasValue: boolean): {
 
 function cleanOptionalLabel(label: string, required: boolean): { text: string; isOptionalTag: boolean } {
   const withoutStar = sanitizeFieldLabel(label, required);
-  const hasOptInText = /\(opcional[^)]*\)/i.test(withoutStar);
-  const clean = withoutStar.replace(/\s*\(opcional[^)]*\)/gi, '').trim();
+  const hasOptInText = /\((opcional|optional)[^)]*\)/i.test(withoutStar);
+  const clean = withoutStar.replace(/\s*\((opcional|optional)[^)]*\)/gi, '').trim();
   return { text: clean, isOptionalTag: !required && hasOptInText };
 }
 
@@ -68,11 +69,14 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
   onSelect,
   onSelectMachine,
   required = false,
-  label = 'Máquina',
+  label,
   optionalText,
   allowNone = false,
-  noneLabel = 'Gasto general (sin asignar)',
+  noneLabel,
 }) => {
+  const { t, bi } = useI18n();
+  const resolvedLabel = label ?? t('picker.machineLabel');
+  const resolvedNoneLabel = noneLabel ?? bi('Gasto general (sin asignar)', 'General expense (unassigned)');
   const currentId = selectedId !== undefined ? selectedId : (selectedMachineId || '');
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -84,7 +88,7 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
 
   const hasValue = Boolean(selectedMachine);
   const styles = getTriggerClasses(required, hasValue);
-  const { text: cleanLabel, isOptionalTag } = cleanOptionalLabel(label, required);
+  const { text: cleanLabel, isOptionalTag } = cleanOptionalLabel(resolvedLabel, required);
   const showOptional = !required && (optionalText || isOptionalTag);
 
   const filteredMachines = useMemo(() => {
@@ -119,7 +123,7 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
         </label>
         {showOptional && (
           <span className="text-[12px] text-[#7A8780] font-normal shrink-0">
-            {optionalText || '(opcional)'}
+            {optionalText || t('common.optional')}
           </span>
         )}
       </div>
@@ -136,7 +140,7 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <Tractor className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
           <span className={`text-sm font-semibold truncate ${styles.text}`}>
-            {selectedMachine ? selectedMachine.nombre : 'Seleccionar máquina'}
+            {selectedMachine ? selectedMachine.nombre : t('picker.machinePlaceholder')}
           </span>
         </div>
         <ChevronDown className={`h-[17px] w-[17px] shrink-0 ${styles.chevron}`} />
@@ -153,9 +157,12 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
 
             <div className="px-4 py-2.5 flex items-center justify-between border-b border-stone-100">
               <div>
-                <h3 className="text-base font-bold text-stone-900">Seleccionar máquina</h3>
+                <h3 className="text-base font-bold text-stone-900">{t('picker.machinePlaceholder')}</h3>
                 <p className="text-xs text-stone-500">
-                  {machines.length} {machines.length === 1 ? 'máquina disponible' : 'máquinas disponibles'}
+                  {machines.length}{' '}
+                  {machines.length === 1
+                    ? bi('máquina disponible', 'machine available')
+                    : bi('máquinas disponibles', 'machines available')}
                 </p>
               </div>
               <button
@@ -174,7 +181,7 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Buscar por nombre, tipo o código..."
+                  placeholder={bi('Buscar por nombre, tipo o código...', 'Search by name, type, or code...')}
                   className="w-full h-[40px] pl-9 pr-8 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 focus:bg-white focus:border-[#24875B] focus:outline-none"
                 />
                 {search && (
@@ -205,8 +212,10 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
                       —
                     </div>
                     <div>
-                      <p className="text-sm font-bold text-stone-800">{noneLabel}</p>
-                      <p className="text-xs text-stone-500">No vincular a una máquina específica</p>
+                      <p className="text-sm font-bold text-stone-800">{resolvedNoneLabel}</p>
+                      <p className="text-xs text-stone-500">
+                        {bi('No vincular a una máquina específica', 'Do not link to a specific machine')}
+                      </p>
                     </div>
                   </div>
                   {!currentId && (
@@ -249,7 +258,7 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
                           )}
                         </div>
                         <p className="text-xs text-stone-500 mt-0.5">
-                          {m.tipo || 'Máquina'} ·{' '}
+                          {m.tipo || t('common.machine')} ·{' '}
                           <span className="font-semibold text-emerald-800">
                             {m.moneda === 'USD' ? 'USD' : 'Bs'} {m.tarifa}/{m.unidad === 'ha' || m.unidad === 'hectarea' ? 'ha' : 'h'}
                           </span>
@@ -272,7 +281,7 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
                 onClick={handleClose}
                 className="px-4 py-2 rounded-xl border border-stone-200 bg-white text-sm font-semibold text-stone-700 hover:bg-stone-100 cursor-pointer"
               >
-                Cerrar
+                {t('common.close')}
               </button>
             </div>
           </div>
@@ -308,10 +317,13 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
   onSelectJobType,
   required = false,
   allowNone = true,
-  noneLabel = 'Sin implemento (usar tarifa de máquina)',
-  label = 'Implemento agrícola',
+  noneLabel,
+  label,
   optionalText,
 }) => {
+  const { t, bi } = useI18n();
+  const resolvedLabel = label ?? bi('Implemento agrícola', 'Agricultural implement');
+  const resolvedNoneLabel = noneLabel ?? bi('Sin implemento (usar tarifa de máquina)', 'No implement (use machine rate)');
   const list = jobs || jobTypes || [];
   const currentId = selectedId !== undefined ? selectedId : (selectedJobTypeId || '');
   const [isOpen, setIsOpen] = useState(false);
@@ -320,7 +332,7 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
   const selectedJob = useMemo(() => list.find((j) => j.id === currentId), [list, currentId]);
   const hasValue = Boolean(selectedJob);
   const styles = getTriggerClasses(required, hasValue);
-  const { text: cleanLabel } = cleanOptionalLabel(label, required);
+  const { text: cleanLabel } = cleanOptionalLabel(resolvedLabel, required);
 
   const filteredJobs = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -349,7 +361,7 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
         </label>
         {!required && (
           <span className="text-[12px] text-[#7A8780] font-normal shrink-0">
-            {optionalText || '(opcional)'}
+            {optionalText || t('common.optional')}
           </span>
         )}
       </div>
@@ -366,7 +378,7 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <Wrench className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
           <span className={`text-sm font-semibold truncate ${styles.text}`}>
-            {selectedJob ? selectedJob.nombre : 'Seleccionar implemento'}
+            {selectedJob ? selectedJob.nombre : t('picker.implementPlaceholder')}
           </span>
         </div>
         <ChevronDown className={`h-[17px] w-[17px] shrink-0 ${styles.chevron}`} />
@@ -383,9 +395,12 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
 
             <div className="px-4 py-2.5 flex items-center justify-between border-b border-stone-100">
               <div>
-                <h3 className="text-base font-bold text-stone-900">Implemento agrícola</h3>
+                <h3 className="text-base font-bold text-stone-900">{resolvedLabel}</h3>
                 <p className="text-xs text-stone-500">
-                  {list.length} {list.length === 1 ? 'implemento compatible' : 'implementos compatibles'}
+                  {list.length}{' '}
+                  {list.length === 1
+                    ? bi('implemento compatible', 'compatible implement')
+                    : bi('implementos compatibles', 'compatible implements')}
                 </p>
               </div>
               <button
@@ -404,7 +419,7 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Buscar implemento (sembradora, romplow, rastra...)"
+                  placeholder={t('picker.implementSearch')}
                   className="w-full h-[40px] pl-9 pr-8 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 focus:bg-white focus:border-[#24875B] focus:outline-none"
                 />
               </div>
@@ -426,9 +441,12 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
                       —
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-bold text-stone-900">{noneLabel}</p>
+                      <p className="text-sm font-bold text-stone-900">{resolvedNoneLabel}</p>
                       <p className="text-xs text-stone-500 mt-0.5">
-                        Aplica únicamente la tarifa propia de la máquina
+                        {bi(
+                          'Aplica únicamente la tarifa propia de la máquina',
+                          'Applies only the machine base rate'
+                        )}
                       </p>
                     </div>
                   </div>
@@ -465,8 +483,8 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-bold text-stone-900">{j.nombre}</p>
                         <p className="text-xs text-stone-500 mt-0.5">
-                          Tarifa:{' '}
-                          <span className="font-bold text-emerald-800 font-mono">
+                          {bi('Tarifa', 'Rate')}:{' '}
+                          <span className="font-bold text-emerald-800 tabular-nums">
                             {j.moneda === 'USD' ? 'USD' : 'Bs'} {j.tarifa}/{j.unidad === 'ha' || j.unidad === 'hectarea' ? 'ha' : 'h'}
                           </span>
                         </p>
@@ -488,7 +506,7 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
                 onClick={handleClose}
                 className="px-4 py-2 rounded-xl border border-stone-200 bg-white text-sm font-semibold text-stone-700 hover:bg-stone-100 cursor-pointer"
               >
-                Cerrar
+                {t('common.close')}
               </button>
             </div>
           </div>
@@ -519,15 +537,17 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
   onSelect,
   onSelectItem,
   required = true,
-  label = 'Concepto de gasto',
+  label,
 }) => {
+  const { t, bi, translateUnit } = useI18n();
+  const resolvedLabel = label ?? t('picker.expenseLabel');
   const currentName = (selectedName !== undefined ? selectedName : (selectedItemName || '')).trim();
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
 
   const hasValue = Boolean(currentName);
   const styles = getTriggerClasses(required, hasValue);
-  const { text: cleanLabel } = cleanOptionalLabel(label, required);
+  const { text: cleanLabel } = cleanOptionalLabel(resolvedLabel, required);
 
   const filteredItems = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -568,7 +588,7 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <List className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
           <span className={`text-sm font-semibold truncate ${styles.text}`}>
-            {currentName || 'Seleccionar concepto'}
+            {currentName || t('picker.expensePlaceholder')}
           </span>
         </div>
         <ChevronDown className={`h-[17px] w-[17px] shrink-0 ${styles.chevron}`} />
@@ -586,10 +606,10 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
             <div className="px-4 py-2.5 flex items-center justify-between border-b border-stone-100">
               <div>
                 <h3 className="text-base font-bold text-stone-900">
-                  Seleccionar concepto de gasto
+                  {bi('Seleccionar concepto de gasto', 'Select expense concept')}
                 </h3>
                 <p className="text-xs text-stone-500">
-                  {items.length} rubros e insumos configurados
+                  {items.length} {bi('rubros e insumos configurados', 'configured items & inputs')}
                 </p>
               </div>
               <button
@@ -608,7 +628,7 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Buscar diésel, aceite, filtro, semillas..."
+                  placeholder={t('picker.expenseSearch')}
                   className="w-full h-[40px] pl-9 pr-8 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 focus:bg-white focus:border-[#24875B] focus:outline-none"
                 />
                 {search && (
@@ -649,7 +669,7 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-bold text-stone-900">{item.nombre}</p>
                         <p className="text-xs text-stone-500 mt-0.5">
-                          {item.unidad && `Unidad: ${item.unidad}`}
+                          {item.unidad && `${t('common.unit')}: ${translateUnit(item.unidad)}`}
                           {item.precioPredeterminado ? ` • Ref: ${item.moneda} ${item.precioPredeterminado}` : ''}
                         </p>
                       </div>
@@ -670,7 +690,7 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
                 onClick={handleClose}
                 className="px-4 py-2 rounded-xl border border-stone-200 bg-white text-sm font-semibold text-stone-700 hover:bg-stone-100 cursor-pointer"
               >
-                Cerrar
+                {t('common.close')}
               </button>
             </div>
           </div>
@@ -711,8 +731,10 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
   onSelect,
   onSelectItem,
   required = true,
-  label = 'Producto / Concepto',
+  label,
 }) => {
+  const { t, bi, translateUnit } = useI18n();
+  const resolvedLabel = label ?? t('picker.incomeLabel');
   const currentName = (selectedName !== undefined ? selectedName : (selectedItemName || '')).trim();
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -723,7 +745,7 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
 
   const hasValue = Boolean(currentName);
   const styles = getTriggerClasses(required, hasValue);
-  const { text: cleanLabel } = cleanOptionalLabel(label, required);
+  const { text: cleanLabel } = cleanOptionalLabel(resolvedLabel, required);
 
   const filteredItems = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -764,7 +786,7 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <List className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
           <span className={`text-sm font-semibold truncate ${styles.text}`}>
-            {currentName || 'Seleccionar producto'}
+            {currentName || t('picker.incomePlaceholder')}
           </span>
         </div>
         <ChevronDown className={`h-[17px] w-[17px] shrink-0 ${styles.chevron}`} />
@@ -782,10 +804,11 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
             <div className="px-4 py-2.5 flex items-center justify-between border-b border-stone-100">
               <div>
                 <h3 className="text-base font-bold text-stone-900">
-                  Seleccionar producto / concepto
+                  {t('picker.incomePlaceholder')}
                 </h3>
                 <p className="text-xs text-stone-500">
-                  {effectiveItems.length} rubros de ingresos agrícolas disponibles
+                  {effectiveItems.length}{' '}
+                  {bi('rubros de ingresos agrícolas disponibles', 'farm income items available')}
                 </p>
               </div>
               <button
@@ -804,7 +827,7 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Buscar soya, maíz, trigo, sorgo, girasol..."
+                  placeholder={t('picker.incomeSearch')}
                   className="w-full h-[40px] pl-9 pr-8 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 focus:bg-white focus:border-[#24875B] focus:outline-none"
                 />
                 {search && (
@@ -845,7 +868,7 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-bold text-stone-900">{item.nombre}</p>
                         <p className="text-xs text-stone-500 mt-0.5">
-                          {item.unidad && `Unidad: ${item.unidad}`}
+                          {item.unidad && `${t('common.unit')}: ${translateUnit(item.unidad)}`}
                           {item.precioPredeterminado ? ` • Ref: ${item.moneda || 'USD'} ${item.precioPredeterminado}` : ''}
                         </p>
                       </div>
@@ -866,7 +889,7 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
                 onClick={handleClose}
                 className="px-4 py-2 rounded-xl border border-stone-200 bg-white text-sm font-semibold text-stone-700 hover:bg-stone-100 cursor-pointer"
               >
-                Cerrar
+                {t('common.close')}
               </button>
             </div>
           </div>
@@ -896,8 +919,10 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
   onSelect,
   onSelectLot,
   required = true,
-  label = 'Lote',
+  label,
 }) => {
+  const { t, bi } = useI18n();
+  const resolvedLabel = label ?? t('picker.lotLabel');
   const currentId = selectedId !== undefined ? selectedId : (selectedLotId || '');
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -905,7 +930,7 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
   const selectedLot = useMemo(() => lots.find((l) => l.id === currentId), [lots, currentId]);
   const hasValue = Boolean(selectedLot);
   const styles = getTriggerClasses(required, hasValue);
-  const { text: cleanLabel } = cleanOptionalLabel(label, required);
+  const { text: cleanLabel } = cleanOptionalLabel(resolvedLabel, required);
 
   const filteredLots = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -951,7 +976,7 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <LandPlot className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
           <span className={`text-sm font-semibold truncate ${styles.text}`}>
-            {selectedLot ? selectedLot.nombre : 'Seleccionar lote'}
+            {selectedLot ? selectedLot.nombre : t('picker.lotPlaceholder')}
           </span>
         </div>
         <ChevronDown className={`h-[17px] w-[17px] shrink-0 ${styles.chevron}`} />
@@ -968,9 +993,9 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
 
             <div className="px-4 py-2.5 flex items-center justify-between border-b border-stone-100">
               <div>
-                <h3 className="text-base font-bold text-stone-900">Seleccionar lote</h3>
+                <h3 className="text-base font-bold text-stone-900">{t('picker.lotPlaceholder')}</h3>
                 <p className="text-xs text-stone-500">
-                  {lots.length} lotes registrados en la propiedad
+                  {lots.length} {bi('lotes registrados en la propiedad', 'lots registered on the property')}
                 </p>
               </div>
               <button
@@ -989,7 +1014,7 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Buscar lote por nombre o cultivo..."
+                  placeholder={t('picker.lotSearch')}
                   className="w-full h-[40px] pl-9 pr-8 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 focus:bg-white focus:border-[#24875B] focus:outline-none"
                 />
                 {search && (
@@ -1026,7 +1051,9 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
                         <p className="text-sm font-bold text-stone-900">{l.nombre}</p>
                         <p className="text-xs text-stone-500 mt-0.5">
                           {l.superficieHectareas || l.superficie || 0} ha
-                          {l.cultivoActual ? ` • Cultivo: ${l.cultivoActual}` : ' • Sin cultivo'}
+                          {l.cultivoActual
+                            ? ` • ${bi('Cultivo', 'Crop')}: ${l.cultivoActual}`
+                            : ` • ${bi('Sin cultivo', 'No crop')}`}
                         </p>
                       </div>
                     </div>
@@ -1046,7 +1073,7 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
                 onClick={handleClose}
                 className="px-4 py-2 rounded-xl border border-stone-200 bg-white text-sm font-semibold text-stone-700 hover:bg-stone-100 cursor-pointer"
               >
-                Cerrar
+                {t('common.close')}
               </button>
             </div>
           </div>

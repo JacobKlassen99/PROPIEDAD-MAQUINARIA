@@ -7,6 +7,8 @@ import {
   MachineryJob,
 } from '../types';
 import { parseFlexibleDate } from './backend';
+import { getCurrentLanguage } from './i18n';
+import { formatNumberLocale } from './formatters';
 
 export interface ModuleOperationalResult {
   ingresos: number;
@@ -81,11 +83,41 @@ export function matchesCampaignRecord(
 }
 
 /**
- * Identifies direct property incomes (direct crop sales AND priced harvests
- * whose trabajoId starts with "COSECHA:"), excluding machinery service mirror rows.
+ * Identifies automatic late-payment interest income generated ONLY when
+ * late-payment interest is actually collected (SYS_INTERES_MORA / INTERES_COBRO:*).
+ */
+export function isInterestIncome(i: Income | null | undefined): boolean {
+  if (!i) return false;
+  const itemId = String(i.itemId || '').trim().toUpperCase();
+  if (itemId === 'SYS_INTERES_MORA') return true;
+  const tid = String(i.trabajoId || '').trim().toUpperCase();
+  if (tid.startsWith('INTERES_COBRO:')) return true;
+  const name = String(i.concepto || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+  return name.startsWith('interes por mora') || name.startsWith('late payment interest');
+}
+
+export function isMachineryInterestIncome(i: Income | null | undefined): boolean {
+  if (!isInterestIncome(i)) return false;
+  return i?.modulo === 'maquinarias';
+}
+
+export function isPropertyInterestIncome(i: Income | null | undefined): boolean {
+  if (!isInterestIncome(i)) return false;
+  return !i?.modulo || i.modulo === 'propiedad';
+}
+
+/**
+ * Identifies direct property crop/harvest incomes (direct crop sales AND priced harvests
+ * whose trabajoId starts with "COSECHA:"), excluding machinery service mirror rows
+ * and excluding collected late-payment interest rows (which are reported separately).
  */
 export function isDirectPropertyIncome(i: Income | null | undefined): boolean {
   if (!i) return false;
+  if (isInterestIncome(i)) return false;
   if (i.modulo && i.modulo !== 'propiedad') return false;
   const tid = String(i.trabajoId || '').trim();
   if (tid) {
@@ -146,21 +178,15 @@ export function convertHistoricalAmount(
 }
 
 /**
- * Formats an amount in USD or Bs using Bolivian regional separators
- * (dot thousands, comma decimals). Display-only.
+ * Formats an amount in USD or Bs using locale separators
+ * (Spanish: 1.250,50 | English: 1,250.50). Display-only.
  */
 export function formatCurrencyAmount(val: number | undefined | null, currency: Currency = 'USD'): string {
   const symbol = currency === 'USD' ? 'USD' : 'Bs';
   const num = typeof val === 'number' && isFinite(val) ? val : 0;
-  const absFormatted = Math.abs(num).toLocaleString('es-BO', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-  const normalized = /^\d{1,3}(,\d{3})*\.\d{2}$/.test(absFormatted)
-    ? absFormatted.replace(/,/g, '_').replace(/\./g, ',').replace(/_/g, '.')
-    : absFormatted;
-  if (num < -0.004) return `-${symbol} ${normalized}`;
-  return `${symbol} ${normalized}`;
+  const formatted = formatNumberLocale(Math.abs(num), getCurrentLanguage(), 2);
+  if (num < -0.004) return `-${symbol} ${formatted}`;
+  return `${symbol} ${formatted}`;
 }
 
 /**
@@ -192,13 +218,22 @@ export function computeOperationalSummaries(params: {
     ? safeIncomes.filter((i) => matchesCampaignRecord(i, activeCampaign))
     : safeIncomes;
 
-  // 1. Maquinarias: all services (external + internal property) minus machinery expenses
-  const machIngresos = campaignJobs.reduce(
+  // 1. Maquinarias: all services (external + internal property) + collected machinery late-payment interest minus machinery expenses
+  const machServicios = campaignJobs.reduce(
     (sum, j) =>
       sum +
       convertHistoricalAmount(Number(j.total) || 0, j.moneda, currency, j.tipoCambio || j.tc, exchangeRate),
     0
   );
+  const machIntereses = campaignIncomes
+    .filter(isMachineryInterestIncome)
+    .reduce(
+      (sum, i) =>
+        sum +
+        convertHistoricalAmount(Number(i.total) || 0, i.moneda, currency, i.tipoCambio || i.tc, exchangeRate),
+      0
+    );
+  const machIngresos = machServicios + machIntereses;
   const machGastos = campaignExpenses
     .filter((e) => e.modulo === 'maquinarias')
     .reduce(
@@ -208,8 +243,8 @@ export function computeOperationalSummaries(params: {
       0
     );
 
-  // 2. Propiedad: direct crop/property incomes (incl. priced harvests) minus (direct property expenses + internal machinery jobs)
-  const propIngresos = campaignIncomes
+  // 2. Propiedad: direct crop/property incomes (incl. priced harvests) + collected property late-payment interest minus (direct property expenses + internal machinery jobs)
+  const propCosechas = campaignIncomes
     .filter(isDirectPropertyIncome)
     .reduce(
       (sum, i) =>
@@ -217,6 +252,15 @@ export function computeOperationalSummaries(params: {
         convertHistoricalAmount(Number(i.total) || 0, i.moneda, currency, i.tipoCambio || i.tc, exchangeRate),
       0
     );
+  const propIntereses = campaignIncomes
+    .filter(isPropertyInterestIncome)
+    .reduce(
+      (sum, i) =>
+        sum +
+        convertHistoricalAmount(Number(i.total) || 0, i.moneda, currency, i.tipoCambio || i.tc, exchangeRate),
+      0
+    );
+  const propIngresos = propCosechas + propIntereses;
   const propDirectGastos = campaignExpenses
     .filter((e) => e.modulo === 'propiedad' && !isInternalMachineryJobExpense(e))
     .reduce(

@@ -24,13 +24,18 @@ import {
 import {
   matchesCampaignRecord,
   isDirectPropertyIncome,
+  isMachineryInterestIncome,
+  isPropertyInterestIncome,
   isInternalMachineryJobExpense,
   convertHistoricalAmount,
   formatCurrencyAmount,
 } from '../services/financialSummary';
 import { formatDateDDMMAAAA, getBoliviaDateString } from '../services/backend';
+import { formatNumberLocale } from '../services/formatters';
 import { CompactFilter } from '../components/CompactListUI';
+import { Switch } from '../components/Switch';
 import { usePersistedMemoryState } from '../hooks/useSwrQuery';
+import { getCurrentLanguage, useI18n } from '../services/i18n';
 
 export type ReportScreen =
   | 'general'
@@ -94,17 +99,20 @@ export class ReportsErrorBoundary extends React.Component<
 
   render() {
     if (this.state.hasError) {
+      const isEn = getCurrentLanguage() === 'en';
       return (
         <div className="rounded-2xl border border-[#C44545]/30 bg-[#FCECEC] p-5 text-center space-y-3 max-w-xl mx-auto my-6">
           <div className="flex items-center justify-center gap-3">
             <AlertCircle className="h-6 w-6 text-[#C44545] shrink-0" />
             <div className="text-left">
               <h3 className="text-base font-bold text-[#26352D]">
-                No se pudo cargar el reporte
+                {isEn ? 'Could not load report' : 'No se pudo cargar el reporte'}
               </h3>
               <p className="text-sm text-slate-700 mt-0.5 leading-relaxed">
                 {this.state.error?.message ||
-                  'Ocurrió un problema al procesar la información financiera.'}
+                  (isEn
+                    ? 'A problem occurred while processing the financial information.'
+                    : 'Ocurrió un problema al procesar la información financiera.')}
               </p>
             </div>
           </div>
@@ -113,7 +121,7 @@ export class ReportsErrorBoundary extends React.Component<
             onClick={() => this.setState({ hasError: false, error: null })}
             className="px-4 py-2.5 bg-[#24875B] hover:bg-[#1D704B] text-white font-semibold text-sm rounded-xl transition cursor-pointer min-h-[44px]"
           >
-            Reintentar
+            {isEn ? 'Retry' : 'Reintentar'}
           </button>
         </div>
       );
@@ -169,15 +177,7 @@ function getNetBgClass(value: number): string {
 }
 
 function formatNumberEs(val: number, decimals = 2): string {
-  if (!isFinite(val)) return '0,00';
-  const formatted = val.toLocaleString('es-BO', {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  });
-  if (/^-?\d{1,3}(,\d{3})*\.\d+$/.test(formatted)) {
-    return formatted.replace(/,/g, '_').replace(/\./g, ',').replace(/_/g, '.');
-  }
-  return formatted;
+  return formatNumberLocale(val, getCurrentLanguage(), decimals);
 }
 
 function naturalCompare(a: string, b: string): number {
@@ -196,6 +196,8 @@ interface LotDetailedResult {
   lotId: string;
   lotName: string;
   hectares: number;
+  ingresosCosechas: number;
+  ingresosIntereses: number;
   ingresos: number;
   gastosDirectos: number;
   gastosMaquinaria: number;
@@ -226,6 +228,7 @@ const ReportsViewInner: React.FC<Props> = ({
   onRootBackLabel,
   onBack,
 }) => {
+  const { lang, t, bi } = useI18n();
   const rootMode: ReportMode = normalizeInitialMode(initialScreen);
 
   const safeCampaigns = useMemo(
@@ -364,7 +367,7 @@ const ReportsViewInner: React.FC<Props> = ({
       if (found?.nombre) return found.nombre;
     }
     if (fallbackName && fallbackName.trim()) return fallbackName.trim();
-    return 'Máquina sin asignar';
+    return bi('Máquina sin asignar', 'Unassigned machine');
   };
 
   const getLotInfo = (lId?: string, fallbackName?: string): { id: string; name: string; ha: number } => {
@@ -385,7 +388,7 @@ const ReportsViewInner: React.FC<Props> = ({
       }
       return { id: `name:${fallbackName.trim()}`, name: fallbackName.trim(), ha: 0 };
     }
-    return { id: 'sin_lote', name: 'General / Sin lote', ha: 0 };
+    return { id: 'sin_lote', name: bi('General / Sin lote', 'General / No lot'), ha: 0 };
   };
 
   // ==========================================================================
@@ -426,7 +429,18 @@ const ReportsViewInner: React.FC<Props> = ({
       (sum, j) => sum + toView(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
       0
     );
-    const totalIngresos = ingresosPropiedad + ingresosTerceros;
+    const ingresosServicios = ingresosPropiedad + ingresosTerceros;
+    const machInterestRows = campaignIncomes.filter((i) => {
+      if (!isMachineryInterestIncome(i)) return false;
+      if (!isFilteredByMachine) return true;
+      const mId = String((i as any).maquinariaId || (i as any).maquinaId || '');
+      return mId === String(selectedMachineId);
+    });
+    const ingresosIntereses = machInterestRows.reduce(
+      (sum, i) => sum + toView(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
+      0
+    );
+    const totalIngresos = ingresosServicios + ingresosIntereses;
 
     // Breakdown by machine (sums to exact totalIngresos, never duplicated)
     const byMachineMap = new Map<string, GroupedAmountRow>();
@@ -446,10 +460,15 @@ const ReportsViewInner: React.FC<Props> = ({
         byMachineMap.set(mId, { key: mId, label: mName, amount: val, count: 1 });
       }
 
-      const rawEquip = cleanConceptLabel(j.trabajoNombre || (j as any).trabajo, 'Trabajo directo (sin equipo)');
+      const rawEquip = cleanConceptLabel(
+        j.trabajoNombre || (j as any).trabajo,
+        bi('Trabajo directo (sin equipo)', 'Direct job (no implement)')
+      );
       const equipKey = `${mId}::${rawEquip.toLowerCase()}`;
       const isSameAsMachine = rawEquip.toLowerCase() === mName.toLowerCase();
-      const equipLabel = isSameAsMachine ? `${mName} (directo)` : `${mName} · ${rawEquip}`;
+      const equipLabel = isSameAsMachine
+        ? `${mName} (${bi('directo', 'direct')})`
+        : `${mName} · ${rawEquip}`;
       const ePrev = byMachineEquipmentMap.get(equipKey);
       if (ePrev) {
         ePrev.amount += val;
@@ -458,7 +477,9 @@ const ReportsViewInner: React.FC<Props> = ({
         byMachineEquipmentMap.set(equipKey, {
           key: equipKey,
           label: equipLabel,
-          sublabel: isSameAsMachine ? 'Solo máquina' : `Equipo: ${rawEquip}`,
+          sublabel: isSameAsMachine
+            ? bi('Solo máquina', 'Machine only')
+            : `${bi('Equipo', 'Implement')}: ${rawEquip}`,
           amount: val,
           count: 1,
         });
@@ -475,7 +496,7 @@ const ReportsViewInner: React.FC<Props> = ({
     scopedExpenses.forEach((e) => {
       const concept = cleanConceptLabel(
         e.itemGasto || (e as any).rubro || (e as any).categoria,
-        'Otros gastos'
+        bi('Otros gastos', 'Other expenses')
       );
       const key = concept.toLowerCase();
       const val = toView(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc);
@@ -504,6 +525,9 @@ const ReportsViewInner: React.FC<Props> = ({
       selectedMachineName: isFilteredByMachine ? getMachineName(selectedMachineId) : null,
       ingresosPropiedad,
       ingresosTerceros,
+      ingresosServicios,
+      ingresosIntereses,
+      interesesCount: machInterestRows.length,
       extJobsCount: extJobs.length,
       propJobsCount: propJobs.length,
       totalIngresos,
@@ -520,11 +544,13 @@ const ReportsViewInner: React.FC<Props> = ({
   }, [
     campaignJobs,
     campaignExpenses,
+    campaignIncomes,
     activeScope,
     selectedMachineId,
     activeCurrency,
     safeExchangeRate,
     safeMachines,
+    lang,
   ]);
 
   // ==========================================================================
@@ -532,6 +558,7 @@ const ReportsViewInner: React.FC<Props> = ({
   // ==========================================================================
   const propertyData = useMemo(() => {
     const directIncomes = campaignIncomes.filter(isDirectPropertyIncome);
+    const interestIncomes = campaignIncomes.filter(isPropertyInterestIncome);
     const directExpenses = campaignExpenses.filter(
       (e) => e.modulo === 'propiedad' && !isInternalMachineryJobExpense(e)
     );
@@ -546,6 +573,8 @@ const ReportsViewInner: React.FC<Props> = ({
         lotId: string;
         lotName: string;
         hectares: number;
+        ingresosCosechas: number;
+        ingresosIntereses: number;
         ingresos: number;
         gastosDirectos: number;
         gastosMaquinaria: number;
@@ -563,6 +592,8 @@ const ReportsViewInner: React.FC<Props> = ({
           lotId: info.id,
           lotName: info.name,
           hectares: info.ha,
+          ingresosCosechas: 0,
+          ingresosIntereses: 0,
           ingresos: 0,
           gastosDirectos: 0,
           gastosMaquinaria: 0,
@@ -583,9 +614,26 @@ const ReportsViewInner: React.FC<Props> = ({
     directIncomes.forEach((inc) => {
       const entry = ensureLot(inc.loteId, inc.loteNombre);
       const val = toView(Number(inc.total) || 0, inc.moneda, inc.tipoCambio || inc.tc);
+      entry.ingresosCosechas += val;
       entry.ingresos += val;
-      const concept = cleanConceptLabel(inc.concepto || (inc as any).rubro, 'Venta agrícola');
+      const concept = cleanConceptLabel(inc.concepto || (inc as any).rubro, bi('Venta agrícola', 'Farm sale'));
       const key = concept.toLowerCase();
+      const prev = entry.ingresosByConcept.get(key);
+      if (prev) {
+        prev.amount += val;
+        prev.count += 1;
+      } else {
+        entry.ingresosByConcept.set(key, { key, label: concept, amount: val, count: 1 });
+      }
+    });
+
+    interestIncomes.forEach((inc) => {
+      const entry = ensureLot(inc.loteId, inc.loteNombre);
+      const val = toView(Number(inc.total) || 0, inc.moneda, inc.tipoCambio || inc.tc);
+      entry.ingresosIntereses += val;
+      entry.ingresos += val;
+      const concept = t('finances.lateInterestConcept');
+      const key = 'sys_interes_mora';
       const prev = entry.ingresosByConcept.get(key);
       if (prev) {
         prev.amount += val;
@@ -601,7 +649,7 @@ const ReportsViewInner: React.FC<Props> = ({
       entry.gastosDirectos += val;
       const concept = cleanConceptLabel(
         exp.itemGasto || (exp as any).rubro || (exp as any).categoria,
-        'Gasto directo'
+        bi('Gasto directo', 'Direct expense')
       );
       const key = concept.toLowerCase();
       const prev = entry.directosByConcept.get(key);
@@ -617,7 +665,7 @@ const ReportsViewInner: React.FC<Props> = ({
       const entry = ensureLot(job.loteId, job.loteNombre);
       const val = toView(Number(job.total) || 0, job.moneda, job.tipoCambio || job.tc);
       entry.gastosMaquinaria += val;
-      const labor = cleanConceptLabel(job.trabajoNombre || (job as any).trabajo, 'Labor de maquinaria');
+      const labor = cleanConceptLabel(job.trabajoNombre || (job as any).trabajo, bi('Labor de maquinaria', 'Machinery job'));
       const key = labor.toLowerCase();
       const prev = entry.maquinariaByLabor.get(key);
       if (prev) {
@@ -651,6 +699,8 @@ const ReportsViewInner: React.FC<Props> = ({
           lotId: entry.lotId,
           lotName: entry.lotName,
           hectares: entry.hectares,
+          ingresosCosechas: entry.ingresosCosechas,
+          ingresosIntereses: entry.ingresosIntereses,
           ingresos: entry.ingresos,
           gastosDirectos: entry.gastosDirectos,
           gastosMaquinaria: entry.gastosMaquinaria,
@@ -677,7 +727,9 @@ const ReportsViewInner: React.FC<Props> = ({
         return naturalCompare(a.lotName, b.lotName);
       });
 
-    const totalIngresos = allLotResults.reduce((sum, l) => sum + l.ingresos, 0);
+    const totalIngresosCosechas = allLotResults.reduce((sum, l) => sum + l.ingresosCosechas, 0);
+    const totalIngresosIntereses = allLotResults.reduce((sum, l) => sum + l.ingresosIntereses, 0);
+    const totalIngresos = totalIngresosCosechas + totalIngresosIntereses;
     const totalGastosDirectos = allLotResults.reduce((sum, l) => sum + l.gastosDirectos, 0);
     const totalGastosMaquinaria = allLotResults.reduce((sum, l) => sum + l.gastosMaquinaria, 0);
     const totalGastos = totalGastosDirectos + totalGastosMaquinaria;
@@ -715,6 +767,8 @@ const ReportsViewInner: React.FC<Props> = ({
       isFilteredByLot,
       selectedLotName: isFilteredByLot ? getLotInfo(selectedLotId).name : null,
       lotResults: allLotResults,
+      totalIngresosCosechas,
+      totalIngresosIntereses,
       totalIngresos,
       totalGastosDirectos,
       totalGastosMaquinaria,
@@ -740,6 +794,7 @@ const ReportsViewInner: React.FC<Props> = ({
     selectedLotId,
     activeCurrency,
     safeExchangeRate,
+    lang,
   ]);
 
   // ==========================================================================
@@ -752,6 +807,8 @@ const ReportsViewInner: React.FC<Props> = ({
     const machExpenses = campaignExpenses.filter((e) => e.modulo === 'maquinarias');
 
     const propIncomes = campaignIncomes.filter(isDirectPropertyIncome);
+    const machInterestIncomes = campaignIncomes.filter(isMachineryInterestIncome);
+    const propInterestIncomes = campaignIncomes.filter(isPropertyInterestIncome);
     const propDirectExpenses = campaignExpenses.filter(
       (e) => e.modulo === 'propiedad' && !isInternalMachineryJobExpense(e)
     );
@@ -764,17 +821,26 @@ const ReportsViewInner: React.FC<Props> = ({
       (s, j) => s + toView(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc),
       0
     );
-    const machIngresosTotales = machIngresosExternos + operacionesInternas;
+    const machIngresosIntereses = machInterestIncomes.reduce(
+      (s, i) => s + toView(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
+      0
+    );
+    const machIngresosTotales = machIngresosExternos + operacionesInternas + machIngresosIntereses;
     const machGastosTotales = machExpenses.reduce(
       (s, e) => s + toView(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
       0
     );
     const machResultado = machIngresosTotales - machGastosTotales;
 
-    const propIngresosTotales = propIncomes.reduce(
+    const propIngresosCosechas = propIncomes.reduce(
       (s, i) => s + toView(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
       0
     );
+    const propIngresosIntereses = propInterestIncomes.reduce(
+      (s, i) => s + toView(Number(i.total) || 0, i.moneda, i.tipoCambio || i.tc),
+      0
+    );
+    const propIngresosTotales = propIngresosCosechas + propIngresosIntereses;
     const propGastosDirectos = propDirectExpenses.reduce(
       (s, e) => s + toView(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc),
       0
@@ -782,8 +848,9 @@ const ReportsViewInner: React.FC<Props> = ({
     const propGastosTotales = propGastosDirectos + operacionesInternas;
     const propResultado = propIngresosTotales - propGastosTotales;
 
+    const ingresosInteresesTotales = machIngresosIntereses + propIngresosIntereses;
     // Consolidated frente a terceros (eliminating both sides of internal jobs)
-    const ingresosConsolidados = machIngresosExternos + propIngresosTotales;
+    const ingresosConsolidados = machIngresosExternos + propIngresosCosechas + ingresosInteresesTotales;
     const gastosConsolidados = machGastosTotales + propGastosDirectos;
     const resultadoConsolidado = ingresosConsolidados - gastosConsolidados;
 
@@ -798,7 +865,7 @@ const ReportsViewInner: React.FC<Props> = ({
       list.forEach((e) => {
         const label = cleanConceptLabel(
           e.itemGasto || (e as any).rubro || (e as any).categoria,
-          'Otros gastos'
+          bi('Otros gastos', 'Other expenses')
         );
         const key = label.toLowerCase();
         const val = toView(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc);
@@ -847,15 +914,19 @@ const ReportsViewInner: React.FC<Props> = ({
 
     return {
       machIngresosExternos,
+      machIngresosIntereses,
       operacionesInternas,
       operacionesInternasCount: internalJobs.length,
       machIngresosTotales,
       machGastosTotales,
       machResultado,
+      propIngresosCosechas,
+      propIngresosIntereses,
       propIngresosTotales,
       propGastosDirectos,
       propGastosTotales,
       propResultado,
+      ingresosInteresesTotales,
       ingresosConsolidados,
       gastosConsolidados,
       resultadoConsolidado,
@@ -870,34 +941,37 @@ const ReportsViewInner: React.FC<Props> = ({
         (a, b) => b.amount - a.amount
       ),
     };
-  }, [campaignJobs, campaignExpenses, campaignIncomes, activeCurrency, safeExchangeRate, safeLots, safeMachines]);
+  }, [campaignJobs, campaignExpenses, campaignIncomes, activeCurrency, safeExchangeRate, safeLots, safeMachines, lang]);
 
   // ==========================================================================
   // PRINT & EXCEL HEADERS (NO LOGO, NO COMPANY NAME)
   // ==========================================================================
   const reportHeaderTitle =
     rootMode === 'maquinarias'
-      ? 'Maquinarias'
+      ? t('nav.machinery')
       : rootMode === 'propiedad'
-      ? 'Propiedad'
-      : 'Reporte general';
+      ? t('nav.property')
+      : t('reports.title');
 
   const reportTypeDescription = useMemo(() => {
-    const levelText = detailLevel === 'resumido' ? 'Resumido' : 'Detallado';
+    const levelText =
+      detailLevel === 'resumido'
+        ? bi('Resumido', 'Summary')
+        : bi('Detallado', 'Detailed');
     if (rootMode === 'general') {
       const scopeText =
         generalTab === 'consolidado'
-          ? 'Consolidado general'
+          ? bi('Consolidado general', 'General consolidated')
           : generalTab === 'maquinarias'
-          ? 'Maquinarias'
-          : 'Propiedad';
+          ? t('nav.machinery')
+          : t('nav.property');
       return `${scopeText} · ${levelText}`;
     }
     if (rootMode === 'maquinarias' && selectedMachineId !== 'all') {
-      return `${levelText} · ${machineryData.selectedMachineName || 'Máquina'}`;
+      return `${levelText} · ${machineryData.selectedMachineName || t('common.machine')}`;
     }
     if (rootMode === 'propiedad' && selectedLotId !== 'all') {
-      return `${levelText} · ${propertyData.selectedLotName || 'Lote'}`;
+      return `${levelText} · ${propertyData.selectedLotName || t('common.lot')}`;
     }
     return levelText;
   }, [
@@ -908,9 +982,11 @@ const ReportsViewInner: React.FC<Props> = ({
     selectedLotId,
     machineryData.selectedMachineName,
     propertyData.selectedLotName,
+    bi,
+    t,
   ]);
 
-  const campaignLabel = currentCampaign?.nombre || 'Todas las campañas';
+  const campaignLabel = currentCampaign?.nombre || bi('Todas las campañas', 'All campaigns');
   const printDateStr = formatDateDDMMAAAA(getBoliviaDateString(new Date()));
   const currencyLabel = activeCurrency === 'USD' ? 'USD' : 'Bs';
 
@@ -924,67 +1000,88 @@ const ReportsViewInner: React.FC<Props> = ({
   const handleExportExcel = () => {
     const rows: (string | number)[][] = [
       [reportHeaderTitle],
-      [`Campaña: ${campaignLabel}`],
-      [`Tipo de reporte: ${reportTypeDescription}`],
-      [`Moneda: ${currencyLabel}`],
-      [`Fecha de emisión: ${printDateStr}`],
+      [`${t('common.campaign')}: ${campaignLabel}`],
+      [`${bi('Tipo de reporte', 'Report type')}: ${reportTypeDescription}`],
+      [`${t('common.currency')}: ${currencyLabel}`],
+      [`${bi('Fecha de emisión', 'Issue date')}: ${printDateStr}`],
       [],
     ];
 
     if (activeScope === 'maquinarias') {
       if (detailLevel === 'resumido') {
-        rows.push(['Concepto', `Importe (${currencyLabel})`]);
-        rows.push(['Total de ingresos', Number(machineryData.totalIngresos.toFixed(2))]);
-        rows.push(['Total de gastos', Number(machineryData.totalGastos.toFixed(2))]);
+        rows.push([t('common.concept'), `${t('common.amount')} (${currencyLabel})`]);
+        rows.push([t('finances.serviceIncome'), Number(machineryData.ingresosServicios.toFixed(2))]);
+        if (machineryData.ingresosIntereses > 0.004) {
+          rows.push([t('finances.interestIncome'), Number(machineryData.ingresosIntereses.toFixed(2))]);
+        }
+        rows.push([bi('Total de ingresos', 'Total income'), Number(machineryData.totalIngresos.toFixed(2))]);
+        rows.push([bi('Total de gastos', 'Total expenses'), Number(machineryData.totalGastos.toFixed(2))]);
         if (machineryData.canShowNetResult) {
-          rows.push(['Resultado neto', Number(machineryData.resultadoNeto.toFixed(2))]);
+          rows.push([t('reports.netResult'), Number(machineryData.resultadoNeto.toFixed(2))]);
         } else {
           rows.push([
-            'Nota',
-            'Los gastos generales no se atribuyen a una máquina individual.',
+            bi('Nota', 'Note'),
+            bi(
+              'Los gastos generales no se atribuyen a una máquina individual.',
+              'General expenses are not attributed to an individual machine.'
+            ),
           ]);
         }
       } else {
-        rows.push(['Sección', 'Concepto', `Importe (${currencyLabel})`]);
-        rows.push(['Ingresos', 'Trabajos para propiedad propia', Number(machineryData.ingresosPropiedad.toFixed(2))]);
-        rows.push(['Ingresos', 'Servicios para clientes externos', Number(machineryData.ingresosTerceros.toFixed(2))]);
-        rows.push(['Ingresos', 'Total de ingresos', Number(machineryData.totalIngresos.toFixed(2))]);
+        rows.push([bi('Sección', 'Section'), t('common.concept'), `${t('common.amount')} (${currencyLabel})`]);
+        rows.push([t('reports.incomes'), bi('Trabajos para propiedad propia', 'Own property jobs'), Number(machineryData.ingresosPropiedad.toFixed(2))]);
+        rows.push([t('reports.incomes'), bi('Servicios para clientes externos', 'External client services'), Number(machineryData.ingresosTerceros.toFixed(2))]);
+        if (machineryData.ingresosIntereses > 0.004) {
+          rows.push([t('reports.incomes'), t('finances.interestIncome'), Number(machineryData.ingresosIntereses.toFixed(2))]);
+        }
+        rows.push([t('reports.incomes'), bi('Total de ingresos', 'Total income'), Number(machineryData.totalIngresos.toFixed(2))]);
         rows.push([]);
-        rows.push(['Desglose por máquina e implemento agrícola (contabilizado una sola vez)', 'Detalle', `Importe (${currencyLabel})`]);
+        rows.push([
+          bi(
+            'Desglose por máquina e implemento agrícola (contabilizado una sola vez)',
+            'Breakdown by machine & implement (counted once)'
+          ),
+          t('common.detail'),
+          `${t('common.amount')} (${currencyLabel})`,
+        ]);
         machineryData.ingresosPorMaquinaEquipo.forEach((r) => {
-          rows.push(['Máquina / Implemento', r.label, Number(r.amount.toFixed(2))]);
+          rows.push([bi('Máquina / Implemento', 'Machine / Implement'), r.label, Number(r.amount.toFixed(2))]);
         });
         rows.push([]);
-        rows.push(['Gastos por concepto', 'Concepto', `Importe (${currencyLabel})`]);
+        rows.push([bi('Gastos por concepto', 'Expenses by concept'), t('common.concept'), `${t('common.amount')} (${currencyLabel})`]);
         machineryData.gastosPorConcepto.forEach((r) => {
-          rows.push(['Gastos', r.label, Number(r.amount.toFixed(2))]);
+          rows.push([t('reports.expenses'), r.label, Number(r.amount.toFixed(2))]);
         });
-        rows.push(['Gastos', 'Total de gastos', Number(machineryData.totalGastos.toFixed(2))]);
+        rows.push([t('reports.expenses'), bi('Total de gastos', 'Total expenses'), Number(machineryData.totalGastos.toFixed(2))]);
         if (machineryData.canShowNetResult) {
           rows.push([]);
-          rows.push(['Resultado', 'Resultado neto', Number(machineryData.resultadoNeto.toFixed(2))]);
+          rows.push([bi('Resultado', 'Result'), t('reports.netResult'), Number(machineryData.resultadoNeto.toFixed(2))]);
         }
       }
     } else if (activeScope === 'propiedad') {
       if (detailLevel === 'resumido') {
-        rows.push(['Concepto', `Importe (${currencyLabel})`]);
-        rows.push(['Ingresos', Number(propertyData.totalIngresos.toFixed(2))]);
-        rows.push(['Gastos directos', Number(propertyData.totalGastosDirectos.toFixed(2))]);
-        rows.push(['Gastos por maquinaria recibida', Number(propertyData.totalGastosMaquinaria.toFixed(2))]);
-        rows.push(['Gastos totales', Number(propertyData.totalGastos.toFixed(2))]);
-        rows.push(['Resultado neto', Number(propertyData.resultadoNeto.toFixed(2))]);
+        rows.push([t('common.concept'), `${t('common.amount')} (${currencyLabel})`]);
+        rows.push([t('finances.harvestIncome'), Number(propertyData.totalIngresosCosechas.toFixed(2))]);
+        if (propertyData.totalIngresosIntereses > 0.004) {
+          rows.push([t('finances.interestIncome'), Number(propertyData.totalIngresosIntereses.toFixed(2))]);
+        }
+        rows.push([bi('Total de ingresos', 'Total income'), Number(propertyData.totalIngresos.toFixed(2))]);
+        rows.push([bi('Gastos directos', 'Direct expenses'), Number(propertyData.totalGastosDirectos.toFixed(2))]);
+        rows.push([bi('Gastos por maquinaria recibida', 'Machinery received expenses'), Number(propertyData.totalGastosMaquinaria.toFixed(2))]);
+        rows.push([bi('Gastos totales', 'Total expenses'), Number(propertyData.totalGastos.toFixed(2))]);
+        rows.push([t('reports.netResult'), Number(propertyData.resultadoNeto.toFixed(2))]);
       } else {
         rows.push([
-          'Lote',
-          'Superficie (ha)',
-          `Ingresos (${currencyLabel})`,
-          `Gastos directos (${currencyLabel})`,
-          `Maquinaria recibida (${currencyLabel})`,
-          `Gasto total (${currencyLabel})`,
-          `Resultado neto (${currencyLabel})`,
-          `Ingreso/ha (${currencyLabel})`,
-          `Gasto/ha (${currencyLabel})`,
-          `Resultado/ha (${currencyLabel})`,
+          t('common.lot'),
+          bi('Superficie (ha)', 'Area (ha)'),
+          `${t('reports.incomes')} (${currencyLabel})`,
+          `${bi('Gastos directos', 'Direct expenses')} (${currencyLabel})`,
+          `${bi('Maquinaria recibida', 'Machinery received')} (${currencyLabel})`,
+          `${bi('Gasto total', 'Total expense')} (${currencyLabel})`,
+          `${t('reports.netResult')} (${currencyLabel})`,
+          `${bi('Ingreso/ha', 'Income/ha')} (${currencyLabel})`,
+          `${bi('Gasto/ha', 'Expense/ha')} (${currencyLabel})`,
+          `${bi('Resultado/ha', 'Result/ha')} (${currencyLabel})`,
         ]);
         propertyData.lotResults.forEach((lot) => {
           rows.push([
@@ -1013,44 +1110,46 @@ const ReportsViewInner: React.FC<Props> = ({
           propertyData.utilidadPorHaGlobal !== null ? Number(propertyData.utilidadPorHaGlobal.toFixed(2)) : '—',
         ]);
         rows.push([]);
-        rows.push(['Gastos directos por concepto', `Importe (${currencyLabel})`]);
+        rows.push([bi('Gastos directos por concepto', 'Direct expenses by concept'), `${t('common.amount')} (${currencyLabel})`]);
         propertyData.gastosDirectosPorConcepto.forEach((r) => {
           rows.push([r.label, Number(r.amount.toFixed(2))]);
         });
         rows.push([]);
-        rows.push(['Trabajos de maquinaria recibidos', `Importe (${currencyLabel})`]);
+        rows.push([bi('Trabajos de maquinaria recibidos', 'Machinery jobs received'), `${t('common.amount')} (${currencyLabel})`]);
         propertyData.trabajosMaquinariaPorLabor.forEach((r) => {
           rows.push([r.label, Number(r.amount.toFixed(2))]);
         });
       }
     } else {
-      // Consolidado general
       rows.push([
-        'Módulo / Concepto',
-        `Ingresos (${currencyLabel})`,
-        `Gastos (${currencyLabel})`,
-        `Resultado neto (${currencyLabel})`,
+        bi('Módulo / Concepto', 'Module / Concept'),
+        `${t('reports.incomes')} (${currencyLabel})`,
+        `${t('reports.expenses')} (${currencyLabel})`,
+        `${t('reports.netResult')} (${currencyLabel})`,
       ]);
       rows.push([
-        'Maquinarias',
+        t('nav.machinery'),
         Number(consolidatedData.machIngresosTotales.toFixed(2)),
         Number(consolidatedData.machGastosTotales.toFixed(2)),
         Number(consolidatedData.machResultado.toFixed(2)),
       ]);
       rows.push([
-        'Propiedad',
+        t('nav.property'),
         Number(consolidatedData.propIngresosTotales.toFixed(2)),
         Number(consolidatedData.propGastosTotales.toFixed(2)),
         Number(consolidatedData.propResultado.toFixed(2)),
       ]);
       rows.push([
-        'Eliminación de operaciones internas (Maquinarias ↔ Propiedad)',
+        bi(
+          'Eliminación de operaciones internas (Maquinarias ↔ Propiedad)',
+          'Internal operation elimination (Machinery ↔ Property)'
+        ),
         Number((-consolidatedData.operacionesInternas).toFixed(2)),
         Number((-consolidatedData.operacionesInternas).toFixed(2)),
         0,
       ]);
       rows.push([
-        'CONSOLIDADO GENERAL (frente a terceros)',
+        bi('CONSOLIDADO GENERAL (frente a terceros)', 'GENERAL CONSOLIDATED (external)'),
         Number(consolidatedData.ingresosConsolidados.toFixed(2)),
         Number(consolidatedData.gastosConsolidados.toFixed(2)),
         Number(consolidatedData.resultadoConsolidado.toFixed(2)),
@@ -1058,24 +1157,42 @@ const ReportsViewInner: React.FC<Props> = ({
 
       if (detailLevel === 'detallado') {
         rows.push([]);
-        rows.push(['Detalle consolidado — Ingresos frente a terceros', `Importe (${currencyLabel})`]);
+        rows.push([
+          bi('Detalle consolidado — Ingresos frente a terceros', 'Consolidated detail — External income'),
+          `${t('common.amount')} (${currencyLabel})`,
+        ]);
         consolidatedData.ingresosExtPorMaquina.forEach((r) => {
-          rows.push([`Maquinarias externos · ${r.label}`, Number(r.amount.toFixed(2))]);
+          rows.push([`${bi('Maquinarias externos', 'External machinery')} · ${r.label}`, Number(r.amount.toFixed(2))]);
         });
         consolidatedData.ingresosPropPorLote.forEach((r) => {
-          rows.push([`Propiedad · ${r.label}`, Number(r.amount.toFixed(2))]);
+          rows.push([`${t('nav.property')} · ${r.label}`, Number(r.amount.toFixed(2))]);
         });
-        rows.push(['Total ingresos consolidados', Number(consolidatedData.ingresosConsolidados.toFixed(2))]);
+        if (consolidatedData.machIngresosIntereses > 0.004) {
+          rows.push([`${t('nav.machinery')} · ${t('finances.interestIncome')}`, Number(consolidatedData.machIngresosIntereses.toFixed(2))]);
+        }
+        if (consolidatedData.propIngresosIntereses > 0.004) {
+          rows.push([`${t('nav.property')} · ${t('finances.interestIncome')}`, Number(consolidatedData.propIngresosIntereses.toFixed(2))]);
+        }
+        rows.push([
+          bi('Total ingresos consolidados', 'Total consolidated income'),
+          Number(consolidatedData.ingresosConsolidados.toFixed(2)),
+        ]);
 
         rows.push([]);
-        rows.push(['Detalle consolidado — Gastos frente a terceros', `Importe (${currencyLabel})`]);
+        rows.push([
+          bi('Detalle consolidado — Gastos frente a terceros', 'Consolidated detail — External expenses'),
+          `${t('common.amount')} (${currencyLabel})`,
+        ]);
         consolidatedData.gastosMaqPorConcepto.forEach((r) => {
-          rows.push([`Maquinarias · ${r.label}`, Number(r.amount.toFixed(2))]);
+          rows.push([`${t('nav.machinery')} · ${r.label}`, Number(r.amount.toFixed(2))]);
         });
         consolidatedData.gastosPropPorConcepto.forEach((r) => {
-          rows.push([`Propiedad · ${r.label}`, Number(r.amount.toFixed(2))]);
+          rows.push([`${t('nav.property')} · ${r.label}`, Number(r.amount.toFixed(2))]);
         });
-        rows.push(['Total gastos consolidados', Number(consolidatedData.gastosConsolidados.toFixed(2))]);
+        rows.push([
+          bi('Total gastos consolidados', 'Total consolidated expenses'),
+          Number(consolidatedData.gastosConsolidados.toFixed(2)),
+        ]);
       }
     }
 
@@ -1093,7 +1210,7 @@ const ReportsViewInner: React.FC<Props> = ({
       { wch: 16 },
       { wch: 16 },
     ];
-    XLSX.utils.book_append_sheet(wb, ws, 'Reporte');
+    XLSX.utils.book_append_sheet(wb, ws, bi('Reporte', 'Report'));
     const safeName = `${reportHeaderTitle}_${campaignLabel}_${detailLevel}`
       .replace(/[^a-zA-Z0-9_-]+/g, '_')
       .toLowerCase();
@@ -1105,25 +1222,25 @@ const ReportsViewInner: React.FC<Props> = ({
   // ==========================================================================
   return (
     <div className="print-report-root w-full max-w-4xl mx-auto space-y-3.5">
-      {/* PRINT-ONLY SIMPLE BLACK & WHITE HEADER (NO LOGO, NO COMPANY NAME) */}
+      {/* PRINT-ONLY SIMPLE BLACK & WHITE HEADER */}
       <div className="hidden print-only border-b-2 border-black pb-2 mb-4">
         <h1 className="text-lg font-bold text-black">{reportHeaderTitle}</h1>
         <div className="text-xs text-black mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
-          <span>Campaña: {campaignLabel}</span>
-          <span>Tipo: {reportTypeDescription}</span>
-          <span>Moneda: {currencyLabel}</span>
-          <span>Fecha de impresión: {printDateStr}</span>
+          <span>{t('common.campaign')}: {campaignLabel}</span>
+          <span>{t('common.type')}: {reportTypeDescription}</span>
+          <span>{t('common.currency')}: {currencyLabel}</span>
+          <span>{bi('Fecha de impresión', 'Print date')}: {printDateStr}</span>
         </div>
       </div>
 
-      {/* COMPACT SCREEN HEADER: [←] Full Title + Icon-only Print & Excel */}
+      {/* COMPACT SCREEN HEADER */}
       <div className="no-print flex items-center justify-between gap-2 pb-2 border-b border-[#E2E7E3]">
         <div className="flex items-center gap-2.5 min-w-0">
           {onBack && (
             <button
               type="button"
               onClick={onBack}
-              aria-label={onRootBackLabel || 'Volver'}
+              aria-label={onRootBackLabel || t('common.back')}
               className="flex h-9 w-9 items-center justify-center rounded-xl bg-white border border-[#DCE2DD] text-[#26352D] hover:bg-[#F5F7F4] active:scale-95 transition cursor-pointer shrink-0"
             >
               <ArrowLeft className="h-4 w-4 text-[#26352D]" />
@@ -1139,8 +1256,8 @@ const ReportsViewInner: React.FC<Props> = ({
           <button
             type="button"
             onClick={handlePrint}
-            aria-label="Imprimir reporte"
-            title="Imprimir reporte"
+            aria-label={bi('Imprimir reporte', 'Print report')}
+            title={bi('Imprimir reporte', 'Print report')}
             className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#DCE2DD] bg-white hover:bg-[#F5F7F4] text-[#26352D] transition cursor-pointer"
           >
             <Printer className="h-4 w-4 text-[#526058]" />
@@ -1148,8 +1265,8 @@ const ReportsViewInner: React.FC<Props> = ({
           <button
             type="button"
             onClick={handleExportExcel}
-            aria-label="Exportar a Excel"
-            title="Exportar a Excel"
+            aria-label={bi('Exportar a Excel', 'Export to Excel')}
+            title={bi('Exportar a Excel', 'Export to Excel')}
             className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#DCE2DD] bg-white hover:bg-[#F5F7F4] text-[#24875B] transition cursor-pointer"
           >
             <FileSpreadsheet className="h-4 w-4" />
@@ -1157,17 +1274,17 @@ const ReportsViewInner: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* COMPACT SELECTORS (NO BIG BLOCKS, NO HORIZONTAL SCROLL) */}
+      {/* COMPACT SELECTORS */}
       <div className="no-print flex flex-wrap items-center gap-1.5">
         {rootMode === 'general' && (
           <CompactFilter
             value={generalTab}
             onChange={(val) => setGeneralTab(val as GeneralScopeTab)}
-            ariaLabel="Sección del reporte"
+            ariaLabel={bi('Sección del reporte', 'Report section')}
             options={[
-              { value: 'consolidado', label: 'Consolidado' },
-              { value: 'maquinarias', label: 'Maquinarias' },
-              { value: 'propiedad', label: 'Propiedad' },
+              { value: 'consolidado', label: t('reports.tab.consolidated') },
+              { value: 'maquinarias', label: t('reports.tab.machinery') },
+              { value: 'propiedad', label: t('reports.tab.property') },
             ]}
           />
         )}
@@ -1175,35 +1292,35 @@ const ReportsViewInner: React.FC<Props> = ({
         <CompactFilter
           value={effectiveCampaignId}
           onChange={(val) => setSelectedCampaignId(val)}
-          ariaLabel="Campaña"
+          ariaLabel={t('common.campaign')}
           options={[
             ...safeCampaigns.map((c) => ({
               value: String(c.id),
-              label: c.activa ? `${c.nombre} (Activa)` : c.nombre,
+              label: c.activa ? `${c.nombre} (${t('common.activeFem')})` : c.nombre,
             })),
             ...(safeCampaigns.length > 1 || effectiveCampaignId === 'all' || safeCampaigns.length === 0
-              ? [{ value: 'all', label: 'Todas las campañas' }]
+              ? [{ value: 'all', label: bi('Todas las campañas', 'All campaigns') }]
               : []),
           ]}
         />
 
-        <CompactFilter
+        <Switch<Currency>
+          size="sm"
           value={activeCurrency}
-          onChange={(val) => setActiveCurrency(val as Currency)}
-          ariaLabel="Moneda"
-          options={[
-            { value: 'USD', label: 'USD' },
-            { value: 'BOB', label: 'Bs' },
-          ]}
+          onChange={(val) => setActiveCurrency(val)}
+          ariaLabel={t('common.currency')}
+          leftOption={{ value: 'USD', label: 'USD' }}
+          rightOption={{ value: 'BOB', label: 'Bs' }}
+          className="!w-auto shrink-0"
         />
 
         <CompactFilter
           value={detailLevel}
           onChange={(val) => setDetailLevel(val as ReportDetailLevel)}
-          ariaLabel="Nivel de detalle"
+          ariaLabel={bi('Nivel de detalle', 'Detail level')}
           options={[
-            { value: 'resumido', label: 'Resumido' },
-            { value: 'detallado', label: 'Detallado' },
+            { value: 'resumido', label: bi('Resumido', 'Summary') },
+            { value: 'detallado', label: bi('Detallado', 'Detailed') },
           ]}
         />
 
@@ -1211,9 +1328,9 @@ const ReportsViewInner: React.FC<Props> = ({
           <CompactFilter
             value={selectedMachineId}
             onChange={(val) => setSelectedMachineId(val)}
-            ariaLabel="Filtrar por máquina"
+            ariaLabel={bi('Filtrar por máquina', 'Filter by machine')}
             options={[
-              { value: 'all', label: 'Todas las máquinas' },
+              { value: 'all', label: t('picker.machineAll') },
               ...safeMachines.map((m) => ({
                 value: String(m.id),
                 label: m.nombre,
@@ -1226,9 +1343,9 @@ const ReportsViewInner: React.FC<Props> = ({
           <CompactFilter
             value={selectedLotId}
             onChange={(val) => setSelectedLotId(val)}
-            ariaLabel="Filtrar por lote"
+            ariaLabel={bi('Filtrar por lote', 'Filter by lot')}
             options={[
-              { value: 'all', label: 'Todos los lotes' },
+              { value: 'all', label: t('picker.lotAll') },
               ...safeLots.map((l) => ({
                 value: String(l.id),
                 label: l.nombre,
@@ -1245,15 +1362,33 @@ const ReportsViewInner: React.FC<Props> = ({
         <div className="space-y-3">
           {detailLevel === 'resumido' ? (
             <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden divide-y divide-[#EFF2EF]">
+              {machineryData.ingresosIntereses > 0.004 && (
+                <>
+                  <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs sm:text-sm">
+                    <span className="text-[#5E6D64]">{t('finances.serviceIncome')}</span>
+                    <span className="font-semibold text-[#24875B] tabular-nums">
+                      {fmt(machineryData.ingresosServicios)}
+                    </span>
+                  </div>
+                  <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs sm:text-sm">
+                    <span className="text-[#5E6D64]">{t('finances.interestIncome')}</span>
+                    <span className="font-semibold text-[#24875B] tabular-nums">
+                      {fmt(machineryData.ingresosIntereses)}
+                    </span>
+                  </div>
+                </>
+              )}
               <div className="px-4 py-3 flex items-center justify-between gap-2 text-sm">
-                <span className="font-medium text-[#26352D]">Total de ingresos</span>
+                <span className="font-medium text-[#26352D]">{bi('Total de ingresos', 'Total income')}</span>
                 <span className="font-bold text-[#24875B] tabular-nums">
                   {fmt(machineryData.totalIngresos)}
                 </span>
               </div>
               <div className="px-4 py-3 flex items-center justify-between gap-2 text-sm">
                 <span className="font-medium text-[#26352D]">
-                  {machineryData.isFilteredByMachine ? 'Gastos asignados' : 'Total de gastos'}
+                  {machineryData.isFilteredByMachine
+                    ? bi('Gastos asignados', 'Assigned expenses')
+                    : bi('Total de gastos', 'Total expenses')}
                 </span>
                 <span className="font-bold text-[#C44545] tabular-nums">
                   {fmt(machineryData.totalGastos)}
@@ -1265,7 +1400,7 @@ const ReportsViewInner: React.FC<Props> = ({
                     machineryData.resultadoNeto
                   )}`}
                 >
-                  <span className="font-bold text-[#26352D]">Resultado neto</span>
+                  <span className="font-bold text-[#26352D]">{t('reports.netResult')}</span>
                   <span
                     className={`text-base font-extrabold tabular-nums ${getNetColorClass(
                       machineryData.resultadoNeto
@@ -1278,7 +1413,10 @@ const ReportsViewInner: React.FC<Props> = ({
                 <div className="px-4 py-3 bg-[#FAFBF8] flex items-start gap-2 text-xs text-[#5E6D64]">
                   <Info className="h-4 w-4 text-[#7A8780] shrink-0 mt-0.5" />
                   <span>
-                    Existen gastos generales ({fmt(machineryData.unassignedMachExpensesTotal)}) no asignados a una máquina individual.
+                    {bi(
+                      `Existen gastos generales (${fmt(machineryData.unassignedMachExpensesTotal)}) no asignados a una máquina individual.`,
+                      `There are general expenses (${fmt(machineryData.unassignedMachExpensesTotal)}) not assigned to an individual machine.`
+                    )}
                   </span>
                 </div>
               )}
@@ -1288,7 +1426,7 @@ const ReportsViewInner: React.FC<Props> = ({
               {/* INGRESOS AGRUPADOS */}
               <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
                 <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#EAF5EE]/55 flex items-center justify-between">
-                  <h3 className="text-xs sm:text-sm font-bold text-[#24875B]">Ingresos</h3>
+                  <h3 className="text-xs sm:text-sm font-bold text-[#24875B]">{t('reports.incomes')}</h3>
                   <span className="text-xs sm:text-sm font-extrabold text-[#24875B] tabular-nums">
                     {fmt(machineryData.totalIngresos)}
                   </span>
@@ -1296,7 +1434,7 @@ const ReportsViewInner: React.FC<Props> = ({
                 <div className="divide-y divide-[#EFF2EF] text-xs sm:text-sm">
                   <div className="px-4 py-2.5 flex items-center justify-between gap-2">
                     <span className="font-medium text-[#26352D]">
-                      Trabajos en propiedad propia{' '}
+                      {bi('Trabajos en propiedad propia', 'Own property jobs')}{' '}
                       <span className="text-[11px] text-[#7A8780] font-normal">
                         ({machineryData.propJobsCount})
                       </span>
@@ -1307,7 +1445,7 @@ const ReportsViewInner: React.FC<Props> = ({
                   </div>
                   <div className="px-4 py-2.5 flex items-center justify-between gap-2">
                     <span className="font-medium text-[#26352D]">
-                      Servicios a clientes externos{' '}
+                      {bi('Servicios a clientes externos', 'External client services')}{' '}
                       <span className="text-[11px] text-[#7A8780] font-normal">
                         ({machineryData.extJobsCount})
                       </span>
@@ -1316,6 +1454,19 @@ const ReportsViewInner: React.FC<Props> = ({
                       {fmt(machineryData.ingresosTerceros)}
                     </span>
                   </div>
+                  {machineryData.ingresosIntereses > 0.004 && (
+                    <div className="px-4 py-2.5 flex items-center justify-between gap-2">
+                      <span className="font-medium text-[#26352D]">
+                        {t('finances.interestIncome')}{' '}
+                        <span className="text-[11px] text-[#7A8780] font-normal">
+                          ({machineryData.interesesCount})
+                        </span>
+                      </span>
+                      <span className="font-bold text-[#24875B] tabular-nums shrink-0">
+                        {fmt(machineryData.ingresosIntereses)}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1323,7 +1474,7 @@ const ReportsViewInner: React.FC<Props> = ({
               <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
                 <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#F8FAF8] flex items-center justify-between gap-2">
                   <h3 className="text-xs sm:text-sm font-bold text-[#26352D]">
-                    Ingresos por máquina e implemento
+                    {bi('Ingresos por máquina e implemento', 'Income by machine & implement')}
                   </h3>
                   <span className="text-xs sm:text-sm font-extrabold text-[#24875B] tabular-nums">
                     {fmt(machineryData.totalIngresos)}
@@ -1342,7 +1493,7 @@ const ReportsViewInner: React.FC<Props> = ({
                   </div>
                 ) : (
                   <p className="px-4 py-5 text-xs text-[#7A8780] text-center">
-                    Sin ingresos de maquinaria en esta selección.
+                    {bi('Sin ingresos de maquinaria en esta selección.', 'No machinery income in this selection.')}
                   </p>
                 )}
               </div>
@@ -1352,8 +1503,8 @@ const ReportsViewInner: React.FC<Props> = ({
                 <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#FCECEC]/55 flex items-center justify-between">
                   <h3 className="text-xs sm:text-sm font-bold text-[#C44545]">
                     {machineryData.isFilteredByMachine
-                      ? 'Gastos asignados por concepto'
-                      : 'Gastos por concepto'}
+                      ? bi('Gastos asignados por concepto', 'Assigned expenses by concept')
+                      : bi('Gastos por concepto', 'Expenses by concept')}
                   </h3>
                   <span className="text-xs sm:text-sm font-extrabold text-[#C44545] tabular-nums">
                     {fmt(machineryData.totalGastos)}
@@ -1372,7 +1523,7 @@ const ReportsViewInner: React.FC<Props> = ({
                   </div>
                 ) : (
                   <p className="px-4 py-5 text-xs text-[#7A8780] text-center">
-                    Sin gastos registrados en esta selección.
+                    {bi('Sin gastos registrados en esta selección.', 'No expenses recorded in this selection.')}
                   </p>
                 )}
               </div>
@@ -1384,7 +1535,7 @@ const ReportsViewInner: React.FC<Props> = ({
                     machineryData.resultadoNeto
                   )}`}
                 >
-                  <span className="text-sm font-bold text-[#26352D]">Resultado neto</span>
+                  <span className="text-sm font-bold text-[#26352D]">{t('reports.netResult')}</span>
                   <span
                     className={`text-base sm:text-lg font-extrabold tabular-nums ${getNetColorClass(
                       machineryData.resultadoNeto
@@ -1397,7 +1548,10 @@ const ReportsViewInner: React.FC<Props> = ({
                 <div className="rounded-2xl border border-[#E2E7E3] bg-white px-4 py-3 text-xs text-[#5E6D64] flex items-start gap-2">
                   <Info className="h-4 w-4 text-[#7A8780] shrink-0 mt-0.5" />
                   <span>
-                    Los gastos generales ({fmt(machineryData.unassignedMachExpensesTotal)}) no se atribuyen a una máquina individual, por lo que no se muestra utilidad neta para {machineryData.selectedMachineName}.
+                    {bi(
+                      `Los gastos generales (${fmt(machineryData.unassignedMachExpensesTotal)}) no se atribuyen a una máquina individual, por lo que no se muestra utilidad neta para ${machineryData.selectedMachineName}.`,
+                      `General expenses (${fmt(machineryData.unassignedMachExpensesTotal)}) are not attributed to an individual machine, so net profit is not shown for ${machineryData.selectedMachineName}.`
+                    )}
                   </span>
                 </div>
               )}
@@ -1413,26 +1567,42 @@ const ReportsViewInner: React.FC<Props> = ({
         <div className="space-y-3">
           {detailLevel === 'resumido' ? (
             <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden divide-y divide-[#EFF2EF] text-sm">
+              {propertyData.totalIngresosIntereses > 0.004 && (
+                <>
+                  <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs sm:text-sm">
+                    <span className="text-[#5E6D64]">{t('finances.harvestIncome')}</span>
+                    <span className="font-semibold text-[#24875B] tabular-nums">
+                      {fmt(propertyData.totalIngresosCosechas)}
+                    </span>
+                  </div>
+                  <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs sm:text-sm">
+                    <span className="text-[#5E6D64]">{t('finances.interestIncome')}</span>
+                    <span className="font-semibold text-[#24875B] tabular-nums">
+                      {fmt(propertyData.totalIngresosIntereses)}
+                    </span>
+                  </div>
+                </>
+              )}
               <div className="px-4 py-3 flex items-center justify-between gap-2">
-                <span className="font-medium text-[#26352D]">Ingresos</span>
+                <span className="font-medium text-[#26352D]">{t('reports.incomes')}</span>
                 <span className="font-bold text-[#24875B] tabular-nums">
                   {fmt(propertyData.totalIngresos)}
                 </span>
               </div>
               <div className="px-4 py-3 flex items-center justify-between gap-2">
-                <span className="text-[#5E6D64]">Gastos directos</span>
+                <span className="text-[#5E6D64]">{bi('Gastos directos', 'Direct expenses')}</span>
                 <span className="font-semibold text-[#C44545] tabular-nums">
                   {fmt(propertyData.totalGastosDirectos)}
                 </span>
               </div>
               <div className="px-4 py-3 flex items-center justify-between gap-2">
-                <span className="text-[#5E6D64]">Maquinaria recibida</span>
+                <span className="text-[#5E6D64]">{bi('Maquinaria recibida', 'Machinery received')}</span>
                 <span className="font-semibold text-[#C44545] tabular-nums">
                   {fmt(propertyData.totalGastosMaquinaria)}
                 </span>
               </div>
               <div className="px-4 py-3 bg-[#FCECEC]/40 flex items-center justify-between gap-2">
-                <span className="font-bold text-[#C44545]">Gastos totales</span>
+                <span className="font-bold text-[#C44545]">{bi('Gastos totales', 'Total expenses')}</span>
                 <span className="font-extrabold text-[#C44545] tabular-nums">
                   {fmt(propertyData.totalGastos)}
                 </span>
@@ -1440,7 +1610,7 @@ const ReportsViewInner: React.FC<Props> = ({
               {propertyData.ingresoPorHaGlobal !== null && (
                 <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs">
                   <span className="text-[#5E6D64]">
-                    Ingreso / ha ({formatNumberEs(propertyData.totalHectares, 1)} ha)
+                    {bi('Ingreso / ha', 'Income / ha')} ({formatNumberEs(propertyData.totalHectares, 1)} ha)
                   </span>
                   <span className="font-semibold text-[#24875B] tabular-nums">
                     {fmt(propertyData.ingresoPorHaGlobal)}
@@ -1450,7 +1620,7 @@ const ReportsViewInner: React.FC<Props> = ({
               {propertyData.gastoPorHaGlobal !== null && (
                 <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs">
                   <span className="text-[#5E6D64]">
-                    Gasto / ha ({formatNumberEs(propertyData.totalHectares, 1)} ha)
+                    {bi('Gasto / ha', 'Expense / ha')} ({formatNumberEs(propertyData.totalHectares, 1)} ha)
                   </span>
                   <span className="font-semibold text-[#C44545] tabular-nums">
                     {fmt(propertyData.gastoPorHaGlobal)}
@@ -1459,7 +1629,7 @@ const ReportsViewInner: React.FC<Props> = ({
               )}
               {propertyData.utilidadPorHaGlobal !== null && (
                 <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs">
-                  <span className="text-[#5E6D64]">Resultado / ha</span>
+                  <span className="text-[#5E6D64]">{bi('Resultado / ha', 'Result / ha')}</span>
                   <span
                     className={`font-semibold tabular-nums ${getNetColorClass(
                       propertyData.utilidadPorHaGlobal
@@ -1474,7 +1644,7 @@ const ReportsViewInner: React.FC<Props> = ({
                   propertyData.resultadoNeto
                 )}`}
               >
-                <span className="font-bold text-[#26352D]">Resultado neto</span>
+                <span className="font-bold text-[#26352D]">{t('reports.netResult')}</span>
                 <span
                   className={`text-base font-extrabold tabular-nums ${getNetColorClass(
                     propertyData.resultadoNeto
@@ -1486,11 +1656,11 @@ const ReportsViewInner: React.FC<Props> = ({
             </div>
           ) : (
             <div className="space-y-3">
-              {/* RESULTADOS POR LOTE — LISTA CONTINUA COMPACTA EXPANDIBLE */}
+              {/* RESULTADOS POR LOTE */}
               <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
                 <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#F8FAF8] flex items-center justify-between">
                   <h3 className="text-xs sm:text-sm font-bold text-[#26352D]">
-                    Resultados por lote ({propertyData.lotResults.length})
+                    {bi('Resultados por lote', 'Results by lot')} ({propertyData.lotResults.length})
                   </h3>
                   {propertyData.totalHectares > 0 && (
                     <span className="text-[11px] font-semibold text-[#5E6D64] tabular-nums">
@@ -1526,10 +1696,10 @@ const ReportsViewInner: React.FC<Props> = ({
                               </div>
                               <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] tabular-nums mt-0.5">
                                 <span className="text-[#24875B] font-semibold">
-                                  Ing: {fmt(lot.ingresos)}
+                                  {bi('Ing', 'Inc')}: {fmt(lot.ingresos)}
                                 </span>
                                 <span className="text-[#C44545] font-semibold">
-                                  Gas: {fmt(lot.gastosTotales)}
+                                  {bi('Gas', 'Exp')}: {fmt(lot.gastosTotales)}
                                 </span>
                               </div>
                             </div>
@@ -1552,31 +1722,29 @@ const ReportsViewInner: React.FC<Props> = ({
                             </div>
                           </button>
 
-                          {/* Detalle inline expandible (siempre visible en impresión) */}
                           <div
                             className={`${
                               isLotExpanded ? 'block' : 'hidden print:block'
                             } px-4 pb-3 pt-2 bg-[#FAFBF8] border-t border-[#EFF2EF] space-y-2.5 text-xs`}
                           >
-                            {/* Indicadores por hectárea */}
                             {(lot.ingresoPorHa !== null ||
                               lot.gastoPorHa !== null ||
                               lot.utilidadPorHa !== null) && (
                               <div className="grid grid-cols-3 gap-2 pb-2 border-b border-[#EFF2EF] tabular-nums text-center">
                                 <div className="rounded-lg bg-white border border-[#E2E7E3] px-2 py-1.5">
-                                  <span className="block text-[10px] text-[#5E6D64]">Ingreso/ha</span>
+                                  <span className="block text-[10px] text-[#5E6D64]">{bi('Ingreso/ha', 'Income/ha')}</span>
                                   <strong className="text-[#24875B]">
                                     {lot.ingresoPorHa !== null ? fmt(lot.ingresoPorHa) : '—'}
                                   </strong>
                                 </div>
                                 <div className="rounded-lg bg-white border border-[#E2E7E3] px-2 py-1.5">
-                                  <span className="block text-[10px] text-[#5E6D64]">Gasto/ha</span>
+                                  <span className="block text-[10px] text-[#5E6D64]">{bi('Gasto/ha', 'Expense/ha')}</span>
                                   <strong className="text-[#C44545]">
                                     {lot.gastoPorHa !== null ? fmt(lot.gastoPorHa) : '—'}
                                   </strong>
                                 </div>
                                 <div className="rounded-lg bg-white border border-[#E2E7E3] px-2 py-1.5">
-                                  <span className="block text-[10px] text-[#5E6D64]">Resultado/ha</span>
+                                  <span className="block text-[10px] text-[#5E6D64]">{bi('Resultado/ha', 'Result/ha')}</span>
                                   <strong
                                     className={
                                       lot.utilidadPorHa !== null
@@ -1590,11 +1758,10 @@ const ReportsViewInner: React.FC<Props> = ({
                               </div>
                             )}
 
-                            {/* Ingresos / Cosechas por concepto (solo si > 0) */}
                             {lot.ingresosPorConcepto.length > 0 && (
                               <div className="space-y-1">
                                 <div className="flex items-center justify-between font-bold text-[#24875B]">
-                                  <span>Ingresos de cosecha / ventas</span>
+                                  <span>{bi('Ingresos de cosecha / ventas', 'Harvest / sales income')}</span>
                                   <span className="tabular-nums">{fmt(lot.ingresos)}</span>
                                 </div>
                                 <div className="divide-y divide-[#EFF2EF] rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
@@ -1613,11 +1780,10 @@ const ReportsViewInner: React.FC<Props> = ({
                               </div>
                             )}
 
-                            {/* Gastos directos por concepto (solo si > 0) */}
                             {lot.gastosDirectosPorConcepto.length > 0 && (
                               <div className="space-y-1">
                                 <div className="flex items-center justify-between font-bold text-[#C44545]">
-                                  <span>Gastos directos</span>
+                                  <span>{bi('Gastos directos', 'Direct expenses')}</span>
                                   <span className="tabular-nums">{fmt(lot.gastosDirectos)}</span>
                                 </div>
                                 <div className="divide-y divide-[#EFF2EF] rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
@@ -1636,11 +1802,10 @@ const ReportsViewInner: React.FC<Props> = ({
                               </div>
                             )}
 
-                            {/* Trabajos de maquinaria recibidos (solo si > 0) */}
                             {lot.trabajosMaquinariaPorLabor.length > 0 && (
                               <div className="space-y-1">
                                 <div className="flex items-center justify-between font-bold text-[#C44545]">
-                                  <span>Trabajos de maquinaria recibidos</span>
+                                  <span>{bi('Trabajos de maquinaria recibidos', 'Machinery jobs received')}</span>
                                   <span className="tabular-nums">{fmt(lot.gastosMaquinaria)}</span>
                                 </div>
                                 <div className="divide-y divide-[#EFF2EF] rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
@@ -1663,7 +1828,10 @@ const ReportsViewInner: React.FC<Props> = ({
                               lot.trabajosMaquinariaPorLabor.length === 0 &&
                               lot.ingresos === 0 && (
                                 <p className="text-[11px] text-[#7A8780]">
-                                  Sin movimientos registrados en esta campaña.
+                                  {bi(
+                                    'Sin movimientos registrados en esta campaña.',
+                                    'No movements recorded in this campaign.'
+                                  )}
                                 </p>
                               )}
                           </div>
@@ -1673,7 +1841,7 @@ const ReportsViewInner: React.FC<Props> = ({
                   </div>
                 ) : (
                   <p className="px-4 py-5 text-xs text-[#7A8780] text-center">
-                    Sin datos de lotes en esta campaña.
+                    {bi('Sin datos de lotes en esta campaña.', 'No lot data in this campaign.')}
                   </p>
                 )}
               </div>
@@ -1682,7 +1850,7 @@ const ReportsViewInner: React.FC<Props> = ({
               <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
                 <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#F8FAF8] flex items-center justify-between">
                   <h3 className="text-xs sm:text-sm font-bold text-[#26352D]">
-                    Resumen de Propiedad
+                    {bi('Resumen de Propiedad', 'Property Summary')}
                   </h3>
                   {propertyData.totalHectares > 0 && (
                     <span className="text-[11px] font-semibold text-[#5E6D64] tabular-nums">
@@ -1691,33 +1859,49 @@ const ReportsViewInner: React.FC<Props> = ({
                   )}
                 </div>
                 <div className="divide-y divide-[#EFF2EF] text-xs sm:text-sm">
+                  {propertyData.totalIngresosIntereses > 0.004 && (
+                    <>
+                      <div className="px-4 py-2.5 flex items-center justify-between gap-2">
+                        <span className="text-[#5E6D64]">{t('finances.harvestIncome')}</span>
+                        <span className="font-semibold text-[#24875B] tabular-nums">
+                          {fmt(propertyData.totalIngresosCosechas)}
+                        </span>
+                      </div>
+                      <div className="px-4 py-2.5 flex items-center justify-between gap-2">
+                        <span className="text-[#5E6D64]">{t('finances.interestIncome')}</span>
+                        <span className="font-semibold text-[#24875B] tabular-nums">
+                          {fmt(propertyData.totalIngresosIntereses)}
+                        </span>
+                      </div>
+                    </>
+                  )}
                   <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                    <span className="text-[#26352D]">Ingresos</span>
+                    <span className="text-[#26352D]">{t('reports.incomes')}</span>
                     <span className="font-bold text-[#24875B] tabular-nums">
                       {fmt(propertyData.totalIngresos)}
                     </span>
                   </div>
                   <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                    <span className="text-[#5E6D64]">Gastos directos</span>
+                    <span className="text-[#5E6D64]">{bi('Gastos directos', 'Direct expenses')}</span>
                     <span className="font-semibold text-[#C44545] tabular-nums">
                       {fmt(propertyData.totalGastosDirectos)}
                     </span>
                   </div>
                   <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                    <span className="text-[#5E6D64]">Maquinaria recibida</span>
+                    <span className="text-[#5E6D64]">{bi('Maquinaria recibida', 'Machinery received')}</span>
                     <span className="font-semibold text-[#C44545] tabular-nums">
                       {fmt(propertyData.totalGastosMaquinaria)}
                     </span>
                   </div>
                   <div className="px-4 py-2.5 flex items-center justify-between gap-2 bg-[#FCECEC]/35">
-                    <span className="font-bold text-[#C44545]">Gastos totales</span>
+                    <span className="font-bold text-[#C44545]">{bi('Gastos totales', 'Total expenses')}</span>
                     <span className="font-extrabold text-[#C44545] tabular-nums">
                       {fmt(propertyData.totalGastos)}
                     </span>
                   </div>
                   {propertyData.ingresoPorHaGlobal !== null && (
                     <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                      <span className="text-[#5E6D64]">Ingreso / ha</span>
+                      <span className="text-[#5E6D64]">{bi('Ingreso / ha', 'Income / ha')}</span>
                       <span className="font-semibold text-[#24875B] tabular-nums">
                         {fmt(propertyData.ingresoPorHaGlobal)}
                       </span>
@@ -1725,7 +1909,7 @@ const ReportsViewInner: React.FC<Props> = ({
                   )}
                   {propertyData.gastoPorHaGlobal !== null && (
                     <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                      <span className="text-[#5E6D64]">Gasto / ha</span>
+                      <span className="text-[#5E6D64]">{bi('Gasto / ha', 'Expense / ha')}</span>
                       <span className="font-semibold text-[#C44545] tabular-nums">
                         {fmt(propertyData.gastoPorHaGlobal)}
                       </span>
@@ -1733,7 +1917,7 @@ const ReportsViewInner: React.FC<Props> = ({
                   )}
                   {propertyData.utilidadPorHaGlobal !== null && (
                     <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                      <span className="text-[#5E6D64]">Resultado / ha</span>
+                      <span className="text-[#5E6D64]">{bi('Resultado / ha', 'Result / ha')}</span>
                       <span
                         className={`font-semibold tabular-nums ${getNetColorClass(
                           propertyData.utilidadPorHaGlobal
@@ -1748,7 +1932,7 @@ const ReportsViewInner: React.FC<Props> = ({
                       propertyData.resultadoNeto
                     )}`}
                   >
-                    <span className="font-bold text-[#26352D]">Resultado neto</span>
+                    <span className="font-bold text-[#26352D]">{t('reports.netResult')}</span>
                     <span
                       className={`text-base font-extrabold tabular-nums ${getNetColorClass(
                         propertyData.resultadoNeto
@@ -1765,23 +1949,21 @@ const ReportsViewInner: React.FC<Props> = ({
       )}
 
       {/* ==================================================================== */}
-      {/* VIEW C: REPORTE GENERAL — CONSOLIDADO COMPACTO SIN SCROLL HORIZONTAL */}
+      {/* VIEW C: REPORTE GENERAL — CONSOLIDADO                                */}
       {/* ==================================================================== */}
       {activeScope === 'consolidado' && (
         <div className="space-y-3">
-          {/* 1. RESUMEN COMPACTO POR MÓDULO + CONSOLIDADO GENERAL */}
           <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
             <div className="divide-y divide-[#EFF2EF] tabular-nums">
-              {/* Maquinarias */}
               <div className="px-4 py-3 flex items-center justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-bold text-[#26352D]">Maquinarias</p>
+                  <p className="text-sm font-bold text-[#26352D]">{t('nav.machinery')}</p>
                   <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] mt-0.5">
                     <span className="text-[#24875B] font-semibold">
-                      Ing: {fmt(consolidatedData.machIngresosTotales)}
+                      {bi('Ing', 'Inc')}: {fmt(consolidatedData.machIngresosTotales)}
                     </span>
                     <span className="text-[#C44545] font-semibold">
-                      Gas: {fmt(consolidatedData.machGastosTotales)}
+                      {bi('Gas', 'Exp')}: {fmt(consolidatedData.machGastosTotales)}
                     </span>
                   </div>
                 </div>
@@ -1794,16 +1976,15 @@ const ReportsViewInner: React.FC<Props> = ({
                 </span>
               </div>
 
-              {/* Propiedad */}
               <div className="px-4 py-3 flex items-center justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-bold text-[#26352D]">Propiedad</p>
+                  <p className="text-sm font-bold text-[#26352D]">{t('nav.property')}</p>
                   <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] mt-0.5">
                     <span className="text-[#24875B] font-semibold">
-                      Ing: {fmt(consolidatedData.propIngresosTotales)}
+                      {bi('Ing', 'Inc')}: {fmt(consolidatedData.propIngresosTotales)}
                     </span>
                     <span className="text-[#C44545] font-semibold">
-                      Gas: {fmt(consolidatedData.propGastosTotales)}
+                      {bi('Gas', 'Exp')}: {fmt(consolidatedData.propGastosTotales)}
                     </span>
                   </div>
                 </div>
@@ -1816,20 +1997,21 @@ const ReportsViewInner: React.FC<Props> = ({
                 </span>
               </div>
 
-              {/* Consolidado general */}
               <div
                 className={`px-4 py-3.5 flex items-center justify-between gap-2 ${getNetBgClass(
                   consolidatedData.resultadoConsolidado
                 )}`}
               >
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-extrabold text-[#26352D]">Consolidado general</p>
+                  <p className="text-sm font-extrabold text-[#26352D]">
+                    {bi('Consolidado general', 'General consolidated')}
+                  </p>
                   <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] mt-0.5">
                     <span className="text-[#24875B] font-bold">
-                      Ing: {fmt(consolidatedData.ingresosConsolidados)}
+                      {bi('Ing', 'Inc')}: {fmt(consolidatedData.ingresosConsolidados)}
                     </span>
                     <span className="text-[#C44545] font-bold">
-                      Gas: {fmt(consolidatedData.gastosConsolidados)}
+                      {bi('Gas', 'Exp')}: {fmt(consolidatedData.gastosConsolidados)}
                     </span>
                   </div>
                 </div>
@@ -1843,7 +2025,6 @@ const ReportsViewInner: React.FC<Props> = ({
               </div>
             </div>
 
-            {/* Botón discreto «Ver conciliación» (cerrado inicialmente; siempre visible al imprimir) */}
             <div className="no-print border-t border-[#EFF2EF] bg-[#FAFBF8]">
               <button
                 type="button"
@@ -1857,7 +2038,7 @@ const ReportsViewInner: React.FC<Props> = ({
                       consolidatedData.conciliacionExacta ? 'text-[#24875B]' : 'text-[#C44545]'
                     }`}
                   />
-                  <span>Ver conciliación</span>
+                  <span>{bi('Ver conciliación', 'View reconciliation')}</span>
                 </span>
                 {showReconciliation ? (
                   <ChevronUp className="h-4 w-4 text-[#7A8780]" />
@@ -1873,21 +2054,31 @@ const ReportsViewInner: React.FC<Props> = ({
               } px-4 py-3 border-t border-[#EFF2EF] bg-[#FAFBF8] space-y-2 text-xs text-[#526058] tabular-nums`}
             >
               <div className="flex items-center justify-between gap-2">
-                <span>Eliminación interna (Maquinarias ↔ Propiedad)</span>
+                <span>
+                  {bi(
+                    'Eliminación interna (Maquinarias ↔ Propiedad)',
+                    'Internal elimination (Machinery ↔ Property)'
+                  )}
+                </span>
                 <span className="font-semibold text-[#26352D] shrink-0">
                   −{fmt(consolidatedData.operacionesInternas)}
                 </span>
               </div>
               {consolidatedData.operacionesInternasCount > 0 && (
                 <div className="flex items-center justify-between gap-2">
-                  <span>Trabajos internos eliminados</span>
+                  <span>{bi('Trabajos internos eliminados', 'Internal jobs eliminated')}</span>
                   <span className="font-semibold text-[#26352D]">
                     {consolidatedData.operacionesInternasCount}
                   </span>
                 </div>
               )}
               <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-[#E6EBE7]">
-                <span>Suma de resultados (Maquinarias + Propiedad)</span>
+                <span>
+                  {bi(
+                    'Suma de resultados (Maquinarias + Propiedad)',
+                    'Sum of results (Machinery + Property)'
+                  )}
+                </span>
                 <strong className="text-[#26352D] shrink-0">
                   {fmt(consolidatedData.sumaResultadosModulos)}
                 </strong>
@@ -1895,14 +2086,12 @@ const ReportsViewInner: React.FC<Props> = ({
             </div>
           </div>
 
-          {/* 2. DETALLE CONSOLIDADO (ONLY IN DETALLADO MODE) */}
           {detailLevel === 'detallado' && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {/* Ingresos frente a terceros */}
               <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
                 <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#EAF5EE]/55 flex items-center justify-between">
                   <h4 className="text-xs sm:text-sm font-bold text-[#24875B]">
-                    Ingresos frente a terceros
+                    {bi('Ingresos frente a terceros', 'External income')}
                   </h4>
                   <span className="text-xs sm:text-sm font-extrabold text-[#24875B] tabular-nums">
                     {fmt(consolidatedData.ingresosConsolidados)}
@@ -1911,7 +2100,7 @@ const ReportsViewInner: React.FC<Props> = ({
                 <div className="divide-y divide-[#EFF2EF] text-xs sm:text-sm tabular-nums">
                   {consolidatedData.ingresosExtPorMaquina.map((r) => (
                     <div key={`ext_${r.key}`} className="px-4 py-2.5 flex items-center justify-between gap-2">
-                      <span className="text-[#26352D] truncate">Maquinarias · {r.label}</span>
+                      <span className="text-[#26352D] truncate">{t('nav.machinery')} · {r.label}</span>
                       <span className="font-semibold text-[#24875B] shrink-0">
                         {fmt(r.amount)}
                       </span>
@@ -1919,26 +2108,49 @@ const ReportsViewInner: React.FC<Props> = ({
                   ))}
                   {consolidatedData.ingresosPropPorLote.map((r) => (
                     <div key={`prop_${r.key}`} className="px-4 py-2.5 flex items-center justify-between gap-2">
-                      <span className="text-[#26352D] truncate">Propiedad · {r.label}</span>
+                      <span className="text-[#26352D] truncate">{t('nav.property')} · {r.label}</span>
                       <span className="font-semibold text-[#24875B] shrink-0">
                         {fmt(r.amount)}
                       </span>
                     </div>
                   ))}
+                  {consolidatedData.machIngresosIntereses > 0.004 && (
+                    <div className="px-4 py-2.5 flex items-center justify-between gap-2">
+                      <span className="text-[#26352D] truncate">
+                        {t('nav.machinery')} · {t('finances.interestIncome')}
+                      </span>
+                      <span className="font-semibold text-[#24875B] shrink-0">
+                        {fmt(consolidatedData.machIngresosIntereses)}
+                      </span>
+                    </div>
+                  )}
+                  {consolidatedData.propIngresosIntereses > 0.004 && (
+                    <div className="px-4 py-2.5 flex items-center justify-between gap-2">
+                      <span className="text-[#26352D] truncate">
+                        {t('nav.property')} · {t('finances.interestIncome')}
+                      </span>
+                      <span className="font-semibold text-[#24875B] shrink-0">
+                        {fmt(consolidatedData.propIngresosIntereses)}
+                      </span>
+                    </div>
+                  )}
                   {consolidatedData.ingresosExtPorMaquina.length === 0 &&
-                    consolidatedData.ingresosPropPorLote.length === 0 && (
+                    consolidatedData.ingresosPropPorLote.length === 0 &&
+                    consolidatedData.ingresosInteresesTotales <= 0.004 && (
                       <p className="px-4 py-5 text-center text-xs text-[#7A8780]">
-                        Sin ingresos frente a terceros en esta campaña.
+                        {bi(
+                          'Sin ingresos frente a terceros en esta campaña.',
+                          'No external income in this campaign.'
+                        )}
                       </p>
                     )}
                 </div>
               </div>
 
-              {/* Gastos frente a terceros */}
               <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
                 <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#FCECEC]/55 flex items-center justify-between">
                   <h4 className="text-xs sm:text-sm font-bold text-[#C44545]">
-                    Gastos frente a terceros
+                    {bi('Gastos frente a terceros', 'External expenses')}
                   </h4>
                   <span className="text-xs sm:text-sm font-extrabold text-[#C44545] tabular-nums">
                     {fmt(consolidatedData.gastosConsolidados)}
@@ -1947,7 +2159,7 @@ const ReportsViewInner: React.FC<Props> = ({
                 <div className="divide-y divide-[#EFF2EF] text-xs sm:text-sm tabular-nums">
                   {consolidatedData.gastosMaqPorConcepto.map((r) => (
                     <div key={`gm_${r.key}`} className="px-4 py-2.5 flex items-center justify-between gap-2">
-                      <span className="text-[#26352D] truncate">Maquinarias · {r.label}</span>
+                      <span className="text-[#26352D] truncate">{t('nav.machinery')} · {r.label}</span>
                       <span className="font-semibold text-[#C44545] shrink-0">
                         {fmt(r.amount)}
                       </span>
@@ -1955,7 +2167,7 @@ const ReportsViewInner: React.FC<Props> = ({
                   ))}
                   {consolidatedData.gastosPropPorConcepto.map((r) => (
                     <div key={`gp_${r.key}`} className="px-4 py-2.5 flex items-center justify-between gap-2">
-                      <span className="text-[#26352D] truncate">Propiedad · {r.label}</span>
+                      <span className="text-[#26352D] truncate">{t('nav.property')} · {r.label}</span>
                       <span className="font-semibold text-[#C44545] shrink-0">
                         {fmt(r.amount)}
                       </span>
@@ -1964,7 +2176,10 @@ const ReportsViewInner: React.FC<Props> = ({
                   {consolidatedData.gastosMaqPorConcepto.length === 0 &&
                     consolidatedData.gastosPropPorConcepto.length === 0 && (
                       <p className="px-4 py-5 text-center text-xs text-[#7A8780]">
-                        Sin gastos frente a terceros en esta campaña.
+                        {bi(
+                          'Sin gastos frente a terceros en esta campaña.',
+                          'No external expenses in this campaign.'
+                        )}
                       </p>
                     )}
                 </div>

@@ -1,25 +1,27 @@
 import React, { useState } from 'react';
 import { Lock, Eye, EyeOff, RefreshCw, AlertCircle } from 'lucide-react';
 import { BackendError, BackendErrorKind, loginWithUserPassword } from '../services/backend';
+import { useI18n } from '../services/i18n';
 import { UserSession } from '../types';
 
 interface Props {
   onLoginSuccess: (session: UserSession) => void;
 }
 
-const ERROR_TITLES: Record<BackendErrorKind, string> = {
-  auth: 'Error de acceso',
-  network: 'Error de conexión',
-  server: 'Error del servidor',
-  invalid_response: 'Respuesta inválida del servidor',
-  unknown: 'Error al iniciar sesión',
-};
-
 export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
+  const { t, translateError } = useI18n();
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<{ title: string; message: string } | null>(null);
+  const [error, setError] = useState<{ kind: BackendErrorKind; message: string } | null>(null);
+
+  const errorTitles: Record<BackendErrorKind, string> = {
+    auth: t('login.error.auth'),
+    network: t('login.error.network'),
+    server: t('login.error.server'),
+    invalid_response: t('login.error.invalid_response'),
+    unknown: t('login.error.unknown'),
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -28,8 +30,8 @@ export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
     const secret = String(password).trim();
     if (!secret) {
       setError({
-        title: ERROR_TITLES.auth,
-        message: 'Por favor ingresa la contraseña.',
+        kind: 'auth',
+        message: t('login.emptyPassword'),
       });
       return;
     }
@@ -41,16 +43,16 @@ export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
     } catch (err: unknown) {
       if (err instanceof BackendError) {
         setError({
-          title: ERROR_TITLES[err.kind] || ERROR_TITLES.unknown,
+          kind: err.kind || 'unknown',
           message: err.message,
         });
       } else {
         const errorMsg =
           err instanceof Error && err.message
             ? err.message
-            : 'No se pudo completar el inicio de sesión. Intenta nuevamente.';
+            : t('login.defaultError');
         setError({
-          title: ERROR_TITLES.unknown,
+          kind: 'unknown',
           message: errorMsg,
         });
       }
@@ -64,10 +66,10 @@ export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
       <div className="w-full max-w-sm bg-white rounded-2xl p-6 sm:p-8 shadow-sm border border-slate-200 my-auto">
         <div className="text-center mb-6">
           <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900">
-            Maquinarias y Propiedad
+            {t('app.name')}
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Gestión agrícola
+            {t('app.tagline')}
           </p>
         </div>
 
@@ -75,8 +77,8 @@ export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
           <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-start gap-2">
             <AlertCircle className="h-4 w-4 shrink-0 text-red-600 mt-0.5" />
             <div className="flex-1">
-              <p className="font-semibold text-red-900">{error.title}</p>
-              <p className="mt-0.5 text-stone-800">{error.message}</p>
+              <p className="font-semibold text-red-900">{errorTitles[error.kind]}</p>
+              <p className="mt-0.5 text-stone-800">{translateError(error.message)}</p>
             </div>
           </div>
         )}
@@ -84,7 +86,7 @@ export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-              Contraseña
+              {t('login.passwordLabel')}
             </label>
             <div className="relative">
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
@@ -94,7 +96,7 @@ export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
                 type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Ingrese contraseña"
+                placeholder={t('login.passwordPlaceholder')}
                 autoComplete="current-password"
                 autoCapitalize="none"
                 autoCorrect="off"
@@ -107,7 +109,7 @@ export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
                 className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
-                title={showPassword ? 'Ocultar contraseña' : 'Ver contraseña'}
+                title={showPassword ? t('login.hidePassword') : t('login.showPassword')}
               >
                 {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
@@ -122,10 +124,10 @@ export const LoginView: React.FC<Props> = ({ onLoginSuccess }) => {
             {loading ? (
               <>
                 <RefreshCw className="h-4 w-4 animate-spin text-white" />
-                <span>Ingresando...</span>
+                <span>{t('login.submitting')}</span>
               </>
             ) : (
-              <span>Ingresar</span>
+              <span>{t('login.submit')}</span>
             )}
           </button>
         </form>

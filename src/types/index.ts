@@ -69,7 +69,13 @@ export interface MachineryJob {
   trabajoTipoId?: string;
   trabajoNombre?: string;
   trabajoIcono?: string;
+  clienteId?: string;
   cliente?: string;
+  clientePendiente?: boolean;
+  plazoDias?: number;
+  fechaVencimiento?: string;
+  aplicarInteres?: boolean;
+  tasaInteresMensual?: number;
   loteId?: string;
   loteNombre?: string;
   cantidad: number;
@@ -120,6 +126,7 @@ export interface Income {
   maquinariaNombre?: string;
   loteId?: string;
   loteNombre?: string;
+  itemId?: string;
   concepto: string;
   icono?: string;
   cantidad: number;
@@ -210,7 +217,7 @@ export interface BackendHealthResponse {
   timestamp?: string;
 }
 
-export type CobroEstado = 'PENDIENTE' | 'PARCIAL' | 'PAGADO';
+export type CobroEstado = 'PENDIENTE' | 'PARCIAL' | 'PAGADO' | 'COBRADO';
 
 export interface CobroPago {
   id: string;
@@ -314,3 +321,268 @@ export interface ExpenseAllocationGroup {
 }
 
 export type MainView = 'inicio' | 'maquinarias' | 'propiedad' | 'administracion';
+
+// -------------------------------------------------------------
+// Customers Catalog (Administración -> Clientes)
+// -------------------------------------------------------------
+export interface Customer {
+  id: string;
+  nombre: string;
+  telefono?: string;
+  direccion?: string;
+  activo: boolean;
+  creadoEn?: string;
+  actualizadoEn?: string;
+}
+
+// -------------------------------------------------------------
+// Payment Settings (Administración -> Configuración de cobros)
+// -------------------------------------------------------------
+export interface PaymentSettings {
+  plazoDiasPredeterminado: number | null;
+  aplicarInteresPorDefecto: boolean;
+  porcentajeInteresMensual: number | null;
+  configurado: boolean;
+  actualizadoEn?: string;
+}
+
+// -------------------------------------------------------------
+// Harvest Sales (Propiedad -> Ventas de cosecha, Admin-only)
+// -------------------------------------------------------------
+export type HarvestSaleStatus =
+  | 'COMPRADOR_Y_PRECIO_PENDIENTES'
+  | 'COMPRADOR_PENDIENTE'
+  | 'PRECIO_PENDIENTE'
+  | 'VENTA_COMPLETA';
+
+export interface HarvestSale {
+  id: string;
+  cosechaId: string;
+  fecha: string;
+  campanaId: string;
+  campanaNombre?: string;
+  loteId: string;
+  loteNombre?: string;
+  producto: string;
+  cantidad: number;
+  unidad: string;
+  clienteId?: string;
+  clienteNombre?: string;
+  compradorPendiente: boolean;
+  precioUnitario: number;
+  precioPendiente: boolean;
+  moneda: Currency;
+  tc: number;
+  importeTotal: number;
+  plazoDias?: number;
+  fechaVencimiento?: string;
+  fechaCompletado?: string;
+  aplicarInteres: boolean;
+  tasaInteresMensual: number;
+  observacion?: string;
+  movimientoId?: string;
+  estado: HarvestSaleStatus;
+  estadoComprador: 'ASIGNADO' | 'PENDIENTE';
+  estadoPrecio: 'ASIGNADO' | 'PENDIENTE';
+  anulada?: boolean;
+  creadoPor?: string;
+  creadoEn?: string;
+  actualizadoEn?: string;
+}
+
+// -------------------------------------------------------------
+// Centralized Accounts Receivable (Administración -> Cuentas por cobrar)
+// -------------------------------------------------------------
+export type ArDebtType = 'TRABAJO' | 'VENTA_COSECHA';
+
+export interface ArDebtApplicationItem {
+  id: string;
+  cobroId: string;
+  deudaTipo: ArDebtType;
+  deudaId: string;
+  clienteId?: string;
+  moduloOrigen: 'MAQUINARIAS' | 'PROPIEDAD';
+  campanaOrigenId?: string;
+  loteOrigenId?: string;
+  fechaCobro: string;
+  monedaDeuda: Currency;
+  monedaPago: Currency;
+  tcAplicado: number;
+  importeOriginalPagado: number;
+  importeEquivalenteDeuda: number;
+  saldoCapitalAnterior: number;
+  interesAcumuladoAnterior: number;
+  interesPagado: number;
+  capitalPagado: number;
+  saldoCapitalRestante: number;
+  interesRestante: number;
+  movimientoInteresId?: string;
+  anulado?: boolean;
+  creadoPor?: string;
+  creadoEn?: string;
+}
+
+export interface ArDebt {
+  id: string;
+  deudaTipo: ArDebtType;
+  deudaId: string;
+  origen: 'MAQUINARIAS' | 'PROPIEDAD';
+  clienteId?: string;
+  clienteNombre: string;
+  clientePendiente: boolean;
+  fecha: string;
+  concepto: string;
+  campanaId?: string;
+  campanaNombre?: string;
+  loteId?: string;
+  loteNombre?: string;
+  maquinaId?: string;
+  maquinaNombre?: string;
+  cantidad: number;
+  unidad: string;
+  precioUnitario: number;
+  moneda: Currency;
+  tcHistorico: number;
+  importeOriginal: number;
+  plazoDias: number;
+  fechaVencimiento?: string;
+  aplicarInteres: boolean;
+  tasaInteresMensual: number;
+  pagosAnteriores: number;
+  pagosCapitalAnteriores: number;
+  pagosInteresAnteriores: number;
+  capitalPendiente: number;
+  interesAcumulado: number;
+  totalPendiente: number;
+  diasAtraso: number;
+  vencida: boolean;
+  estado: CobroEstado;
+  observacion?: string;
+  aplicaciones: ArDebtApplicationItem[];
+}
+
+export interface ArCurrencyTotals {
+  capitalPendiente: number;
+  interesAcumulado: number;
+  totalPendiente: number;
+}
+
+export interface ArCustomerSummary {
+  clienteId: string;
+  clienteNombre: string;
+  telefono?: string;
+  direccion?: string;
+  activo: boolean;
+  registrosPendientes: number;
+  registrosVencidos: number;
+  usd: ArCurrencyTotals;
+  bob: ArCurrencyTotals;
+  deudas: ArDebt[];
+}
+
+export interface ArPaymentRecord {
+  id: string;
+  cobroId: string;
+  fecha: string;
+  clienteId?: string;
+  clienteNombre: string;
+  monedaPago: Currency;
+  importeOriginalPagado: number;
+  tcAplicado: number;
+  tipoPago: 'PARCIAL' | 'TOTAL';
+  capitalTotalAplicado: number;
+  interesTotalAplicado: number;
+  monedaTotalesAplicados?: Currency;
+  capitalAplicadoUsd?: number;
+  interesAplicadoUsd?: number;
+  capitalAplicadoBob?: number;
+  interesAplicadoBob?: number;
+  notaCobroNumero?: string;
+  observacion?: string;
+  anulado?: boolean;
+  creadoPor?: string;
+  creadoEn?: string;
+  aplicaciones: ArDebtApplicationItem[];
+}
+
+export interface DebitNoteLine {
+  deudaTipo: ArDebtType;
+  deudaId: string;
+  fecha: string;
+  concepto: string;
+  origen: 'MAQUINARIAS' | 'PROPIEDAD';
+  campanaNombre?: string;
+  loteNombre?: string;
+  maquinaNombre?: string;
+  cantidad: number;
+  unidad: string;
+  precioUnitario: number;
+  fechaVencimiento?: string;
+  diasAtraso: number;
+  moneda: Currency;
+  importeOriginal?: number;
+  pagosAnteriores?: number;
+  saldoPendiente: number;
+  interes: number;
+  totalPorCobrar: number;
+}
+
+export interface DebitNoteRecord {
+  id: string;
+  numero: string;
+  fecha: string;
+  clienteId: string;
+  clienteNombre: string;
+  clienteTelefono?: string;
+  clienteDireccion?: string;
+  totalUsd: number;
+  totalBob: number;
+  items: DebitNoteLine[];
+  observacion?: string;
+  creadoPor?: string;
+  creadoEn?: string;
+}
+
+export interface PaymentReceiptLine {
+  deudaTipo: ArDebtType;
+  deudaId: string;
+  fechaDeuda?: string;
+  concepto: string;
+  origen: 'MAQUINARIAS' | 'PROPIEDAD';
+  campanaNombre?: string;
+  loteNombre?: string;
+  maquinaNombre?: string;
+  monedaDeuda: Currency;
+  importeAnterior: number;
+  capitalPagado: number;
+  interesPagado: number;
+  totalPagado: number;
+  saldoRestante: number;
+  monedaPago: Currency;
+  importeOriginalPagado: number;
+  tcAplicado: number;
+  equivalenteDescontado: number;
+}
+
+export interface PaymentReceiptRecord {
+  id: string;
+  numero: string;
+  cobroId: string;
+  fecha: string;
+  clienteId: string;
+  clienteNombre: string;
+  clienteTelefono?: string;
+  clienteDireccion?: string;
+  tipoPago: 'PARCIAL' | 'TOTAL';
+  monedaPago: Currency;
+  importeOriginalPagado: number;
+  tcAplicado: number;
+  totalAplicadoUsd: number;
+  totalAplicadoBob: number;
+  items: PaymentReceiptLine[];
+  observacion?: string;
+  anulado?: boolean;
+  creadoPor?: string;
+  creadoEn?: string;
+}
+

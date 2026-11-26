@@ -1,12 +1,14 @@
 import React, { useState } from 'react';
 import { Download, RefreshCw, X } from 'lucide-react';
 import { useRegisterSW } from 'virtual:pwa-register/react';
+import { useI18n } from '../services/i18n';
 
 interface Props {
   hasUnsavedChanges?: boolean;
 }
 
 export const PWAUpdateNotification: React.FC<Props> = ({ hasUnsavedChanges = false }) => {
+  const { t, bi } = useI18n();
   const [dismissedThisSession, setDismissedThisSession] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
@@ -17,14 +19,13 @@ export const PWAUpdateNotification: React.FC<Props> = ({ hasUnsavedChanges = fal
   } = useRegisterSW({
     onRegistered(r) {
       if (r) {
-        // Periodic check for SW updates every 30 minutes
         setInterval(() => {
           r.update().catch(() => {});
         }, 30 * 60 * 1000);
       }
     },
     onRegisterError(error) {
-      console.warn('[PWA] Error en registro de Service Worker:', error);
+      console.warn('[PWA] Service Worker registration error:', error);
     },
   });
 
@@ -33,7 +34,10 @@ export const PWAUpdateNotification: React.FC<Props> = ({ hasUnsavedChanges = fal
 
     if (hasUnsavedChanges) {
       const confirmLeave = window.confirm(
-        'Tienes un formulario con cambios sin guardar. ¿Deseas actualizar de todos modos y perder los cambios no guardados?'
+        bi(
+          'Tienes un formulario con cambios sin guardar. ¿Deseas actualizar de todos modos y perder los cambios no guardados?',
+          'You have unsaved form changes. Do you want to update anyway and discard unsaved changes?'
+        )
       );
       if (!confirmLeave) {
         return;
@@ -46,9 +50,9 @@ export const PWAUpdateNotification: React.FC<Props> = ({ hasUnsavedChanges = fal
     try {
       await updateServiceWorker(true);
     } catch (err) {
-      console.error('[PWA] Error durante la actualización:', err);
+      console.error('[PWA] Update error:', err);
       setIsUpdating(false);
-      setUpdateError('No se pudo actualizar. Intenta de nuevo.');
+      setUpdateError(bi('No se pudo actualizar. Intenta de nuevo.', 'Update failed. Please try again.'));
     }
   };
 
@@ -63,7 +67,6 @@ export const PWAUpdateNotification: React.FC<Props> = ({ hasUnsavedChanges = fal
   return (
     <div className="shrink-0 w-full bg-emerald-800 text-white border-b border-emerald-950 shadow-md relative z-50 transition-all duration-300">
       <div className="max-w-5xl mx-auto px-3 sm:px-6 py-2.5 sm:py-3 flex flex-col sm:flex-row items-center justify-between gap-2.5 sm:gap-4">
-        {/* Left info section */}
         <div className="flex items-center gap-2.5 min-w-0 w-full sm:w-auto">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-700/90 border border-emerald-600/60 text-white">
             {isUpdating ? (
@@ -75,7 +78,7 @@ export const PWAUpdateNotification: React.FC<Props> = ({ hasUnsavedChanges = fal
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs sm:text-sm font-bold tracking-tight text-white">
-                Nueva versión disponible
+                {t('pwa.updateTitle')}
               </span>
               {updateError && (
                 <span className="text-[10px] font-bold bg-red-900/90 text-red-100 px-2 py-0.5 rounded border border-red-700">
@@ -84,12 +87,14 @@ export const PWAUpdateNotification: React.FC<Props> = ({ hasUnsavedChanges = fal
               )}
             </div>
             <p className="text-[11px] sm:text-xs text-emerald-100/90 truncate">
-              Actualiza para utilizar la última versión.
+              {bi(
+                'Actualiza para utilizar la última versión.',
+                'Update now to use the latest version.'
+              )}
             </p>
           </div>
         </div>
 
-        {/* Action section */}
         <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto justify-end">
           <button
             type="button"
@@ -104,12 +109,12 @@ export const PWAUpdateNotification: React.FC<Props> = ({ hasUnsavedChanges = fal
             {isUpdating ? (
               <>
                 <RefreshCw className="h-3.5 w-3.5 animate-spin text-emerald-300" />
-                <span>Actualizando...</span>
+                <span>{t('common.updating')}</span>
               </>
             ) : (
               <>
                 <Download className="h-3.5 w-3.5 text-emerald-900" />
-                <span>{updateError ? 'Reintentar' : 'Actualizar'}</span>
+                <span>{updateError ? t('sync.retry') : t('pwa.updateBtn')}</span>
               </>
             )}
           </button>
@@ -119,7 +124,7 @@ export const PWAUpdateNotification: React.FC<Props> = ({ hasUnsavedChanges = fal
             onClick={handleDismiss}
             disabled={isUpdating}
             className="p-1.5 text-emerald-200 hover:text-white hover:bg-emerald-700/60 rounded-md transition cursor-pointer shrink-0"
-            title="Descartar por esta sesión"
+            title={bi('Descartar por esta sesión', 'Dismiss for this session')}
           >
             <X className="h-4 w-4" />
           </button>

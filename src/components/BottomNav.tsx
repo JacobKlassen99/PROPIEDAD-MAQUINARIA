@@ -6,6 +6,7 @@ import {
   Settings,
 } from 'lucide-react';
 import { MainView, UserSession } from '../types';
+import { useI18n } from '../services/i18n';
 
 interface BottomNavProps {
   currentView: MainView;
@@ -17,32 +18,34 @@ export const BottomNav: React.FC<BottomNavProps> = ({
   currentView,
   onNavigate,
 }) => {
+  const { t } = useI18n();
+
   const navItems: { id: MainView; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     {
       id: 'inicio',
-      label: 'Inicio',
+      label: t('nav.home'),
       icon: House,
     },
     {
       id: 'maquinarias',
-      label: 'Maquinarias',
+      label: t('nav.machinery'),
       icon: Tractor,
     },
     {
       id: 'propiedad',
-      label: 'Propiedad',
+      label: t('nav.property'),
       icon: Sprout,
     },
     {
       id: 'administracion',
-      label: 'Administración',
+      label: t('nav.admin'),
       icon: Settings,
     },
   ];
 
   return (
     <nav
-      aria-label="Navegación principal"
+      aria-label={t('nav.mainAria')}
       className="no-print shrink-0 z-40 w-full bg-white border-t border-slate-200"
       style={{
         paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 0.25rem)',

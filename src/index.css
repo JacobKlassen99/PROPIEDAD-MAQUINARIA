@@ -69,7 +69,63 @@
   margin: 14mm;
 }
 
+@page a4-landscape {
+  size: A4 landscape;
+  margin: 11mm;
+}
+
+@page letter-doc {
+  size: letter portrait;
+  margin: 10mm;
+}
+
 @media print {
+  body.print-a4-landscape .print-report-root {
+    page: a4-landscape;
+  }
+
+  body.print-letter-doc .print-doc-root {
+    page: letter-doc;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  body.print-letter-doc .print-doc-root * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  body.print-letter-doc .print-doc-root table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    page-break-inside: auto;
+  }
+
+  body.print-letter-doc .print-doc-root thead {
+    display: table-header-group;
+  }
+
+  body.print-letter-doc .print-doc-root tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    page-break-after: auto;
+  }
+
+  body.print-letter-doc .print-doc-totals,
+  body.print-letter-doc .print-doc-footer {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
   html,
   body,
   #root,

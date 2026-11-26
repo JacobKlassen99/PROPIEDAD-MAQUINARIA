@@ -23,7 +23,11 @@ const SHEET_SCHEMAS = {
   Movimientos: ['id', 'fecha', 'campanaId', 'modulo', 'clase', 'itemId', 'descripcion', 'loteId', 'maquinaId', 'cantidad', 'unidad', 'precioUnitario', 'importe', 'moneda', 'tc', 'trabajoId', 'creadoPor', 'creadoEn', 'actualizadoEn'],
   Activos: ['id', 'tipo', 'referenciaId', 'nombre', 'valorInicial', 'moneda', 'tc', 'fecha', 'observacion', 'activo'],
   Mejoras: ['id', 'activoId', 'fecha', 'descripcion', 'importe', 'moneda', 'tc', 'observacion', 'creadoPor', 'creadoEn'],
-  Auditoria: ['id', 'fecha', 'usuarioId', 'accion', 'entidad', 'entidadId', 'detalle']
+  Auditoria: ['id', 'fecha', 'usuarioId', 'accion', 'entidad', 'entidadId', 'detalle'],
+  Clientes: ['id', 'nombre', 'telefono', 'direccion', 'activo', 'creadoEn', 'actualizadoEn'],
+  CobroAplicaciones: ['id', 'cobroId', 'deudaTipo', 'deudaId', 'clienteId', 'moduloOrigen', 'campanaOrigenId', 'loteOrigenId', 'fechaCobro', 'monedaDeuda', 'monedaPago', 'tcAplicado', 'importeOriginalPagado', 'importeEquivalenteDeuda', 'saldoCapitalAnterior', 'interesAcumuladoAnterior', 'interesPagado', 'capitalPagado', 'saldoCapitalRestante', 'interesRestante', 'movimientoInteresId', 'anulado', 'creadoPor', 'creadoEn'],
+  NotasDebito: ['id', 'numero', 'fecha', 'clienteId', 'clienteNombre', 'clienteTelefono', 'clienteDireccion', 'totalUsd', 'totalBob', 'snapshotJson', 'observacion', 'creadoPor', 'creadoEn', 'idempotencyKey'],
+  NotasCobro: ['id', 'numero', 'cobroId', 'fecha', 'clienteId', 'clienteNombre', 'clienteTelefono', 'clienteDireccion', 'tipoPago', 'monedaPago', 'importeOriginalPagado', 'tcAplicado', 'totalAplicadoUsd', 'totalAplicadoBob', 'snapshotJson', 'observacion', 'anulado', 'creadoPor', 'creadoEn']
 };
 
 // -------------------------------------------------------------
@@ -165,7 +169,27 @@ function dispatch_(p) {
     'asset.save',
     'report.get',
     'reports.get',
-    'financial.reports'
+    'financial.reports',
+    'customer.create',
+    'customer.update',
+    'customer.toggle',
+    'customer.delete',
+    'paymentSettings.save',
+    'harvestSale.list',
+    'harvestSale.create',
+    'harvestSale.update',
+    'harvestSale.cancel',
+    'harvest.price',
+    'ar.summary',
+    'ar.customer',
+    'ar.debt.assignCustomer',
+    'ar.payment.register',
+    'ar.payment.cancel',
+    'ar.debitNote.create',
+    'ar.documents',
+    'cobros.list',
+    'cobros.estado',
+    'cobros.registrar'
   ];
 
   if (adminActions.indexOf(action) !== -1) {
@@ -236,13 +260,57 @@ function handleAction_(action, payload, userSession, adminSession) {
     case 'expense.allocate': return gastosDistribuirLotes_2026(payload, userSession);
     case 'expense.allocations': return gastosDistribucionesListar_2026(payload);
 
-    // --- Cuentas por cobrar de servicios externos ---
+    // --- Cuentas por cobrar de servicios externos (compatibilidad heredada) ---
     case 'cobros.list':
       return cobrosListar_2026(payload);
     case 'cobros.registrar':
       return cobrosRegistrar_2026(payload, userSession);
     case 'cobros.estado':
       return cobrosEstado_2026(payload.trabajoId || payload.id);
+
+    // --- Catálogo de Clientes ---
+    case 'customer.list':
+      return clientesListar_2026(payload);
+    case 'customer.create':
+      return clientesCrear_2026(payload, userSession);
+    case 'customer.update':
+      return clientesActualizar_2026(payload, userSession);
+    case 'customer.toggle':
+      return clientesToggle_2026(payload, userSession);
+    case 'customer.delete':
+      return clientesEliminar_2026(payload, userSession);
+
+    // --- Configuración de Cobros e Interés ---
+    case 'paymentSettings.get':
+      return configCobrosObtener_2026();
+    case 'paymentSettings.save':
+      return configCobrosGuardar_2026(payload, userSession);
+
+    // --- Ventas de Cosecha (Admin) ---
+    case 'harvestSale.list':
+      return ventasCosechaListar_2026(payload);
+    case 'harvestSale.create':
+      return ventasCosechaCrear_2026(payload, userSession);
+    case 'harvestSale.update':
+      return ventasCosechaActualizar_2026(payload, userSession);
+    case 'harvestSale.cancel':
+      return ventasCosechaAnular_2026(payload, userSession);
+
+    // --- Cuentas por Cobrar Centralizadas, Cobros y Documentos (Admin) ---
+    case 'ar.summary':
+      return arResumen_2026(payload);
+    case 'ar.customer':
+      return arDetalleCliente_2026(payload);
+    case 'ar.debt.assignCustomer':
+      return arAsignarClienteDeuda_2026(payload, userSession);
+    case 'ar.payment.register':
+      return arRegistrarCobro_2026(payload, userSession);
+    case 'ar.payment.cancel':
+      return arAnularCobro_2026(payload, userSession);
+    case 'ar.debitNote.create':
+      return arCrearNotaDebito_2026(payload, userSession);
+    case 'ar.documents':
+      return arListarDocumentos_2026(payload);
 
     case 'machineType.list':
       return handleMachineTypeList_2026();
@@ -1328,10 +1396,20 @@ function handleDeleteMachine(id, userSession) {
       return { ok: false, error: 'Coincidencia ambigua: existen múltiples maquinarias con el ID "' + idTrim + '".' };
     }
 
-    if (getSheetDataAsObjects('Trabajos').some(t=>String(t.maquinaId)===idTrim) ||
-        getSheetDataAsObjects('Movimientos').some(t=>String(t.maquinaId)===idTrim) ||
-        getSheetDataAsObjects('TrabajosMaquinaria').some(t=>String(t.maquinaId)===idTrim)) {
-      return {ok:false,error:'Esta máquina tiene trabajos o implementos asociados. Desactívela en lugar de eliminarla.'};
+    const nameCol = map['nombre'];
+    const machineName = nameCol !== undefined ? String(rows[matches[0] - 1][nameCol] || '').trim() : '';
+
+    if (getSheetDataAsObjects('Trabajos').some(t => String(t.maquinaId || '').trim() === idTrim)) {
+      return { ok: false, error: 'No se puede eliminar esta máquina porque tiene trabajos históricos registrados. Desactívela en lugar de eliminarla.' };
+    }
+    if (getSheetDataAsObjects('Movimientos').some(t => String(t.maquinaId || '').trim() === idTrim)) {
+      return { ok: false, error: 'No se puede eliminar esta máquina porque tiene movimientos registrados. Desactívela en lugar de eliminarla.' };
+    }
+    if (getSheetDataAsObjects('TrabajosMaquinaria').some(t => String(t.maquinaId || '').trim() === idTrim)) {
+      return { ok: false, error: 'No se puede eliminar esta máquina porque tiene implementos asociados. Desactívela en lugar de eliminarla.' };
+    }
+    if (tieneRegistroPatrimonialActivo_(idTrim, machineName, 'MAQUINA')) {
+      return { ok: false, error: 'No se puede eliminar esta máquina porque tiene registros patrimoniales o mejoras vinculadas. Desactívela en lugar de eliminarla.' };
     }
     sheet.deleteRow(matches[0]);
     SpreadsheetApp.flush();
@@ -1340,6 +1418,39 @@ function handleDeleteMachine(id, userSession) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function tieneRegistroPatrimonialActivo_(referenciaId, nombre, tipoFiltro) {
+  if (!findSheetIgnoreCase_('Activos')) return false;
+  const idTrim = String(referenciaId || '').trim();
+  const nameLower = String(nombre || '').trim().toLowerCase();
+  const activos = getSheetDataAsObjects('Activos');
+  const mejoras = findSheetIgnoreCase_('Mejoras') ? getSheetDataAsObjects('Mejoras') : [];
+  const mejorasCountByActivo = {};
+  for (let i = 0; i < mejoras.length; i++) {
+    const aid = String(mejoras[i].activoId || '').trim();
+    if (aid) mejorasCountByActivo[aid] = (mejorasCountByActivo[aid] || 0) + 1;
+  }
+  return activos.some(function (a) {
+    const isAct = a.activo !== false && String(a.activo).toLowerCase() !== 'false';
+    if (!isAct) return false;
+    const tipo = String(a.tipo || '').trim().toUpperCase();
+    if (tipoFiltro === 'IMPLEMENTO') {
+      if (tipo !== 'IMPLEMENTO') return false;
+    } else if (tipoFiltro === 'MAQUINA') {
+      if (tipo === 'IMPLEMENTO' || tipo === 'LOTE') return false;
+    }
+    const aId = String(a.id || '').trim();
+    const refId = String(a.referenciaId || '').trim();
+    const aName = String(a.nombre || '').trim().toLowerCase();
+    const matchesEntity =
+      (idTrim && (refId === idTrim || aId === idTrim)) ||
+      (nameLower && aName === nameLower);
+    if (!matchesEntity) return false;
+    const valIni = Number(a.valorInicial) || 0;
+    const mejorasCnt = mejorasCountByActivo[aId] || 0;
+    return valIni > 0 || mejorasCnt > 0;
+  });
 }
 
 // -------------------------------------------------------------
@@ -1451,30 +1562,68 @@ function handleDeleteMachineJobType(id, userSession) {
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
+    const idTrim = String(id || '').trim();
+    if (!idTrim) {
+      return { ok: false, error: 'Se requiere ID para eliminar el implemento.' };
+    }
+
     const sheet = findSheetIgnoreCase_('TrabajosMaquinaria');
-    if (!sheet) return { ok: true };
+    if (!sheet) {
+      return { ok: false, error: 'No se encontró la hoja de implementos (TrabajosMaquinaria).' };
+    }
 
     const rows = sheet.getDataRange().getValues();
-    if (rows.length < 2) return { ok: true };
+    if (rows.length < 2) {
+      return { ok: false, error: 'Implemento no encontrado con ID: ' + idTrim };
+    }
 
     const map = getHeaderIndexMap_(rows[0]);
     const idCol = map['id'];
     let foundIdx = -1;
 
     for (let i = 1; i < rows.length; i++) {
-      if (String(rows[i][idCol]) === String(id)) {
+      if (String(rows[i][idCol] || '').trim() === idTrim) {
         foundIdx = i + 1;
         break;
       }
     }
 
-    if (foundIdx !== -1) {
-      if (getSheetDataAsObjects('Trabajos').some(t=>String(t.implementoId || t.trabajoTipoId || '')===String(id))) {
-        return {ok:false,error:'Implemento utilizado en trabajos. Desactívelo en lugar de eliminarlo.'};
-      }
-      sheet.deleteRow(foundIdx);
-      logAudit_(userSession?.usuarioId, 'DELETE', 'TrabajosMaquinaria', id, 'Trabajo de maquinaria eliminado');
+    if (foundIdx === -1) {
+      return { ok: false, error: 'Implemento no encontrado con ID: ' + idTrim };
     }
+
+    const nameCol = map['nombre'];
+    const maqCol = map['maquinaid'];
+    const implName = nameCol !== undefined ? String(rows[foundIdx - 1][nameCol] || '').trim() : '';
+    const implMaqId = maqCol !== undefined ? String(rows[foundIdx - 1][maqCol] || '').trim() : '';
+    const implNameLower = implName.toLowerCase();
+
+    const hasLinkedJobs = getSheetDataAsObjects('Trabajos').some(function (t) {
+      const refImplId = String(t.implementoId || t.trabajoTipoId || '').trim();
+      if (refImplId === idTrim) return true;
+      if (implNameLower && String(t.trabajoNombre || '').trim().toLowerCase() === implNameLower) {
+        if (!implMaqId || String(t.maquinaId || '').trim() === implMaqId) return true;
+      }
+      return false;
+    });
+    if (hasLinkedJobs) {
+      return { ok: false, error: 'No se puede eliminar este implemento porque tiene trabajos históricos registrados. Puede mantenerlo inactivo.' };
+    }
+
+    const hasLinkedMovements = getSheetDataAsObjects('Movimientos').some(function (m) {
+      return String(m.implementoId || '').trim() === idTrim;
+    });
+    if (hasLinkedMovements) {
+      return { ok: false, error: 'No se puede eliminar este implemento porque tiene movimientos registrados. Puede mantenerlo inactivo.' };
+    }
+
+    if (tieneRegistroPatrimonialActivo_(idTrim, implName, 'IMPLEMENTO')) {
+      return { ok: false, error: 'No se puede eliminar este implemento porque tiene registros patrimoniales o mejoras vinculadas. Puede mantenerlo inactivo.' };
+    }
+
+    sheet.deleteRow(foundIdx);
+    SpreadsheetApp.flush();
+    logAudit_(userSession?.usuarioId, 'DELETE', 'TrabajosMaquinaria', idTrim, 'Implemento eliminado: ' + implName);
     return { ok: true };
   } finally {
     lock.releaseLock();
@@ -1657,14 +1806,32 @@ function handleGetMachineryJobs(campanaId) {
   if (campanaId) {
     jobs = jobs.filter(j => String(j.campanaId) === String(campanaId));
   }
-  const mapped = jobs.map(j => ({
-    ...j,
-    tipoTrabajo: String(j.destino || '').toUpperCase() === 'PROPIEDAD' ? 'propiedad' : 'tercero',
-    maquinariaId: j.maquinaId,
-    tarifa: Number(j.precioUnitario) || 0,
-    total: Number(j.importe) || 0,
-    tipoCambio: Number(j.tc) || 0
-  }));
+  const customerMap = {};
+  const clientesSheet = findSheetIgnoreCase_('Clientes');
+  if (clientesSheet) {
+    getSheetDataAsObjects('Clientes').forEach(c => {
+      if (c && c.id) customerMap[String(c.id).trim()] = String(c.nombre || '').trim();
+    });
+  }
+  const mapped = jobs.map(j => {
+    const cId = String(j.clienteId || '').trim();
+    const dynamicName = cId && customerMap[cId] ? customerMap[cId] : String(j.cliente || '');
+    return {
+      ...j,
+      clienteId: cId,
+      cliente: dynamicName,
+      clientePendiente: finParseBool_2026(j.clientePendiente, String(j.destino || '').toUpperCase() !== 'PROPIEDAD' && !cId && !dynamicName),
+      plazoDias: j.plazoDias !== '' && j.plazoDias !== undefined && j.plazoDias !== null ? Number(j.plazoDias) : '',
+      fechaVencimiento: j.fechaVencimiento ? (normalizeConfigDateStr_(j.fechaVencimiento) || String(j.fechaVencimiento)) : '',
+      aplicarInteres: finParseBool_2026(j.aplicarInteres, false),
+      tasaInteresMensual: j.tasaInteresMensual !== '' && j.tasaInteresMensual !== undefined && j.tasaInteresMensual !== null ? Number(j.tasaInteresMensual) : 0,
+      tipoTrabajo: String(j.destino || '').toUpperCase() === 'PROPIEDAD' ? 'propiedad' : 'tercero',
+      maquinariaId: j.maquinaId,
+      tarifa: Number(j.precioUnitario) || 0,
+      total: Number(j.importe) || 0,
+      tipoCambio: Number(j.tc) || 0
+    };
+  });
   return { ok: true, result: mapped, jobs: mapped };
 }
 
@@ -1677,6 +1844,7 @@ function handleCreateMachineryJob(j, userSession) {
     if (!jobsSheet) throw new Error('Hoja Trabajos no encontrada.');
     if (!movSheet) throw new Error('Hoja Movimientos no encontrada.');
 
+    asegurarColumnasOpcionales_2026(jobsSheet, ['clienteId', 'clientePendiente', 'plazoDias', 'fechaVencimiento', 'aplicarInteres', 'tasaInteresMensual']);
     const jHeaders = getSheetHeaders_(jobsSheet);
     const mHeaders = getSheetHeaders_(movSheet);
     validateRequiredColumns_('Trabajos', jHeaders, SHEET_SCHEMAS.Trabajos);
@@ -1718,8 +1886,49 @@ function handleCreateMachineryJob(j, userSession) {
     const ahora = new Date().toISOString();
     const usuarioNombre = userSession?.usuarioId || 'operador';
 
+    // Resolución de cliente y condiciones de cobro para servicios externos
+    let resolvedClienteId = '';
+    let resolvedClienteNombre = '';
+    let resolvedClientePendiente = false;
+    let resolvedPlazoDias = '';
+    let resolvedFechaVenc = '';
+    let resolvedAplicarInteres = false;
+    let resolvedTasaInteres = 0;
+
+    if (destinoVal === 'TERCERO') {
+      const reqClienteId = String(j.clienteId || '').trim();
+      const reqPendiente = finParseBool_2026(j.clientePendiente, false);
+      if (!reqPendiente && reqClienteId) {
+        const cliObj = clientesBuscarPorId_2026(reqClienteId);
+        if (!cliObj) throw new Error('El cliente seleccionado no existe en el catálogo.');
+        resolvedClienteId = cliObj.id;
+        resolvedClienteNombre = cliObj.nombre;
+        resolvedClientePendiente = false;
+      } else if (reqPendiente || !reqClienteId) {
+        resolvedClienteId = '';
+        resolvedClienteNombre = reqPendiente ? '' : String(j.cliente || '').trim();
+        resolvedClientePendiente = reqPendiente || !resolvedClienteNombre;
+      }
+      const rawPlazo = j.plazoDias !== undefined && j.plazoDias !== '' && j.plazoDias !== null
+        ? Number(String(j.plazoDias).replace(',', '.'))
+        : NaN;
+      if (Number.isFinite(rawPlazo) && rawPlazo >= 0) {
+        resolvedPlazoDias = Math.round(rawPlazo);
+        resolvedFechaVenc = j.fechaVencimiento
+          ? validarFechaIso_2026(j.fechaVencimiento, finAddDaysIso_2026(fechaVal, resolvedPlazoDias))
+          : finAddDaysIso_2026(fechaVal, resolvedPlazoDias);
+      } else if (j.fechaVencimiento && String(j.fechaVencimiento).trim() !== '') {
+        resolvedFechaVenc = validarFechaIso_2026(j.fechaVencimiento, fechaVal);
+        resolvedPlazoDias = Math.max(0, finDaysDiffIso_2026(fechaVal, resolvedFechaVenc));
+      }
+      resolvedAplicarInteres = finParseBool_2026(j.aplicarInteres, false);
+      const rawTasa = Number(String(j.tasaInteresMensual ?? 0).replace(',', '.'));
+      resolvedTasaInteres = resolvedAplicarInteres && Number.isFinite(rawTasa) && rawTasa > 0 ? redondear2_2026(rawTasa) : 0;
+      if (resolvedTasaInteres <= 0) resolvedAplicarInteres = false;
+    }
+
     // 1. Insertar en Trabajos
-    const jRow = [];
+    const jRow = Array(jHeaders.length).fill('');
     jRow[jMap['id']] = id;
     jRow[jMap['fecha']] = fechaVal;
     jRow[jMap['campanaid']] = String(j.campanaId || '');
@@ -1727,7 +1936,13 @@ function handleCreateMachineryJob(j, userSession) {
     if (jMap['implementoid'] !== undefined) jRow[jMap['implementoid']] = implementoId;
     jRow[jMap['destino']] = destinoVal;
     jRow[jMap['loteid']] = destinoVal === 'PROPIEDAD' ? String(j.loteId || '') : '';
-    jRow[jMap['cliente']] = destinoVal === 'TERCERO' ? String(j.cliente || '') : '';
+    jRow[jMap['cliente']] = destinoVal === 'TERCERO' ? resolvedClienteNombre : '';
+    if (jMap['clienteid'] !== undefined) jRow[jMap['clienteid']] = resolvedClienteId;
+    if (jMap['clientependiente'] !== undefined) jRow[jMap['clientependiente']] = resolvedClientePendiente;
+    if (jMap['plazodias'] !== undefined) jRow[jMap['plazodias']] = resolvedPlazoDias;
+    if (jMap['fechavencimiento'] !== undefined) jRow[jMap['fechavencimiento']] = resolvedFechaVenc;
+    if (jMap['aplicarinteres'] !== undefined) jRow[jMap['aplicarinteres']] = resolvedAplicarInteres;
+    if (jMap['tasainteresmensual'] !== undefined) jRow[jMap['tasainteresmensual']] = resolvedTasaInteres;
     jRow[jMap['cantidad']] = cantVal;
     jRow[jMap['unidad']] = String(j.unidad || 'ha');
     jRow[jMap['preciounitario']] = precioVal;
@@ -1746,12 +1961,20 @@ function handleCreateMachineryJob(j, userSession) {
     jRow[jMap['actualizadoen']] = ahora;
 
     // Los trabajos externos nuevos se consideran pendientes salvo indicación expresa.
-    // El pago inicial se registra en Cobros, nunca como otro INGRESO.
+    // El pago inicial se registra mediante el motor centralizado de Cuentas por Cobrar.
     const cobroInicial = destinoVal === 'TERCERO'
       ? Number(String(j.montoCobradoInicial ?? (String(j.estadoCobro || '').toUpperCase() === 'PAGADO' ? totalVal : 0)).trim().replace(',', '.'))
       : 0;
     if (!Number.isFinite(cobroInicial) || cobroInicial < 0 || Math.round(cobroInicial * 100) > Math.round(totalVal * 100)) {
       throw new Error('El cobro inicial debe estar entre cero y el importe del servicio.');
+    }
+    if (destinoVal === 'TERCERO' && cobroInicial > 0) {
+      if (!userSession || userSession.rol !== 'admin') {
+        throw new Error('Solo el administrador puede registrar cobros. Guarde el servicio como pendiente y registre el cobro desde Administración → Cuentas por cobrar.');
+      }
+      if (clientePendiente || !resolvedClienteId) {
+        throw new Error('No se puede registrar un cobro inicial sin un cliente asignado del catálogo.');
+      }
     }
     if (destinoVal === 'TERCERO') cobrosPrepararHoja_2026();
     jobsSheet.appendRow(jRow);
@@ -1768,7 +1991,7 @@ function handleCreateMachineryJob(j, userSession) {
     incRow[mMap['itemid']] = '';
     incRow[mMap['descripcion']] = destinoVal === 'PROPIEDAD'
       ? ('Trabajo en propiedad' + trabajoDesc + ' (' + (j.loteNombre || j.loteId || 'Lote') + ')')
-      : ('Servicio a tercero' + trabajoDesc + ' (' + (j.cliente || 'Externo') + ')');
+      : ('Servicio a tercero' + trabajoDesc + ' (' + (resolvedClienteNombre || 'Cliente pendiente') + ')');
     incRow[mMap['loteid']] = destinoVal === 'PROPIEDAD' ? String(j.loteId || '') : '';
     incRow[mMap['maquinaid']] = String(maqId);
     incRow[mMap['cantidad']] = cantVal;
@@ -1811,10 +2034,23 @@ function handleCreateMachineryJob(j, userSession) {
     }
 
     if (destinoVal === 'TERCERO' && cobroInicial > 0) {
-      const cobroIniUsd = monVal === 'USD' ? redondear2_2026(cobroInicial) : redondear2_2026(cobroInicial / finalTc);
-      cobrosAnexar_2026({trabajoId:id, fecha:fechaVal,
-        importe:cobroIniUsd, importeOriginal:redondear2_2026(cobroInicial), monedaCobro:monVal,
-        tc:finalTc, importeUsd:cobroIniUsd, observacion:'Cobro inicial', creadoPor:usuarioNombre});
+      SpreadsheetApp.flush();
+      const cobroInitRes = arRegistrarCobroInternal_2026({
+        clienteId: resolvedClienteId,
+        fecha: fechaVal,
+        monedaPago: monVal,
+        tcAplicado: finalTc,
+        observacion: 'Cobro inicial',
+        idempotencyKey: 'INIT-TRABAJO-' + id,
+        aplicaciones: [{
+          deudaTipo: 'TRABAJO',
+          deudaId: id,
+          importeOriginalPagado: redondear2_2026(cobroInicial)
+        }]
+      }, userSession);
+      if (!cobroInitRes || !cobroInitRes.ok) {
+        throw new Error((cobroInitRes && cobroInitRes.error) || 'No se pudo registrar el cobro inicial.');
+      }
     }
 
     logAudit_(usuarioNombre, 'CREATE', 'Trabajos', id, 'Trabajo registrado con movimientos vinculados');
@@ -1851,6 +2087,7 @@ function handleUpdateMachineryJob(id, j, userSession) {
     const movSheet = findSheetIgnoreCase_('Movimientos');
     if (!jobsSheet || !movSheet) throw new Error('Hojas Trabajos o Movimientos no encontradas.');
 
+    asegurarColumnasOpcionales_2026(jobsSheet, ['clienteId', 'clientePendiente', 'plazoDias', 'fechaVencimiento', 'aplicarInteres', 'tasaInteresMensual']);
     const jRows = jobsSheet.getDataRange().getValues();
     if (jRows.length < 2) return { ok: false, error: 'No existen trabajos registrados.' };
 
@@ -1937,6 +2174,20 @@ function handleUpdateMachineryJob(id, j, userSession) {
     let finalLoteId = '';
     let finalLoteNombre = '';
     let finalCliente = '';
+    let finalClienteId = '';
+    let finalClientePendiente = false;
+    let finalPlazoDias = '';
+    let finalFechaVenc = '';
+    let finalAplicarInteres = false;
+    let finalTasaInteres = 0;
+
+    const oldClienteId = jMap['clienteid'] !== undefined ? String(oldRow[jMap['clienteid']] || '').trim() : '';
+    const oldClientePendiente = jMap['clientependiente'] !== undefined ? finParseBool_2026(oldRow[jMap['clientependiente']], !oldClienteId && !oldCliente) : (!oldClienteId && !oldCliente);
+    const oldPlazoDias = jMap['plazodias'] !== undefined ? oldRow[jMap['plazodias']] : '';
+    const oldFechaVenc = jMap['fechavencimiento'] !== undefined ? (normalizeConfigDateStr_(oldRow[jMap['fechavencimiento']]) || String(oldRow[jMap['fechavencimiento']] || '')) : '';
+    const oldAplicarInteres = jMap['aplicarinteres'] !== undefined ? finParseBool_2026(oldRow[jMap['aplicarinteres']], false) : false;
+    const oldTasaInteres = jMap['tasainteresmensual'] !== undefined ? (Number(oldRow[jMap['tasainteresmensual']]) || 0) : 0;
+
     if (newDestino === 'PROPIEDAD') {
       const candidateLote = j.loteId !== undefined ? String(j.loteId).trim() : oldLoteId;
       if (!candidateLote) {
@@ -1947,9 +2198,65 @@ function handleUpdateMachineryJob(id, j, userSession) {
       finalLoteId = candidateLote;
       finalLoteNombre = String(j.loteNombre || loteObj.nombre || candidateLote);
       finalCliente = '';
+      finalClienteId = '';
+      finalClientePendiente = false;
+      finalPlazoDias = '';
+      finalFechaVenc = '';
+      finalAplicarInteres = false;
+      finalTasaInteres = 0;
     } else {
       finalLoteId = '';
-      finalCliente = j.cliente !== undefined ? String(j.cliente || '').trim() : oldCliente;
+      const hasClienteUpdate = j.clienteId !== undefined || j.clientePendiente !== undefined || j.cliente !== undefined;
+      if (hasClienteUpdate) {
+        const reqPend = finParseBool_2026(j.clientePendiente, false);
+        const reqCid = String(j.clienteId || '').trim();
+        if (!reqPend && reqCid) {
+          const cliObj = clientesBuscarPorId_2026(reqCid);
+          if (!cliObj) throw new Error('El cliente seleccionado no existe en el catálogo.');
+          finalClienteId = cliObj.id;
+          finalCliente = cliObj.nombre;
+          finalClientePendiente = false;
+        } else {
+          finalClienteId = '';
+          finalCliente = reqPend ? '' : String(j.cliente || '').trim();
+          finalClientePendiente = reqPend || !finalCliente;
+        }
+      } else {
+        finalClienteId = oldClienteId;
+        finalCliente = oldCliente;
+        finalClientePendiente = oldClientePendiente;
+      }
+
+      if (j.plazoDias !== undefined || j.fechaVencimiento !== undefined) {
+        const rawP = j.plazoDias !== undefined && j.plazoDias !== '' && j.plazoDias !== null
+          ? Number(String(j.plazoDias).replace(',', '.'))
+          : NaN;
+        if (Number.isFinite(rawP) && rawP >= 0) {
+          finalPlazoDias = Math.round(rawP);
+          finalFechaVenc = j.fechaVencimiento
+            ? validarFechaIso_2026(j.fechaVencimiento, finAddDaysIso_2026(finalFecha, finalPlazoDias))
+            : finAddDaysIso_2026(finalFecha, finalPlazoDias);
+        } else if (j.fechaVencimiento && String(j.fechaVencimiento).trim() !== '') {
+          finalFechaVenc = validarFechaIso_2026(j.fechaVencimiento, finalFecha);
+          finalPlazoDias = Math.max(0, finDaysDiffIso_2026(finalFecha, finalFechaVenc));
+        } else {
+          finalPlazoDias = '';
+          finalFechaVenc = '';
+        }
+      } else {
+        finalPlazoDias = oldPlazoDias;
+        finalFechaVenc = oldFechaVenc;
+      }
+
+      if (j.aplicarInteres !== undefined || j.tasaInteresMensual !== undefined) {
+        finalAplicarInteres = finParseBool_2026(j.aplicarInteres, oldAplicarInteres);
+        const rawT = Number(String(j.tasaInteresMensual !== undefined ? j.tasaInteresMensual : oldTasaInteres).replace(',', '.'));
+        finalTasaInteres = finalAplicarInteres && Number.isFinite(rawT) && rawT > 0 ? redondear2_2026(rawT) : 0;
+        if (finalTasaInteres <= 0) finalAplicarInteres = false;
+      } else {
+        finalAplicarInteres = oldAplicarInteres;
+        finalTasaInteres = oldTasaInteres;
+      }
     }
 
     // 2. Validar cantidad, tarifa, moneda, tipo de cambio e importe recalculado
@@ -1984,39 +2291,57 @@ function handleUpdateMachineryJob(id, j, userSession) {
       finalObs = finalObs.replace(/\s*\[Trabajo:[^\]]*\]/g, '').trim();
     }
 
-    // 3. Validar consistencia con cobros existentes (dentro del LockService)
-    const pagosExistentes = cobrosFilas_2026().filter(r => String(r.trabajoid) === idTrim);
-    if (pagosExistentes.length > 0) {
+    // 3. Validar consistencia con cobros activos (modernos en CobroAplicaciones y heredados en Cobros)
+    const arActual = arConstruirDeudas_2026(getBoliviaTodayStr_());
+    const deudaActual = arActual.debts.find(function (d) {
+      return d.deudaTipo === 'TRABAJO' && String(d.deudaId) === idTrim;
+    });
+    const tieneCobrosActivos = Boolean(deudaActual && deudaActual.aplicaciones && deudaActual.aplicaciones.length > 0);
+    if (tieneCobrosActivos) {
       if (newDestino !== 'TERCERO') {
         return {
           ok: false,
           error: 'No se puede cambiar este servicio a Propiedad porque ya tiene cobros registrados.'
         };
       }
-      const tienePagoHistoricoBobSinTc = pagosExistentes.some(r => {
+      if (finalMoneda !== oldMoneda) {
+        return {
+          ok: false,
+          error: 'No se puede cambiar la moneda de un servicio que ya tiene cobros registrados.'
+        };
+      }
+      if (oldClienteId && (finalClientePendiente || finalClienteId !== oldClienteId)) {
+        return {
+          ok: false,
+          error: 'No se puede cambiar el cliente de un servicio que ya tiene cobros activos. Anule los cobros primero.'
+        };
+      }
+      if (deudaActual.minActivePayDate && finalFecha > deudaActual.minActivePayDate) {
+        return {
+          ok: false,
+          error: 'La fecha del servicio (' + finalFecha + ') no puede ser posterior al primer cobro registrado (' + deudaActual.minActivePayDate + ').'
+        };
+      }
+      const capitalYaCobrado = redondear2_2026(Number(deudaActual.pagosCapitalAnteriores || 0));
+      if (Math.round(finalTotal * 100) < Math.round(capitalYaCobrado * 100)) {
+        return {
+          ok: false,
+          error: 'El nuevo importe (' + finalMoneda + ' ' + finalTotal.toFixed(2) + ') no puede ser menor al capital ya cobrado (' + finalMoneda + ' ' + capitalYaCobrado.toFixed(2) + ').'
+        };
+      }
+      const pagosLegacySinTc = cobrosFilas_2026().filter(function (r) {
+        return String(r.trabajoid) === idTrim && !finParseBool_2026(r.anulado, false);
+      }).some(function (r) {
         const monRaw = r.monedacobro !== undefined && String(r.monedacobro).trim() !== '' ? r.monedacobro : (r.moneda || 'USD');
         const esBob = String(monRaw).trim().toUpperCase() !== 'USD';
         const tieneUsd = r.importeusd !== undefined && r.importeusd !== '' && r.importeusd !== null;
         const tieneTc = Number(r.tc) > 0;
         return esBob && !tieneUsd && !tieneTc;
       });
-      if (tienePagoHistoricoBobSinTc && oldTc > 0 && Math.abs(finalTc - oldTc) > 0.0001) {
+      if (pagosLegacySinTc && oldTc > 0 && Math.abs(finalTc - oldTc) > 0.0001) {
         return {
           ok: false,
           error: 'No se puede modificar el tipo de cambio de este servicio porque existen cobros históricos en Bs sin tipo de cambio propio.'
-        };
-      }
-      const defaultTc = Number(String(getConfigValue('TIPO_CAMBIO', 0) || '').replace(',', '.')) || finalTc;
-      const trabajoAnterior = cobrosMapTrabajoDesdeFila_2026(oldRow, jMap);
-      const estadoPrevio = cobrosCalcularCuenta_2026(trabajoAnterior, pagosExistentes, defaultTc);
-      const nuevoImporteUsd = finalMoneda === 'USD'
-        ? finalTotal
-        : redondear2_2026(finalTotal / finalTc);
-
-      if (Math.round(nuevoImporteUsd * 100) < Math.round(estadoPrevio.cobrado * 100)) {
-        return {
-          ok: false,
-          error: 'El nuevo importe (USD ' + nuevoImporteUsd.toFixed(2) + ') no puede ser menor al monto ya cobrado (USD ' + estadoPrevio.cobrado.toFixed(2) + ').'
         };
       }
     }
@@ -2071,6 +2396,12 @@ function handleUpdateMachineryJob(id, j, userSession) {
     newJobRow[jMap['destino']] = newDestino;
     newJobRow[jMap['loteid']] = finalLoteId;
     newJobRow[jMap['cliente']] = finalCliente;
+    if (jMap['clienteid'] !== undefined) newJobRow[jMap['clienteid']] = finalClienteId;
+    if (jMap['clientependiente'] !== undefined) newJobRow[jMap['clientependiente']] = finalClientePendiente;
+    if (jMap['plazodias'] !== undefined) newJobRow[jMap['plazodias']] = finalPlazoDias;
+    if (jMap['fechavencimiento'] !== undefined) newJobRow[jMap['fechavencimiento']] = finalFechaVenc;
+    if (jMap['aplicarinteres'] !== undefined) newJobRow[jMap['aplicarinteres']] = finalAplicarInteres;
+    if (jMap['tasainteresmensual'] !== undefined) newJobRow[jMap['tasainteresmensual']] = finalTasaInteres;
     newJobRow[jMap['cantidad']] = finalCant;
     newJobRow[jMap['unidad']] = finalUnidad;
     newJobRow[jMap['preciounitario']] = finalPrecio;
@@ -2894,21 +3225,22 @@ function handleSaveItemConfig(item, userSession) {
     const map = getHeaderIndexMap_(headers);
 
     const id = item.id || Utilities.getUuid();
+    const isProtectedMora = String(id) === 'SYS_INTERES_MORA';
     deleteRowByColumn('Items', 'id', id);
 
     const row = [];
     row[map['id']] = id;
-    row[map['nombre']] = String(item.nombre || '').trim();
-    row[map['modulo']] = String(item.modulo || 'PROPIEDAD').toUpperCase();
-    row[map['clase']] = String(item.clase || 'GASTO').toUpperCase();
-    row[map['icono']] = String(item.icono || 'Tag').trim();
+    row[map['nombre']] = isProtectedMora ? 'Interés por mora' : String(item.nombre || '').trim();
+    row[map['modulo']] = isProtectedMora ? 'MAQUINARIAS' : String(item.modulo || 'PROPIEDAD').toUpperCase();
+    row[map['clase']] = isProtectedMora ? 'INGRESO' : String(item.clase || 'GASTO').toUpperCase();
+    row[map['icono']] = String(item.icono || (isProtectedMora ? 'Percent' : 'Tag')).trim();
     row[map['unidad']] = String(item.unidad || '').trim();
     row[map['precio']] = Number(item.precio ?? item.precioPredeterminado) || 0;
-    row[map['moneda']] = String(item.moneda || 'BOB').toUpperCase();
-    row[map['activo']] = item.activo !== false && String(item.activo).toLowerCase() !== 'false';
+    row[map['moneda']] = String(item.moneda || (isProtectedMora ? 'USD' : 'BOB')).toUpperCase();
+    row[map['activo']] = isProtectedMora ? true : (item.activo !== false && String(item.activo).toLowerCase() !== 'false');
 
     sheet.appendRow(row);
-    logAudit_(userSession?.usuarioId, 'SAVE', 'Items', id, 'Ítem guardado: ' + item.nombre);
+    logAudit_(userSession?.usuarioId, 'SAVE', 'Items', id, 'Ítem guardado: ' + row[map['nombre']]);
 
     return { ok: true, result: { ...item, id } };
   } finally {
@@ -3888,7 +4220,12 @@ function cobrosFilas_2026() {
   return rows
     .slice(1)
     .filter(r => r[cols.id])
-    .map(r => Object.fromEntries(Object.keys(cols).map(k => [k, r[cols[k]]])));
+    .map(r => Object.fromEntries(Object.keys(cols).map(k => [k, r[cols[k]]])))
+    .filter(r => {
+      if (finParseBool_2026(r.anulado, false)) return false;
+      if (String(r.estadoregistro || '').trim().toUpperCase() === 'PENDIENTE') return false;
+      return true;
+    });
 }
 
 function cobrosMapTrabajoDesdeFila_2026(row, cols) {
@@ -3925,7 +4262,14 @@ function cobrosTrabajo_2026(id) {
 }
 
 function cobrosTienePagos_2026(id) {
-  return cobrosFilas_2026().some(r => String(r.trabajoid) === String(id));
+  const idStr = String(id || '').trim();
+  const hasLegacy = cobrosFilas_2026().some(r => String(r.trabajoid) === idStr && !finParseBool_2026(r.anulado, false));
+  if (hasLegacy) return true;
+  const appSheet = findSheetIgnoreCase_('CobroAplicaciones');
+  if (!appSheet) return false;
+  return getSheetDataAsObjects('CobroAplicaciones').some(
+    a => String(a.deudaTipo || '').toUpperCase() === 'TRABAJO' && String(a.deudaId) === idStr && !finParseBool_2026(a.anulado, false)
+  );
 }
 
 function cobrosNormalizarPago_2026(r, tcHistoricoServicio) {
@@ -4011,6 +4355,67 @@ function cobrosCalcularCuenta_2026(t, pagosRaw, defaultTc) {
   };
 }
 
+function cobrosMapDeudaACuentaLegacy_2026(debt, defaultTc) {
+  const tcServicioEff = debt.tcHistorico > 0 ? debt.tcHistorico : (defaultTc > 0 ? defaultTc : 6.96);
+  const importeCuentaUsd = debt.moneda === 'USD'
+    ? redondear2_2026(debt.importeOriginal)
+    : redondear2_2026(debt.importeOriginal / tcServicioEff);
+  const cobradoUsd = debt.moneda === 'USD'
+    ? redondear2_2026(debt.pagosCapitalAnteriores)
+    : redondear2_2026(debt.pagosCapitalAnteriores / tcServicioEff);
+  const saldoUsd = debt.moneda === 'USD'
+    ? redondear2_2026(debt.totalPendiente)
+    : redondear2_2026(debt.totalPendiente / tcServicioEff);
+  const estado = debt.totalPendiente <= 0.005 ? 'PAGADO' : (debt.pagosAnteriores > 0 ? 'PARCIAL' : 'PENDIENTE');
+  const pagos = (debt.aplicaciones || []).map(function (a) {
+    const impUsd = finConvertCurrency_2026(a.importeOriginalPagado, a.monedaPago, 'USD', a.tcAplicado || tcServicioEff);
+    return {
+      id: a.cobroId || a.id,
+      trabajoId: debt.deudaId,
+      fecha: a.fechaCobro,
+      importe: impUsd,
+      moneda: 'USD',
+      importeOriginal: redondear2_2026(a.importeOriginalPagado),
+      monedaCobro: a.monedaPago,
+      tc: a.tcAplicado || tcServicioEff,
+      importeUsd: impUsd,
+      interesPagado: redondear2_2026(a.interesPagado || 0),
+      capitalPagado: redondear2_2026(a.capitalPagado || 0),
+      observacion: '',
+      creadoPor: a.creadoPor || '',
+      creadoEn: a.creadoEn || ''
+    };
+  });
+
+  return {
+    id: debt.deudaId,
+    destino: 'TERCERO',
+    cliente: debt.clienteNombre || '',
+    clienteId: debt.clienteId || '',
+    clientePendiente: Boolean(debt.clientePendiente),
+    maquinaId: debt.maquinaId || '',
+    implementoId: '',
+    cantidad: debt.cantidad || 0,
+    unidad: debt.unidad || 'ha',
+    precioUnitario: debt.precioUnitario || 0,
+    importe: importeCuentaUsd,
+    moneda: 'USD',
+    importeOriginalServicio: debt.importeOriginal,
+    monedaOriginalServicio: debt.moneda,
+    tcServicio: tcServicioEff,
+    campanaId: debt.campanaId || '',
+    fecha: debt.fecha || '',
+    observacion: debt.observacion || '',
+    cobrado: cobradoUsd,
+    saldo: saldoUsd,
+    capitalPendiente: debt.capitalPendiente,
+    interesAcumulado: debt.interesAcumulado,
+    totalPendienteOriginal: debt.totalPendiente,
+    estado: estado,
+    pagos: pagos
+  };
+}
+
 function cobrosEstado_2026(id) {
   if (!id) return { ok: false, error: 'Falta trabajoId' };
   try {
@@ -4018,9 +4423,11 @@ function cobrosEstado_2026(id) {
     if (t.destino !== 'TERCERO') {
       return { ok: false, error: 'Los trabajos propios no generan cuentas por cobrar' };
     }
-    const defaultTc = Number(String(getConfigValue('TIPO_CAMBIO', 0) || '').replace(',', '.')) || 0;
-    const pagosRaw = cobrosFilas_2026().filter(r => String(r.trabajoid) === String(id));
-    return { ok: true, result: cobrosCalcularCuenta_2026(t, pagosRaw, defaultTc) };
+    const defaultTc = Number(String(getConfigValue('TIPO_CAMBIO', 0) || '').replace(',', '.')) || 6.96;
+    const built = arConstruirDeudas_2026(getBoliviaTodayStr_());
+    const debt = built.debts.find(function (d) { return d.deudaTipo === 'TRABAJO' && String(d.deudaId) === String(id); });
+    if (!debt) return { ok: false, error: 'Servicio no encontrado: ' + id };
+    return { ok: true, result: cobrosMapDeudaACuentaLegacy_2026(debt, defaultTc) };
   } catch (err) {
     return { ok: false, error: err.message };
   }
@@ -4028,35 +4435,15 @@ function cobrosEstado_2026(id) {
 
 function cobrosListar_2026(p) {
   try {
-    const sh = findSheetIgnoreCase_('Trabajos');
-    if (!sh) return { ok: false, error: 'Falta hoja Trabajos' };
-    const rows = sh.getDataRange().getValues();
-    if (rows.length < 2) return { ok: true, result: [], cobros: [] };
-
-    const c = getHeaderIndexMap_(rows[0]);
-    const defaultTc = Number(String(getConfigValue('TIPO_CAMBIO', 0) || '').replace(',', '.')) || 0;
-
-    // Leer hoja Cobros una sola vez y agrupar por trabajoId
-    const pagosPorTrabajo = {};
-    const todosPagos = cobrosFilas_2026();
-    for (let j = 0; j < todosPagos.length; j++) {
-      const tid = String(todosPagos[j].trabajoid || '');
-      if (!tid) continue;
-      if (!pagosPorTrabajo[tid]) pagosPorTrabajo[tid] = [];
-      pagosPorTrabajo[tid].push(todosPagos[j]);
-    }
-
+    const defaultTc = Number(String(getConfigValue('TIPO_CAMBIO', 0) || '').replace(',', '.')) || 6.96;
+    const built = arConstruirDeudas_2026(getBoliviaTodayStr_());
     const out = [];
-    for (let i = 1; i < rows.length; i++) {
-      const r = rows[i];
-      if (String(r[c.destino] || '').toUpperCase() !== 'TERCERO') continue;
-      const id = String(r[c.id] || '');
-      if (!id) continue;
-      if (p && p.campanaId && String(r[c.campanaid]) !== String(p.campanaId)) continue;
-
-      const t = cobrosMapTrabajoDesdeFila_2026(r, c);
-      const cuenta = cobrosCalcularCuenta_2026(t, pagosPorTrabajo[id] || [], defaultTc);
-      if (p && p.soloPendientes && cuenta.saldo === 0) continue;
+    for (let i = 0; i < built.debts.length; i++) {
+      const d = built.debts[i];
+      if (d.deudaTipo !== 'TRABAJO') continue;
+      if (p && p.campanaId && String(d.campanaId) !== String(p.campanaId)) continue;
+      const cuenta = cobrosMapDeudaACuentaLegacy_2026(d, defaultTc);
+      if (p && p.soloPendientes && cuenta.saldo <= 0) continue;
       out.push(cuenta);
     }
     return { ok: true, result: out, cobros: out };
@@ -4085,7 +4472,7 @@ function cobrosAnexar_2026(p) {
     id: Utilities.getUuid(),
     trabajoId: String(p.trabajoId),
     fecha: validarFechaIso_2026(p.fecha, getBoliviaTodayStr_()),
-    importe: importeUsd, // Siempre USD para mantener compatibilidad histórica en columna 'importe'
+    importe: importeUsd,
     moneda: 'USD',
     observacion: String(p.observacion || '').trim(),
     creadoPor: String(p.creadoPor || 'operador'),
@@ -4107,96 +4494,63 @@ function cobrosAnexar_2026(p) {
   return data;
 }
 
+// Endpoint heredado endurecido: enruta siempre a arRegistrarCobro_2026
+// para impedir omitir validaciones de mora, cliente, idempotencia, aplicaciones o sobrepagos.
 function cobrosRegistrar_2026(p, userSession) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(15000);
   try {
-    const id = String(p.trabajoId || p.id || '').trim();
-    if (!id) throw new Error('Falta trabajoId.');
+    const id = String((p && (p.trabajoId || p.id)) || '').trim();
+    if (!id) return { ok: false, error: 'Falta trabajoId.' };
 
-    const estadoActual = cobrosEstado_2026(id);
-    if (!estadoActual.ok) return estadoActual;
-    const cuenta = estadoActual.result;
+    const sh = findSheetIgnoreCase_('Trabajos');
+    if (!sh) return { ok: false, error: 'Falta hoja Trabajos.' };
+    const trabajo = getSheetDataAsObjects('Trabajos').find(function (r) { return String(r.id || '').trim() === id; });
+    if (!trabajo) return { ok: false, error: 'Servicio no encontrado: ' + id };
+    if (String(trabajo.destino || '').toUpperCase() !== 'TERCERO') {
+      return { ok: false, error: 'Los trabajos propios no generan cuentas por cobrar.' };
+    }
 
-    if (cuenta.saldo <= 0) {
-      throw new Error('Esta cuenta ya se encuentra pagada en su totalidad.');
+    const clienteId = String(trabajo.clienteId || '').trim();
+    const clientePendiente = !clienteId || finParseBool_2026(trabajo.clientePendiente, false);
+    if (clientePendiente || !clienteId) {
+      return {
+        ok: false,
+        error: 'Este servicio no tiene un cliente asignado en el catálogo. Asigne el cliente desde Administración → Cuentas por cobrar antes de registrar cobros.'
+      };
     }
 
     const monedaCobro = normalizarMonedaCobro_2026(p.monedaCobro || p.moneda || 'USD');
     const montoOriginalRaw = Number(String(p.importeOriginal ?? p.importe ?? '').trim().replace(',', '.'));
     if (!Number.isFinite(montoOriginalRaw) || montoOriginalRaw <= 0) {
-      throw new Error('El importe del cobro debe ser un número mayor a cero.');
-    }
-    const importeOriginal = redondear2_2026(montoOriginalRaw);
-    if (Math.abs(montoOriginalRaw - importeOriginal) > 0.0001) {
-      throw new Error('El importe del cobro debe tener como máximo dos decimales.');
+      return { ok: false, error: 'El importe del cobro debe ser un número mayor a cero.' };
     }
 
-    // Tipo de cambio histórico de la operación (obligatorio si cobra en Bs; opcional/registrado si cobra en USD)
-    const tcAplicado = resolverTipoCambioOperacion_2026(p.tc ?? p.tipoCambio);
+    const arRes = arRegistrarCobro_2026({
+      clienteId: clienteId,
+      fecha: p.fecha,
+      monedaPago: monedaCobro,
+      tcAplicado: p.tc !== undefined ? p.tc : p.tipoCambio,
+      observacion: String(p.observacion || '').trim(),
+      idempotencyKey: String(p.idempotencyKey || '').trim(),
+      aplicaciones: [{
+        deudaTipo: 'TRABAJO',
+        deudaId: id,
+        importeOriginalPagado: redondear2_2026(montoOriginalRaw)
+      }]
+    }, userSession);
 
-    const importeUsd = monedaCobro === 'USD'
-      ? importeOriginal
-      : redondear2_2026(importeOriginal / tcAplicado);
+    if (!arRes || !arRes.ok) return arRes;
 
-    if (!Number.isFinite(importeUsd) || importeUsd <= 0) {
-      throw new Error('El equivalente en USD del cobro debe ser mayor a cero.');
-    }
-
-    if (Math.round(importeUsd * 100) > Math.round(cuenta.saldo * 100)) {
-      throw new Error(
-        'El cobro (USD ' + importeUsd.toFixed(2) + ') supera el saldo pendiente (USD ' + cuenta.saldo.toFixed(2) + ').'
-      );
-    }
-
-    const fechaCobro = validarFechaIso_2026(p.fecha, getBoliviaTodayStr_());
-    const obsCobro = String(p.observacion || '').trim();
-
-    // Protección contra envíos duplicados inmediatos (doble clic / reintento de red)
-    const nowMs = Date.now();
-    const duplicadoReciente = cuenta.pagos.some(pg => {
-      if (!pg.creadoEn) return false;
-      const diffMs = nowMs - new Date(pg.creadoEn).getTime();
-      return (
-        diffMs >= 0 &&
-        diffMs < 30000 &&
-        pg.fecha === fechaCobro &&
-        pg.monedaCobro === monedaCobro &&
-        Math.round(pg.importeOriginal * 100) === Math.round(importeOriginal * 100) &&
-        Math.round(Number(pg.tc || 0) * 10000) === Math.round(tcAplicado * 10000) &&
-        String(pg.observacion || '').trim() === obsCobro
-      );
-    });
-    if (duplicadoReciente && p.permitirDuplicado !== true) {
-      throw new Error('Se detectó un cobro idéntico registrado hace unos segundos. Verifique el historial para evitar pagos duplicados.');
-    }
-
-    const usuarioNombre = (userSession && userSession.usuarioId) || 'operador';
-    const pago = cobrosAnexar_2026({
-      trabajoId: id,
-      fecha: fechaCobro,
-      importe: importeUsd,
-      importeOriginal: importeOriginal,
-      monedaCobro: monedaCobro,
-      tc: tcAplicado,
-      importeUsd: importeUsd,
-      observacion: obsCobro,
-      creadoPor: usuarioNombre
-    });
-
-    logAudit_(
-      usuarioNombre,
-      'COBRO_REGISTRAR',
-      'Cobros',
-      pago.id,
-      'Trabajo ' + id + ' | ' + monedaCobro + ' ' + importeOriginal.toFixed(2) + ' (TC ' + tcAplicado + ' -> USD ' + importeUsd.toFixed(2) + ')'
-    );
-
-    return { ok: true, result: { pago: pago, cuenta: cobrosEstado_2026(id).result } };
+    const estadoNuevo = cobrosEstado_2026(id);
+    return {
+      ok: true,
+      result: {
+        pago: arRes.payment,
+        cuenta: estadoNuevo.ok ? estadoNuevo.result : null,
+        receipt: arRes.receipt || null
+      }
+    };
   } catch (err) {
     return { ok: false, error: err.message };
-  } finally {
-    lock.releaseLock();
   }
 }
 
@@ -4227,7 +4581,8 @@ function cosechasNumero_2026(v,nombre){
   return n;
 }
 function cosechasResumen_2026(){
-  const cs=getSheetDataAsObjects('Cosechas');const as=getSheetDataAsObjects('AsignacionesPrecio');
+  const cs=getSheetDataAsObjects('Cosechas');
+  const as=getSheetDataAsObjects('AsignacionesPrecio').filter(a=>!finParseBool_2026(a.anulada, false));
   return cs.map(c=>{
     const asignaciones=as.filter(a=>String(a.cosechaId)===String(c.id));
     const toneladas=Number(c.toneladas)||0;
@@ -4308,9 +4663,9 @@ function cosechasActualizar_2026(p, userSession) {
       throw new Error('Seleccione un lote válido.');
     }
 
-    // Verificar toneladas ya asignadas con precio sin tocar AsignacionesPrecio ni Movimientos
+    // Verificar toneladas ya asignadas (excluyendo ventas anuladas) sin tocar AsignacionesPrecio ni Movimientos
     const asignaciones = getSheetDataAsObjects('AsignacionesPrecio')
-      .filter(a => String(a.cosechaId) === id);
+      .filter(a => String(a.cosechaId) === id && !finParseBool_2026(a.anulada, false));
     const asignadas = Math.round(
       asignaciones.reduce((v, a) => v + Number(a.toneladas || 0), 0) * 1000000
     ) / 1000000;
@@ -4373,35 +4728,33 @@ function cosechasActualizar_2026(p, userSession) {
   }
 }
 
-function cosechasAsignarPrecio_2026(p,userSession){
-  const lock=LockService.getScriptLock();lock.waitLock(15000);
-  try{
-    const cosecha=cosechasResumen_2026().find(c=>String(c.id)===String(p.cosechaId));
-    if(!cosecha)throw new Error('Cosecha no encontrada.');
-    const toneladas=cosechasNumero_2026(p.toneladas,'Toneladas asignadas');
-    if(toneladas>cosecha.pendiente+0.0000001)throw new Error('La cantidad supera las toneladas pendientes.');
-    const precio=cosechasNumero_2026(p.precioUsdTon,'Precio USD/t');
-    const tc=resolverTipoCambioOperacion_2026(p.tc ?? p.tipoCambio);
-    const fecha=validarFechaIso_2026(p.fecha,getBoliviaTodayStr_());
-    const campanaId=String(p.campanaId||cosecha.campanaId);
-    if(!getSheetDataAsObjects('Campanas').some(c=>String(c.id)===campanaId))throw new Error('Campaña de venta no válida.');
-    const sh=cosechasHoja_2026('AsignacionesPrecio',PRECIO_CAMPOS_2026);
-    const mov=findSheetIgnoreCase_('Movimientos');
-    if(!mov)throw new Error('Falta hoja Movimientos.');
-    const headers=getSheetHeaders_(mov);
-    validateRequiredColumns_('Movimientos',headers,SHEET_SCHEMAS.Movimientos);
-    const id=Utilities.getUuid(),movId=Utilities.getUuid(),ahora=new Date().toISOString();
-    const importe=Math.round(toneladas*precio*100)/100;
-    const user=String(userSession&&userSession.usuarioId||'operador');
-    const a={id,cosechaId:String(cosecha.id),fecha,campanaId,toneladas,precioUsdTon:precio,importeUsd:importe,tc,movimientoId:movId,creadoPor:user,creadoEn:ahora};
-    // La asignación es el registro principal. Un reintento de reparación
-    // puede identificar el movimiento por su ID, evitando ingresos duplicados.
-    cosechasFila_2026(sh,a);
-    const m={id:movId,fecha,campanaId,modulo:'PROPIEDAD',clase:'INGRESO',itemId:'',descripcion:'Venta de '+String(cosecha.producto||'cosecha'),loteId:String(cosecha.loteId),maquinaId:'',cantidad:toneladas,unidad:'t',precioUnitario:precio,importe,moneda:'USD',tc,trabajoId:'COSECHA:'+id,creadoPor:user,creadoEn:ahora,actualizadoEn:ahora};
-    cosechasFila_2026(mov,m);
-    return {ok:true,result:{...a,moneda:'USD'}};
-  }catch(e){return {ok:false,error:e.message};}
-  finally{lock.releaseLock();}
+// Endpoint heredado endurecido: enruta siempre a ventasCosechaCrear_2026
+// para aplicar todas las validaciones financieras vigentes (anulada, estado, moneda, catálogo, idempotencia).
+function cosechasAsignarPrecio_2026(p, userSession) {
+  const req = p || {};
+  const cantidad = req.cantidad !== undefined ? req.cantidad : req.toneladas;
+  const precio = req.precioUnitario !== undefined ? req.precioUnitario : req.precioUsdTon;
+  const res = ventasCosechaCrear_2026({
+    cosechaId: req.cosechaId,
+    fecha: req.fecha,
+    campanaId: req.campanaId,
+    cantidad: cantidad,
+    toneladas: cantidad,
+    precioUnitario: precio,
+    moneda: req.moneda || 'USD',
+    tc: req.tc !== undefined ? req.tc : req.tipoCambio,
+    clienteId: req.clienteId || '',
+    compradorPendiente: req.compradorPendiente !== undefined ? req.compradorPendiente : !String(req.clienteId || '').trim(),
+    precioPendiente: false,
+    plazoDias: req.plazoDias,
+    fechaVencimiento: req.fechaVencimiento,
+    aplicarInteres: req.aplicarInteres,
+    tasaInteresMensual: req.tasaInteresMensual,
+    observacion: req.observacion || '',
+    idempotencyKey: req.idempotencyKey || ''
+  }, userSession);
+  if (!res || !res.ok) return res;
+  return { ok: true, result: res.result, sale: res.sale };
 }
 function probarCosechas_2026(){console.log(JSON.stringify(cosechasListar_2026({soloPendientes:true})));}
 
@@ -4588,3 +4941,3016 @@ function validarAdmin2026_(token){
   return validateAdminToken(token);
 }
 function probarUsuarios2026_(){console.log(JSON.stringify(usuariosListar2026_()));}
+
+// =============================================================
+// MÓDULO FINANCIERO 2026: CLIENTES, CONFIGURACIÓN DE COBROS,
+// VENTAS DE COSECHA, CUENTAS POR COBRAR, INTERÉS POR MORA,
+// NOTAS DE DÉBITO, NOTAS DE COBRO Y MIGRACIÓN NO DESTRUCTIVA
+// =============================================================
+
+const VENTA_COSECHA_EXTRA_COLS_2026 = [
+  'loteId', 'producto', 'unidad', 'clienteId', 'clienteNombre', 'compradorPendiente',
+  'precioUnitario', 'moneda', 'importeTotal', 'precioPendiente',
+  'plazoDias', 'fechaVencimiento', 'fechaCompletado', 'aplicarInteres', 'tasaInteresMensual',
+  'observacion', 'estado', 'anulada', 'actualizadoEn', 'idempotencyKey'
+];
+
+const COBROS_EXTRA_COLS_2026 = [
+  'clienteId', 'clienteNombre', 'tipoPago', 'monedaPago', 'tcAplicado',
+  'capitalTotalAplicado', 'interesTotalAplicado', 'monedaTotalesAplicados',
+  'capitalAplicadoUsd', 'interesAplicadoUsd', 'capitalAplicadoBob', 'interesAplicadoBob',
+  'notaCobroNumero', 'anulado', 'estadoRegistro', 'idempotencyKey'
+];
+
+function finParseBool_2026(v, defVal) {
+  if (typeof v === 'boolean') return v;
+  if (v === undefined || v === null || v === '') return Boolean(defVal);
+  const s = String(v).trim().toUpperCase();
+  if (s === 'TRUE' || s === '1' || s === 'SI' || s === 'SÍ' || s === 'YES' || s === 'ACTIVO') return true;
+  if (s === 'FALSE' || s === '0' || s === 'NO' || s === 'INACTIVO') return false;
+  return Boolean(defVal);
+}
+
+function finNormName_2026(s) {
+  return String(s || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function finToIsoDate_2026(val) {
+  if (!val) return '';
+  if (Object.prototype.toString.call(val) === '[object Date]' && !isNaN(val.getTime())) {
+    return Utilities.formatDate(val, BOLIVIA_TZ_, 'yyyy-MM-dd');
+  }
+  const s = String(val).trim();
+  if (!s) return '';
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (dmy) {
+    return dmy[3] + '-' + String(dmy[2]).padStart(2, '0') + '-' + String(dmy[1]).padStart(2, '0');
+  }
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) {
+    return Utilities.formatDate(parsed, BOLIVIA_TZ_, 'yyyy-MM-dd');
+  }
+  return '';
+}
+
+function finAddDaysIso_2026(isoStr, days) {
+  const base = finToIsoDate_2026(isoStr);
+  if (!base) return '';
+  const parts = base.split('-').map(Number);
+  const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  dt.setUTCDate(dt.getUTCDate() + Math.round(Number(days) || 0));
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(dt.getUTCDate()).padStart(2, '0');
+  return y + '-' + m + '-' + d;
+}
+
+function finDaysDiffIso_2026(startIso, endIso) {
+  const a = finToIsoDate_2026(startIso);
+  const b = finToIsoDate_2026(endIso);
+  if (!a || !b) return 0;
+  const pa = a.split('-').map(Number);
+  const pb = b.split('-').map(Number);
+  const ta = Date.UTC(pa[0], pa[1] - 1, pa[2]);
+  const tb = Date.UTC(pb[0], pb[1] - 1, pb[2]);
+  return Math.round((tb - ta) / 86400000);
+}
+
+function finEnsureSheet_2026(name, columns) {
+  let sh = findSheetIgnoreCase_(name);
+  if (!sh) {
+    sh = SpreadsheetApp.getActiveSpreadsheet().insertSheet(name);
+    sh.getRange(1, 1, 1, columns.length).setValues([columns]);
+    sh.setFrozenRows(1);
+    return sh;
+  }
+  if (sh.getLastRow() === 0 || sh.getLastColumn() === 0) {
+    sh.getRange(1, 1, 1, columns.length).setValues([columns]);
+    sh.setFrozenRows(1);
+    return sh;
+  }
+  asegurarColumnasOpcionales_2026(sh, columns);
+  return sh;
+}
+
+function finAppendObj_2026(sheet, obj) {
+  const headers = getSheetHeaders_(sheet);
+  const map = getHeaderIndexMap_(headers);
+  const row = Array(headers.length).fill('');
+  Object.keys(obj).forEach(function (k) {
+    const idx = map[String(k).toLowerCase()];
+    if (idx !== undefined) row[idx] = obj[k];
+  });
+  sheet.appendRow(row);
+  return row;
+}
+
+function finConvertCurrency_2026(amount, fromCur, toCur, tc) {
+  const val = Number(amount) || 0;
+  const f = String(fromCur || 'USD').toUpperCase() === 'USD' ? 'USD' : 'BOB';
+  const t = String(toCur || 'USD').toUpperCase() === 'USD' ? 'USD' : 'BOB';
+  if (f === t) return redondear2_2026(val);
+  const rate = Number(tc) > 0 ? Number(tc) : 6.96;
+  if (f === 'USD' && t === 'BOB') return redondear2_2026(val * rate);
+  return redondear2_2026(val / rate);
+}
+
+function finNextSequentialNumber_2026(sheetName, prefix) {
+  const sh = findSheetIgnoreCase_(sheetName);
+  let maxNum = 0;
+  if (sh && sh.getLastRow() >= 2) {
+    const rows = getSheetDataAsObjects(sheetName);
+    rows.forEach(function (r) {
+      const numStr = String(r.numero || '').trim();
+      const match = numStr.match(/(\d+)$/);
+      if (match) {
+        const n = parseInt(match[1], 10);
+        if (Number.isFinite(n) && n > maxNum) maxNum = n;
+      }
+    });
+  }
+  return prefix + '-' + String(maxNum + 1).padStart(5, '0');
+}
+
+function finGetActiveCampaignId_2026(fallbackId) {
+  const campanas = getSheetDataAsObjects('Campanas');
+  const active = campanas.find(function (c) { return finParseBool_2026(c.activa, false); });
+  if (active && active.id) return String(active.id);
+  if (fallbackId) return String(fallbackId);
+  return campanas.length > 0 ? String(campanas[0].id || '') : '';
+}
+
+function finResolverCampanaPorFecha_2026(fechaIso, fallbackCampanaId) {
+  const targetDate = finToIsoDate_2026(fechaIso) || getBoliviaTodayStr_();
+  const campanas = getSheetDataAsObjects('Campanas').filter(function (c) {
+    return c && String(c.id || '').trim() !== '';
+  });
+  if (campanas.length === 0) return String(fallbackCampanaId || '');
+
+  // 1. Prioridad máxima: campañas con rango explícito fechaInicio / fechaFin
+  const explicitMatches = [];
+  for (let i = 0; i < campanas.length; i++) {
+    const c = campanas[i];
+    const start = finToIsoDate_2026(c.fechaInicio);
+    const end = finToIsoDate_2026(c.fechaFin);
+    if (!start && !end) continue;
+    const afterStart = !start || targetDate >= start;
+    const beforeEnd = !end || targetDate <= end;
+    if (afterStart && beforeEnd) {
+      explicitMatches.push({
+        id: String(c.id).trim(),
+        start: start || '0000-01-01',
+        hasEnd: Boolean(end),
+        creadoEn: String(c.creadoEn || '')
+      });
+    }
+  }
+  if (explicitMatches.length > 0) {
+    explicitMatches.sort(function (a, b) {
+      if (a.start !== b.start) return a.start > b.start ? -1 : 1;
+      if (a.hasEnd !== b.hasEnd) return a.hasEnd ? -1 : 1;
+      return b.creadoEn.localeCompare(a.creadoEn);
+    });
+    return explicitMatches[0].id;
+  }
+
+  // 2. Segunda prioridad: periodo/año inferido desde el nombre de la campaña (ej. "Campaña 2025", "Verano 2025-2026")
+  const targetYear = parseInt(targetDate.slice(0, 4), 10);
+  const nameMatches = [];
+  for (let i = 0; i < campanas.length; i++) {
+    const c = campanas[i];
+    const nombre = String(c.nombre || '').trim();
+    const normNombre = finNormName_2026(nombre);
+    const createdIso = finToIsoDate_2026(c.creadoEn);
+    const rangeMatch = nombre.match(/\b(20\d{2})\s*[-\/]\s*(20\d{2})\b/);
+    if (rangeMatch) {
+      const y1 = parseInt(rangeMatch[1], 10);
+      const y2 = parseInt(rangeMatch[2], 10);
+      const infStart = normNombre.indexOf('verano') !== -1 ? (y1 + '-10-01') : (y1 + '-01-01');
+      const infEnd = normNombre.indexOf('verano') !== -1 ? (y2 + '-04-30') : (y2 + '-12-31');
+      if (targetDate >= infStart && targetDate <= infEnd) {
+        nameMatches.push({
+          id: String(c.id).trim(),
+          specificity: normNombre.indexOf('verano') !== -1 ? 3 : 1,
+          createdOk: Boolean(createdIso && createdIso <= targetDate),
+          createdIso: createdIso || '0000-01-01',
+          activa: finParseBool_2026(c.activa, false)
+        });
+      }
+      continue;
+    }
+    const singleMatch = nombre.match(/\b(20\d{2})\b/);
+    if (singleMatch) {
+      const y = parseInt(singleMatch[1], 10);
+      if (y === targetYear) {
+        const isInvierno = normNombre.indexOf('invierno') !== -1;
+        const infStart = isInvierno ? (y + '-04-01') : (y + '-01-01');
+        const infEnd = isInvierno ? (y + '-10-31') : (y + '-12-31');
+        if (targetDate >= infStart && targetDate <= infEnd) {
+          nameMatches.push({
+            id: String(c.id).trim(),
+            specificity: isInvierno ? 3 : 2,
+            createdOk: Boolean(createdIso && createdIso <= targetDate),
+            createdIso: createdIso || '0000-01-01',
+            activa: finParseBool_2026(c.activa, false)
+          });
+        }
+      }
+    }
+  }
+  if (nameMatches.length > 0) {
+    nameMatches.sort(function (a, b) {
+      if (a.specificity !== b.specificity) return b.specificity - a.specificity;
+      if (a.createdOk !== b.createdOk) return a.createdOk ? -1 : 1;
+      if (a.createdIso !== b.createdIso) return a.createdIso > b.createdIso ? -1 : 1;
+      if (a.activa !== b.activa) return a.activa ? -1 : 1;
+      return 0;
+    });
+    return nameMatches[0].id;
+  }
+
+  // 3. Tercera prioridad: cronología de creadoEn (la campaña vigente en la fecha efectiva de cobro)
+  const chronoMatches = [];
+  for (let i = 0; i < campanas.length; i++) {
+    const c = campanas[i];
+    const createdIso = finToIsoDate_2026(c.creadoEn);
+    if (createdIso && createdIso <= targetDate) {
+      chronoMatches.push({ id: String(c.id).trim(), createdIso: createdIso, creadoEn: String(c.creadoEn || '') });
+    }
+  }
+  if (chronoMatches.length > 0) {
+    chronoMatches.sort(function (a, b) {
+      if (a.createdIso !== b.createdIso) return a.createdIso > b.createdIso ? -1 : 1;
+      return b.creadoEn.localeCompare(a.creadoEn);
+    });
+    return chronoMatches[0].id;
+  }
+
+  // 4. Respaldo: campaña de origen de la deuda si existe en Campanas, o campaña activa
+  const fb = String(fallbackCampanaId || '').trim();
+  if (fb && campanas.some(function (c) { return String(c.id).trim() === fb; })) {
+    return fb;
+  }
+  return finGetActiveCampaignId_2026(fb);
+}
+
+function finEnsureInterestConcept_2026() {
+  const sh = findSheetIgnoreCase_('Items');
+  if (!sh) return false;
+  const rows = getSheetDataAsObjects('Items');
+  const exists = rows.some(function (r) { return String(r.id || '').trim() === 'SYS_INTERES_MORA'; });
+  if (exists) return false;
+  finAppendObj_2026(sh, {
+    id: 'SYS_INTERES_MORA',
+    nombre: 'Interés por mora',
+    modulo: 'MAQUINARIAS',
+    clase: 'INGRESO',
+    icono: 'Percent',
+    unidad: '',
+    precio: 0,
+    moneda: 'USD',
+    activo: true
+  });
+  return true;
+}
+
+// -------------------------------------------------------------
+// 1. CATÁLOGO DE CLIENTES (Hoja Clientes)
+// -------------------------------------------------------------
+
+function clientesBuscarPorId_2026(id) {
+  const cleanId = String(id || '').trim();
+  if (!cleanId) return null;
+  const sh = findSheetIgnoreCase_('Clientes');
+  if (!sh) return null;
+  const rows = getSheetDataAsObjects('Clientes');
+  const found = rows.find(function (c) { return String(c.id || '').trim() === cleanId; });
+  if (!found) return null;
+  return {
+    id: String(found.id).trim(),
+    nombre: String(found.nombre || '').trim(),
+    telefono: String(found.telefono || '').trim(),
+    direccion: String(found.direccion || '').trim(),
+    activo: finParseBool_2026(found.activo, true),
+    creadoEn: found.creadoEn ? String(found.creadoEn) : '',
+    actualizadoEn: found.actualizadoEn ? String(found.actualizadoEn) : ''
+  };
+}
+
+function clientesListar_2026(p) {
+  const sh = finEnsureSheet_2026('Clientes', SHEET_SCHEMAS.Clientes);
+  const rows = getSheetDataAsObjects(sh.getName());
+  const list = rows
+    .filter(function (r) { return String(r.id || '').trim() !== '' && String(r.nombre || '').trim() !== ''; })
+    .map(function (r) {
+      return {
+        id: String(r.id).trim(),
+        nombre: String(r.nombre || '').trim(),
+        telefono: String(r.telefono || '').trim(),
+        direccion: String(r.direccion || '').trim(),
+        activo: finParseBool_2026(r.activo, true),
+        creadoEn: r.creadoEn ? String(r.creadoEn) : '',
+        actualizadoEn: r.actualizadoEn ? String(r.actualizadoEn) : ''
+      };
+    })
+    .sort(function (a, b) { return a.nombre.localeCompare(b.nombre, 'es'); });
+  return { ok: true, result: list, customers: list, clientes: list };
+}
+
+function clientesCrear_2026(p, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sh = finEnsureSheet_2026('Clientes', SHEET_SCHEMAS.Clientes);
+    const nombre = String((p && p.nombre) || '').trim().replace(/\s+/g, ' ');
+    if (!nombre) return { ok: false, error: 'El nombre del cliente es obligatorio.' };
+    const normNew = finNormName_2026(nombre);
+    const existing = getSheetDataAsObjects(sh.getName());
+    if (existing.some(function (c) { return finNormName_2026(c.nombre) === normNew; })) {
+      return { ok: false, error: 'Ya existe un cliente registrado con ese nombre.' };
+    }
+    const ahora = new Date().toISOString();
+    const record = {
+      id: 'CLI-' + Utilities.getUuid().slice(0, 8).toUpperCase(),
+      nombre: nombre,
+      telefono: String((p && p.telefono) || '').trim(),
+      direccion: String((p && p.direccion) || '').trim(),
+      activo: true,
+      creadoEn: ahora,
+      actualizadoEn: ahora
+    };
+    finAppendObj_2026(sh, record);
+    SpreadsheetApp.flush();
+    logAudit_(userSession && userSession.usuarioId, 'CREATE', 'Clientes', record.id, 'Cliente creado: ' + nombre);
+    return { ok: true, result: record, customer: record };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function clientesActualizar_2026(p, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const id = String((p && p.id) || '').trim();
+    if (!id) return { ok: false, error: 'Se requiere el ID del cliente.' };
+    const nombre = String((p && p.nombre) || '').trim().replace(/\s+/g, ' ');
+    if (!nombre) return { ok: false, error: 'El nombre del cliente es obligatorio.' };
+
+    const sh = finEnsureSheet_2026('Clientes', SHEET_SCHEMAS.Clientes);
+    const vals = sh.getDataRange().getValues();
+    if (vals.length < 2) return { ok: false, error: 'Cliente no encontrado.' };
+    const m = getHeaderIndexMap_(vals[0]);
+    const normNew = finNormName_2026(nombre);
+
+    let targetRow = -1;
+    for (let i = 1; i < vals.length; i++) {
+      const rowId = String(vals[i][m['id']] || '').trim();
+      if (rowId === id) {
+        targetRow = i + 1;
+      } else if (finNormName_2026(vals[i][m['nombre']]) === normNew) {
+        return { ok: false, error: 'Ya existe otro cliente con ese nombre.' };
+      }
+    }
+    if (targetRow === -1) return { ok: false, error: 'Cliente no encontrado.' };
+
+    const ahora = new Date().toISOString();
+    const row = vals[targetRow - 1].slice();
+    row[m['nombre']] = nombre;
+    row[m['telefono']] = String((p && p.telefono) || '').trim();
+    row[m['direccion']] = String((p && p.direccion) || '').trim();
+    if (p && p.activo !== undefined) row[m['activo']] = finParseBool_2026(p.activo, true);
+    row[m['actualizadoen']] = ahora;
+
+    sh.getRange(targetRow, 1, 1, row.length).setValues([row]);
+    SpreadsheetApp.flush();
+    logAudit_(userSession && userSession.usuarioId, 'UPDATE', 'Clientes', id, 'Cliente actualizado: ' + nombre);
+    const updated = {
+      id: id,
+      nombre: nombre,
+      telefono: row[m['telefono']],
+      direccion: row[m['direccion']],
+      activo: finParseBool_2026(row[m['activo']], true),
+      creadoEn: String(row[m['creadoen']] || ''),
+      actualizadoEn: ahora
+    };
+    return { ok: true, result: updated, customer: updated };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function clientesToggle_2026(p, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const id = String((p && p.id) || '').trim();
+    if (!id) return { ok: false, error: 'Se requiere el ID del cliente.' };
+    const sh = finEnsureSheet_2026('Clientes', SHEET_SCHEMAS.Clientes);
+    const vals = sh.getDataRange().getValues();
+    if (vals.length < 2) return { ok: false, error: 'Cliente no encontrado.' };
+    const m = getHeaderIndexMap_(vals[0]);
+
+    let targetRow = -1;
+    for (let i = 1; i < vals.length; i++) {
+      if (String(vals[i][m['id']] || '').trim() === id) {
+        targetRow = i + 1;
+        break;
+      }
+    }
+    if (targetRow === -1) return { ok: false, error: 'Cliente no encontrado.' };
+
+    const newActivo = finParseBool_2026(p.activo, !finParseBool_2026(vals[targetRow - 1][m['activo']], true));
+    const ahora = new Date().toISOString();
+    sh.getRange(targetRow, m['activo'] + 1).setValue(newActivo);
+    sh.getRange(targetRow, m['actualizadoen'] + 1).setValue(ahora);
+    SpreadsheetApp.flush();
+    logAudit_(userSession && userSession.usuarioId, 'TOGGLE', 'Clientes', id, 'Estado activo: ' + newActivo);
+    const updated = clientesBuscarPorId_2026(id);
+    return { ok: true, result: updated, customer: updated };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function clientesTieneVinculos_2026(clienteId) {
+  const cid = String(clienteId || '').trim();
+  if (!cid) return false;
+  const checkSheet = function (sheetName, col) {
+    const sh = findSheetIgnoreCase_(sheetName);
+    if (!sh) return false;
+    return getSheetDataAsObjects(sheetName).some(function (r) {
+      return String(r[col] || '').trim() === cid;
+    });
+  };
+  return (
+    checkSheet('Trabajos', 'clienteId') ||
+    checkSheet('AsignacionesPrecio', 'clienteId') ||
+    checkSheet('Cobros', 'clienteId') ||
+    checkSheet('CobroAplicaciones', 'clienteId') ||
+    checkSheet('NotasDebito', 'clienteId') ||
+    checkSheet('NotasCobro', 'clienteId')
+  );
+}
+
+function clientesEliminar_2026(p, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const id = String((p && p.id) || '').trim();
+    if (!id) return { ok: false, error: 'Se requiere el ID del cliente.' };
+    const existing = clientesBuscarPorId_2026(id);
+    if (!existing) return { ok: false, error: 'Cliente no encontrado.' };
+    if (clientesTieneVinculos_2026(id)) {
+      return {
+        ok: false,
+        error: 'Este cliente tiene registros vinculados (servicios, ventas, cobros o notas) y no puede eliminarse. Puedes desactivarlo para conservar el historial.'
+      };
+    }
+    deleteRowByColumn('Clientes', 'id', id);
+    SpreadsheetApp.flush();
+    logAudit_(userSession && userSession.usuarioId, 'DELETE', 'Clientes', id, 'Cliente eliminado: ' + existing.nombre);
+    return { ok: true, result: { deleted: true, id: id }, deleted: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// -------------------------------------------------------------
+// 2. CONFIGURACIÓN DE COBROS E INTERÉS POR MORA
+// -------------------------------------------------------------
+
+function configCobrosObtener_2026() {
+  const rawPlazo = getConfigValue('COBRO_PLAZO_DIAS', '');
+  const rawActivo = getConfigValue('COBRO_INTERES_ACTIVO', '');
+  const rawTasa = getConfigValue('COBRO_INTERES_MENSUAL', '');
+  const rawUpd = getConfigValue('COBRO_CONFIG_ACTUALIZADO', '');
+
+  const plazoNum = rawPlazo !== '' && rawPlazo !== null && rawPlazo !== undefined && !isNaN(Number(rawPlazo))
+    ? Math.max(0, Math.round(Number(rawPlazo)))
+    : null;
+  const tasaNum = rawTasa !== '' && rawTasa !== null && rawTasa !== undefined && !isNaN(Number(rawTasa))
+    ? Math.max(0, redondear2_2026(Number(rawTasa)))
+    : null;
+  const aplicar = finParseBool_2026(rawActivo, false) && tasaNum !== null && tasaNum > 0;
+  const configurado = plazoNum !== null || tasaNum !== null || String(rawActivo) !== '';
+
+  const settings = {
+    plazoDiasPredeterminado: plazoNum,
+    aplicarInteresPorDefecto: aplicar,
+    porcentajeInteresMensual: tasaNum,
+    configurado: configurado,
+    actualizadoEn: rawUpd ? String(rawUpd) : undefined
+  };
+  return { ok: true, result: settings, settings: settings };
+}
+
+function configCobrosGuardar_2026(p, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const rawPlazo = p ? p.plazoDiasPredeterminado : '';
+    const plazoVal = rawPlazo !== '' && rawPlazo !== null && rawPlazo !== undefined
+      ? Math.max(0, Math.round(Number(String(rawPlazo).replace(',', '.'))))
+      : '';
+    if (plazoVal !== '' && !Number.isFinite(plazoVal)) {
+      return { ok: false, error: 'El plazo predeterminado en días no es válido.' };
+    }
+    const aplicar = finParseBool_2026(p && p.aplicarInteresPorDefecto, false);
+    const rawTasa = p ? p.porcentajeInteresMensual : '';
+    const tasaVal = rawTasa !== '' && rawTasa !== null && rawTasa !== undefined
+      ? Math.max(0, redondear2_2026(Number(String(rawTasa).replace(',', '.'))))
+      : '';
+    if (tasaVal !== '' && !Number.isFinite(tasaVal)) {
+      return { ok: false, error: 'El porcentaje de interés mensual no es válido.' };
+    }
+    if (aplicar && (tasaVal === '' || tasaVal <= 0)) {
+      return { ok: false, error: 'Si activas el interés por mora predeterminado, ingresa un porcentaje mensual mayor a 0.' };
+    }
+
+    const ahora = new Date().toISOString();
+    setConfigValue('COBRO_PLAZO_DIAS', plazoVal === '' ? '' : String(plazoVal));
+    setConfigValue('COBRO_INTERES_ACTIVO', aplicar ? 'TRUE' : 'FALSE');
+    setConfigValue('COBRO_INTERES_MENSUAL', tasaVal === '' ? '' : String(tasaVal));
+    setConfigValue('COBRO_CONFIG_ACTUALIZADO', ahora);
+    SpreadsheetApp.flush();
+
+    logAudit_(
+      userSession && userSession.usuarioId,
+      'UPDATE',
+      'Configuracion',
+      'COBRO_CONFIG',
+      'Plazo=' + plazoVal + ', Interes=' + aplicar + ', Tasa=' + tasaVal + '%'
+    );
+    return configCobrosObtener_2026();
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// -------------------------------------------------------------
+// 3. VENTAS DE COSECHA (Hoja AsignacionesPrecio — Admin)
+// -------------------------------------------------------------
+
+function ventasCosechaEstado_2026(compradorPendiente, precioPendiente) {
+  if (compradorPendiente && precioPendiente) return 'COMPRADOR_Y_PRECIO_PENDIENTES';
+  if (compradorPendiente) return 'COMPRADOR_PENDIENTE';
+  if (precioPendiente) return 'PRECIO_PENDIENTE';
+  return 'VENTA_COMPLETA';
+}
+
+function ventasCosechaResolverCondiciones_2026(opts) {
+  const isNew = Boolean(opts && opts.isNew);
+  const wasComplete = Boolean(opts && opts.wasComplete);
+  const isComplete = Boolean(opts && opts.isComplete);
+  const p = (opts && opts.payload) || {};
+  const existing = (opts && opts.existing) || {};
+  const completionBase = finToIsoDate_2026(opts && opts.completionBaseDate) || getBoliviaTodayStr_();
+
+  // Regla obligatoria: mientras falte comprador del catálogo o precio válido,
+  // NO se establece plazo, fecha de vencimiento ni intereses.
+  if (!isComplete) {
+    return {
+      plazoDias: '',
+      fechaVencimiento: '',
+      fechaCompletado: '',
+      aplicarInteres: false,
+      tasaInteresMensual: 0
+    };
+  }
+
+  // Transición a venta completa (nueva venta completa o completado de una venta pendiente):
+  // El plazo comienza desde la fecha en que se completa la venta (completionBase),
+  // nunca desde la fecha de cosecha ni desde el registro inicial de una venta pendiente.
+  if (isNew || !wasComplete) {
+    const fechaCompletado = completionBase;
+    const hasExplicitPlazo = p.plazoDias !== undefined;
+    const hasExplicitVenc = p.fechaVencimiento !== undefined && String(p.fechaVencimiento).trim() !== '';
+    const hasExplicitInt = p.aplicarInteres !== undefined;
+    const hasExplicitTasa = p.tasaInteresMensual !== undefined;
+    const callerSuppliedAny = hasExplicitPlazo || hasExplicitVenc || hasExplicitInt || hasExplicitTasa;
+
+    let plazoDias = '';
+    let fechaVencimiento = '';
+    let aplicarInteres = false;
+    let tasaInteresMensual = 0;
+
+    if (!callerSuppliedAny) {
+      // Precargar automáticamente desde Administración -> Configuración de cobros
+      const cfgRes = configCobrosObtener_2026();
+      const cfg = (cfgRes && cfgRes.result) || {};
+      if (cfg.plazoDiasPredeterminado !== null && cfg.plazoDiasPredeterminado !== undefined && cfg.plazoDiasPredeterminado !== '') {
+        const dp = Number(cfg.plazoDiasPredeterminado);
+        if (Number.isFinite(dp) && dp >= 0) {
+          plazoDias = Math.round(dp);
+          fechaVencimiento = finAddDaysIso_2026(fechaCompletado, plazoDias);
+        }
+      }
+      aplicarInteres = Boolean(cfg.aplicarInteresPorDefecto);
+      const dt = Number(cfg.porcentajeInteresMensual || 0);
+      tasaInteresMensual = aplicarInteres && Number.isFinite(dt) && dt > 0 ? redondear2_2026(dt) : 0;
+      if (tasaInteresMensual <= 0) aplicarInteres = false;
+    } else {
+      const rawPlazo = p.plazoDias !== undefined && p.plazoDias !== '' && p.plazoDias !== null
+        ? Number(String(p.plazoDias).replace(',', '.'))
+        : NaN;
+      if (Number.isFinite(rawPlazo) && rawPlazo >= 0) {
+        plazoDias = Math.round(rawPlazo);
+        fechaVencimiento = p.fechaVencimiento && String(p.fechaVencimiento).trim() !== ''
+          ? validarFechaIso_2026(p.fechaVencimiento, finAddDaysIso_2026(fechaCompletado, plazoDias))
+          : finAddDaysIso_2026(fechaCompletado, plazoDias);
+      } else if (p.fechaVencimiento && String(p.fechaVencimiento).trim() !== '') {
+        fechaVencimiento = validarFechaIso_2026(p.fechaVencimiento, fechaCompletado);
+        plazoDias = Math.max(0, finDaysDiffIso_2026(fechaCompletado, fechaVencimiento));
+      }
+
+      aplicarInteres = finParseBool_2026(p.aplicarInteres, false);
+      const rawTasa = Number(String(p.tasaInteresMensual || 0).replace(',', '.'));
+      tasaInteresMensual = aplicarInteres && Number.isFinite(rawTasa) && rawTasa > 0 ? redondear2_2026(rawTasa) : 0;
+      if (tasaInteresMensual <= 0) aplicarInteres = false;
+    }
+
+    return {
+      plazoDias: plazoDias,
+      fechaVencimiento: fechaVencimiento,
+      fechaCompletado: fechaCompletado,
+      aplicarInteres: aplicarInteres,
+      tasaInteresMensual: tasaInteresMensual
+    };
+  }
+
+  // Edición de una venta que YA estaba completa:
+  // Conservar sus condiciones y fechas originales sin reiniciar automáticamente el plazo.
+  const preservedFechaCompletado = finToIsoDate_2026(existing.fechaCompletado) || finToIsoDate_2026(existing.fecha) || completionBase;
+  let finalPlazo = existing.plazoDias !== undefined && existing.plazoDias !== '' && existing.plazoDias !== null
+    ? Math.max(0, Math.round(Number(existing.plazoDias)))
+    : '';
+  let finalVenc = finToIsoDate_2026(existing.fechaVencimiento);
+
+  if (p.plazoDias !== undefined || p.fechaVencimiento !== undefined) {
+    const rawP = p.plazoDias !== undefined && p.plazoDias !== '' && p.plazoDias !== null
+      ? Number(String(p.plazoDias).replace(',', '.'))
+      : NaN;
+    if (Number.isFinite(rawP) && rawP >= 0) {
+      finalPlazo = Math.round(rawP);
+      finalVenc = p.fechaVencimiento && String(p.fechaVencimiento).trim() !== ''
+        ? validarFechaIso_2026(p.fechaVencimiento, finalVenc || finAddDaysIso_2026(preservedFechaCompletado, finalPlazo))
+        : finAddDaysIso_2026(preservedFechaCompletado, finalPlazo);
+    } else if (p.fechaVencimiento && String(p.fechaVencimiento).trim() !== '') {
+      finalVenc = validarFechaIso_2026(p.fechaVencimiento, finalVenc || preservedFechaCompletado);
+      finalPlazo = Math.max(0, finDaysDiffIso_2026(preservedFechaCompletado, finalVenc));
+    } else {
+      finalPlazo = '';
+      finalVenc = '';
+    }
+  }
+
+  let finalAplicarInt = p.aplicarInteres !== undefined
+    ? finParseBool_2026(p.aplicarInteres, false)
+    : finParseBool_2026(existing.aplicarInteres, false);
+  const rawTasa = p.tasaInteresMensual !== undefined
+    ? Number(String(p.tasaInteresMensual || 0).replace(',', '.'))
+    : (Number(existing.tasaInteresMensual) || 0);
+  const finalTasaInt = finalAplicarInt && Number.isFinite(rawTasa) && rawTasa > 0 ? redondear2_2026(rawTasa) : 0;
+  if (finalTasaInt <= 0) finalAplicarInt = false;
+
+  return {
+    plazoDias: finalPlazo,
+    fechaVencimiento: finalVenc,
+    fechaCompletado: preservedFechaCompletado,
+    aplicarInteres: finalAplicarInt,
+    tasaInteresMensual: finalTasaInt
+  };
+}
+
+function ventasCosechaMapear_2026(raw, cosechasMap, lotesMap, campanasMap, clientesMap) {
+  const cosecha = cosechasMap[String(raw.cosechaId || '')] || {};
+  const loteId = String(raw.loteId || cosecha.loteId || '').trim();
+  const campanaId = String(raw.campanaId || cosecha.campanaId || '').trim();
+  const producto = String(raw.producto || cosecha.producto || '').trim();
+  const clienteId = String(raw.clienteId || '').trim();
+  const clienteObj = clienteId ? clientesMap[clienteId] : null;
+  const clienteNombre = clienteObj ? clienteObj.nombre : String(raw.clienteNombre || '').trim();
+  const compradorPendiente = raw.compradorPendiente !== undefined && raw.compradorPendiente !== ''
+    ? finParseBool_2026(raw.compradorPendiente, !clienteId)
+    : !clienteId;
+
+  const cantidad = Number(raw.toneladas || raw.cantidad || 0) || 0;
+  const precioRaw = raw.precioUnitario !== undefined && raw.precioUnitario !== ''
+    ? Number(raw.precioUnitario)
+    : Number(raw.precioUsdTon || 0);
+  const precioUnitario = Number.isFinite(precioRaw) ? precioRaw : 0;
+  const precioPendiente = raw.precioPendiente !== undefined && raw.precioPendiente !== ''
+    ? finParseBool_2026(raw.precioPendiente, precioUnitario <= 0)
+    : precioUnitario <= 0;
+
+  const rawMon = String(raw.moneda || 'USD').trim().toUpperCase();
+  const moneda = rawMon === 'BOB' || rawMon === 'BS' ? 'BOB' : 'USD';
+  const tc = Number(raw.tc) > 0 ? Number(raw.tc) : 6.96;
+  const importeTotal = precioPendiente
+    ? 0
+    : redondear2_2026(
+        raw.importeTotal !== undefined && raw.importeTotal !== ''
+          ? Number(raw.importeTotal)
+          : (raw.importeUsd !== undefined && raw.importeUsd !== '' ? Number(raw.importeUsd) : cantidad * precioUnitario)
+      );
+
+  const fecha = finToIsoDate_2026(raw.fecha);
+  const estado = ventasCosechaEstado_2026(compradorPendiente, precioPendiente);
+  const isComplete = estado === 'VENTA_COMPLETA';
+  const plazoDias = isComplete && raw.plazoDias !== undefined && raw.plazoDias !== '' && raw.plazoDias !== null
+    ? Math.max(0, Math.round(Number(raw.plazoDias)))
+    : '';
+  const fechaVencimiento = isComplete && raw.fechaVencimiento ? finToIsoDate_2026(raw.fechaVencimiento) : '';
+  const fechaCompletado = isComplete
+    ? (raw.fechaCompletado ? finToIsoDate_2026(raw.fechaCompletado) : fecha)
+    : '';
+  const aplicarInteres = isComplete ? finParseBool_2026(raw.aplicarInteres, false) : false;
+  const tasaInteresMensual = aplicarInteres ? (Number(raw.tasaInteresMensual) || 0) : 0;
+
+  return {
+    id: String(raw.id || '').trim(),
+    cosechaId: String(raw.cosechaId || '').trim(),
+    fecha: fecha,
+    campanaId: campanaId,
+    campanaNombre: (campanasMap[campanaId] && campanasMap[campanaId].nombre) || '',
+    loteId: loteId,
+    loteNombre: (lotesMap[loteId] && lotesMap[loteId].nombre) || '',
+    producto: producto,
+    cantidad: cantidad,
+    toneladas: cantidad,
+    unidad: String(raw.unidad || 't').trim() || 't',
+    clienteId: compradorPendiente ? '' : clienteId,
+    clienteNombre: compradorPendiente ? '' : clienteNombre,
+    compradorPendiente: compradorPendiente,
+    precioUnitario: precioPendiente ? 0 : precioUnitario,
+    precioPendiente: precioPendiente,
+    moneda: moneda,
+    tc: tc,
+    importeTotal: importeTotal,
+    plazoDias: plazoDias,
+    fechaVencimiento: fechaVencimiento,
+    fechaCompletado: fechaCompletado,
+    aplicarInteres: aplicarInteres && tasaInteresMensual > 0,
+    tasaInteresMensual: aplicarInteres && tasaInteresMensual > 0 ? tasaInteresMensual : 0,
+    observacion: String(raw.observacion || '').trim(),
+    movimientoId: String(raw.movimientoId || '').trim(),
+    estado: estado,
+    estadoComprador: compradorPendiente ? 'PENDIENTE' : 'ASIGNADO',
+    estadoPrecio: precioPendiente ? 'PENDIENTE' : 'ASIGNADO',
+    anulada: finParseBool_2026(raw.anulada, false),
+    creadoPor: String(raw.creadoPor || ''),
+    creadoEn: raw.creadoEn ? String(raw.creadoEn) : '',
+    actualizadoEn: raw.actualizadoEn ? String(raw.actualizadoEn) : ''
+  };
+}
+
+function ventasCosechaListar_2026(p) {
+  const shAsig = cosechasHoja_2026('AsignacionesPrecio', PRECIO_CAMPOS_2026);
+  asegurarColumnasOpcionales_2026(shAsig, VENTA_COSECHA_EXTRA_COLS_2026);
+
+  const harvests = cosechasResumen_2026();
+  const cosechasMap = {};
+  harvests.forEach(function (c) { cosechasMap[String(c.id)] = c; });
+  const lotesMap = {};
+  getSheetDataAsObjects('Lotes').forEach(function (l) { lotesMap[String(l.id)] = l; });
+  const campanasMap = {};
+  getSheetDataAsObjects('Campanas').forEach(function (c) { campanasMap[String(c.id)] = c; });
+  const clientesMap = {};
+  if (findSheetIgnoreCase_('Clientes')) {
+    getSheetDataAsObjects('Clientes').forEach(function (c) { clientesMap[String(c.id)] = c; });
+  }
+
+  let sales = getSheetDataAsObjects('AsignacionesPrecio')
+    .filter(function (a) { return String(a.id || '').trim() !== ''; })
+    .map(function (a) { return ventasCosechaMapear_2026(a, cosechasMap, lotesMap, campanasMap, clientesMap); });
+
+  const includeAnuladas = p && finParseBool_2026(p.includeAnuladas, false);
+  if (!includeAnuladas) {
+    sales = sales.filter(function (s) { return !s.anulada; });
+  }
+  if (p && p.campanaId) {
+    sales = sales.filter(function (s) { return String(s.campanaId) === String(p.campanaId); });
+  }
+  const filteredHarvests = (p && p.campanaId)
+    ? harvests.filter(function (h) { return String(h.campanaId) === String(p.campanaId); })
+    : harvests;
+
+  return { ok: true, result: sales, sales: sales, harvests: filteredHarvests };
+}
+
+function ventasCosechaTienePagosActivos_2026(ventaId) {
+  const sh = findSheetIgnoreCase_('CobroAplicaciones');
+  if (!sh) return false;
+  const vid = String(ventaId || '').trim();
+  return getSheetDataAsObjects('CobroAplicaciones').some(function (a) {
+    return String(a.deudaTipo || '').toUpperCase() === 'VENTA_COSECHA' &&
+      String(a.deudaId || '').trim() === vid &&
+      !finParseBool_2026(a.anulado, false);
+  });
+}
+
+function ventasCosechaCrear_2026(p, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const shAsig = cosechasHoja_2026('AsignacionesPrecio', PRECIO_CAMPOS_2026);
+    asegurarColumnasOpcionales_2026(shAsig, VENTA_COSECHA_EXTRA_COLS_2026);
+
+    const idem = String((p && p.idempotencyKey) || '').trim();
+    if (idem) {
+      const existing = getSheetDataAsObjects('AsignacionesPrecio').find(function (a) {
+        return String(a.idempotencyKey || '').trim() === idem;
+      });
+      if (existing) {
+        const listed = ventasCosechaListar_2026({ includeAnuladas: true });
+        const found = listed.sales.find(function (s) { return s.id === String(existing.id); });
+        return { ok: true, result: found || existing, sale: found || existing };
+      }
+    }
+
+    const cosechaId = String((p && p.cosechaId) || '').trim();
+    const cosecha = cosechasResumen_2026().find(function (c) { return String(c.id) === cosechaId; });
+    if (!cosecha) throw new Error('Cosecha no encontrada.');
+
+    const cantidad = cosechasNumero_2026(p.cantidad !== undefined ? p.cantidad : p.toneladas, 'Cantidad vendida');
+    if (cantidad > cosecha.pendiente + 0.000001) {
+      throw new Error('La cantidad (' + cantidad + ' t) supera las toneladas disponibles (' + cosecha.pendiente + ' t).');
+    }
+
+    const compradorPendiente = finParseBool_2026(p.compradorPendiente, !String(p.clienteId || '').trim());
+    let clienteId = '';
+    let clienteNombre = '';
+    if (!compradorPendiente) {
+      clienteId = String(p.clienteId || '').trim();
+      const cli = clientesBuscarPorId_2026(clienteId);
+      if (!cli) throw new Error('El comprador seleccionado no existe en el catálogo de clientes.');
+      clienteNombre = cli.nombre;
+    }
+
+    const precioPendiente = finParseBool_2026(p.precioPendiente, false);
+    let precioUnitario = 0;
+    if (!precioPendiente) {
+      precioUnitario = cosechasNumero_2026(p.precioUnitario, 'Precio unitario');
+    }
+
+    const rawMon = String(p.moneda || 'USD').trim().toUpperCase();
+    const moneda = rawMon === 'BOB' || rawMon === 'BS' ? 'BOB' : 'USD';
+    const tc = resolverTipoCambioOperacion_2026(p.tc !== undefined ? p.tc : p.tipoCambio);
+    const fecha = validarFechaIso_2026(p.fecha, getBoliviaTodayStr_());
+    const campanaId = String(p.campanaId || cosecha.campanaId || '').trim();
+    if (campanaId && !getSheetDataAsObjects('Campanas').some(function (c) { return String(c.id) === campanaId; })) {
+      throw new Error('Campaña de venta no válida.');
+    }
+    const importeTotal = precioPendiente ? 0 : redondear2_2026(cantidad * precioUnitario);
+    const importeUsd = precioPendiente ? 0 : finConvertCurrency_2026(importeTotal, moneda, 'USD', tc);
+
+    const isComplete = !compradorPendiente && Boolean(clienteId) && !precioPendiente && precioUnitario > 0;
+    const resolvedTerms = ventasCosechaResolverCondiciones_2026({
+      isNew: true,
+      wasComplete: false,
+      isComplete: isComplete,
+      payload: p,
+      completionBaseDate: fecha,
+      existing: null
+    });
+    const plazoDias = resolvedTerms.plazoDias;
+    const fechaVencimiento = resolvedTerms.fechaVencimiento;
+    const fechaCompletado = resolvedTerms.fechaCompletado;
+    const aplicarInteres = resolvedTerms.aplicarInteres;
+    const tasaInteresMensual = resolvedTerms.tasaInteresMensual;
+
+    const id = Utilities.getUuid();
+    const ahora = new Date().toISOString();
+    const usuario = String((userSession && userSession.usuarioId) || 'admin');
+    const estado = ventasCosechaEstado_2026(compradorPendiente, precioPendiente);
+
+    let movId = '';
+    if (!precioPendiente && importeTotal > 0) {
+      const movSheet = findSheetIgnoreCase_('Movimientos');
+      if (!movSheet) throw new Error('Hoja Movimientos no encontrada.');
+      validateRequiredColumns_('Movimientos', getSheetHeaders_(movSheet), SHEET_SCHEMAS.Movimientos);
+      movId = Utilities.getUuid();
+      const desc = 'Venta de ' + String(cosecha.producto || 'cosecha') + (clienteNombre ? ' (' + clienteNombre + ')' : '');
+      finAppendObj_2026(movSheet, {
+        id: movId,
+        fecha: fecha,
+        campanaId: campanaId,
+        modulo: 'PROPIEDAD',
+        clase: 'INGRESO',
+        itemId: '',
+        descripcion: desc,
+        loteId: String(cosecha.loteId || ''),
+        maquinaId: '',
+        cantidad: cantidad,
+        unidad: 't',
+        precioUnitario: precioUnitario,
+        importe: importeTotal,
+        moneda: moneda,
+        tc: tc,
+        trabajoId: 'COSECHA:' + id,
+        creadoPor: usuario,
+        creadoEn: ahora,
+        actualizadoEn: ahora
+      });
+    }
+
+    const rowObj = {
+      id: id,
+      cosechaId: cosechaId,
+      fecha: fecha,
+      campanaId: campanaId,
+      toneladas: cantidad,
+      precioUsdTon: moneda === 'USD' ? precioUnitario : (precioPendiente ? 0 : redondear2_2026(precioUnitario / tc)),
+      importeUsd: importeUsd,
+      tc: tc,
+      movimientoId: movId,
+      creadoPor: usuario,
+      creadoEn: ahora,
+      loteId: String(cosecha.loteId || ''),
+      producto: String(cosecha.producto || ''),
+      unidad: 't',
+      clienteId: clienteId,
+      clienteNombre: clienteNombre,
+      compradorPendiente: compradorPendiente,
+      precioUnitario: precioUnitario,
+      moneda: moneda,
+      importeTotal: importeTotal,
+      precioPendiente: precioPendiente,
+      plazoDias: plazoDias,
+      fechaVencimiento: fechaVencimiento,
+      fechaCompletado: fechaCompletado,
+      aplicarInteres: aplicarInteres,
+      tasaInteresMensual: tasaInteresMensual,
+      observacion: String(p.observacion || '').trim(),
+      estado: estado,
+      anulada: false,
+      actualizadoEn: ahora,
+      idempotencyKey: idem
+    };
+
+    finAppendObj_2026(shAsig, rowObj);
+    SpreadsheetApp.flush();
+    logAudit_(usuario, 'CREATE', 'AsignacionesPrecio', id, 'Venta cosecha ' + cantidad + 't | ' + estado);
+
+    const listed = ventasCosechaListar_2026({ includeAnuladas: true });
+    const created = listed.sales.find(function (s) { return s.id === id; }) || rowObj;
+    return { ok: true, result: created, sale: created };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function ventasCosechaActualizar_2026(p, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const id = String((p && p.id) || '').trim();
+    if (!id) throw new Error('Se requiere el ID de la venta.');
+
+    const shAsig = cosechasHoja_2026('AsignacionesPrecio', PRECIO_CAMPOS_2026);
+    asegurarColumnasOpcionales_2026(shAsig, VENTA_COSECHA_EXTRA_COLS_2026);
+    const vals = shAsig.getDataRange().getValues();
+    if (vals.length < 2) throw new Error('Venta no encontrada.');
+    const m = getHeaderIndexMap_(vals[0]);
+
+    let targetRow = -1;
+    for (let i = 1; i < vals.length; i++) {
+      if (String(vals[i][m['id']] || '').trim() === id) {
+        targetRow = i + 1;
+        break;
+      }
+    }
+    if (targetRow === -1) throw new Error('Venta no encontrada: ' + id);
+
+    const oldRow = vals[targetRow - 1].slice();
+    if (finParseBool_2026(oldRow[m['anulada']], false)) {
+      throw new Error('No se puede editar una venta anulada.');
+    }
+
+    const cosechaId = String(oldRow[m['cosechaid']] || '').trim();
+    const cosecha = cosechasResumen_2026().find(function (c) { return String(c.id) === cosechaId; });
+    if (!cosecha) throw new Error('Cosecha de origen no encontrada.');
+
+    const hasPayments = ventasCosechaTienePagosActivos_2026(id);
+
+    const oldCant = Number(oldRow[m['toneladas']]) || 0;
+    const oldFecha = finToIsoDate_2026(oldRow[m['fecha']]) || getBoliviaTodayStr_();
+    const oldCampanaId = String(oldRow[m['campanaid']] || cosecha.campanaId || '');
+    const oldClienteId = String(oldRow[m['clienteid']] || '').trim();
+    const oldClienteNombre = String(oldRow[m['clientenombre']] || '').trim();
+    const oldCompPend = finParseBool_2026(oldRow[m['compradorpendiente']], !oldClienteId);
+    const oldPrecio = Number(oldRow[m['preciounitario']] !== '' ? oldRow[m['preciounitario']] : oldRow[m['preciousdton']]) || 0;
+    const oldPrecioPend = finParseBool_2026(oldRow[m['preciopendiente']], oldPrecio <= 0);
+    const oldMoneda = String(oldRow[m['moneda']] || 'USD').toUpperCase() === 'BOB' ? 'BOB' : 'USD';
+    const oldTc = Number(oldRow[m['tc']]) > 0 ? Number(oldRow[m['tc']]) : 6.96;
+    const oldMovId = String(oldRow[m['movimientoid']] || '').trim();
+
+    const finalCant = p.cantidad !== undefined ? cosechasNumero_2026(p.cantidad, 'Cantidad vendida') : oldCant;
+    const maxAllowed = Math.round((cosecha.pendiente + oldCant) * 1000000) / 1000000;
+    if (finalCant > maxAllowed + 0.000001) {
+      throw new Error('La cantidad (' + finalCant + ' t) supera las toneladas disponibles (' + maxAllowed + ' t).');
+    }
+
+    const finalFecha = p.fecha !== undefined ? validarFechaIso_2026(p.fecha, oldFecha) : oldFecha;
+
+    let finalCompPend = p.compradorPendiente !== undefined ? finParseBool_2026(p.compradorPendiente, oldCompPend) : oldCompPend;
+    let finalClienteId = oldClienteId;
+    let finalClienteNombre = oldClienteNombre;
+    if (p.compradorPendiente !== undefined || p.clienteId !== undefined) {
+      if (finalCompPend) {
+        if (hasPayments) throw new Error('No se puede dejar el comprador pendiente porque la venta ya tiene cobros registrados.');
+        finalClienteId = '';
+        finalClienteNombre = '';
+      } else {
+        const reqCid = String(p.clienteId !== undefined ? p.clienteId : oldClienteId).trim();
+        if (!reqCid) {
+          finalCompPend = true;
+          finalClienteId = '';
+          finalClienteNombre = '';
+        } else {
+          if (hasPayments && oldClienteId && reqCid !== oldClienteId) {
+            throw new Error('No se puede cambiar el comprador porque esta venta ya tiene cobros registrados.');
+          }
+          const cli = clientesBuscarPorId_2026(reqCid);
+          if (!cli) throw new Error('El comprador seleccionado no existe en el catálogo.');
+          finalClienteId = cli.id;
+          finalClienteNombre = cli.nombre;
+        }
+      }
+    }
+
+    const finalPrecioPend = p.precioPendiente !== undefined ? finParseBool_2026(p.precioPendiente, oldPrecioPend) : oldPrecioPend;
+    if (finalPrecioPend && hasPayments) {
+      throw new Error('No se puede dejar el precio pendiente porque esta venta ya tiene cobros registrados.');
+    }
+    const finalPrecio = finalPrecioPend
+      ? 0
+      : (p.precioUnitario !== undefined ? cosechasNumero_2026(p.precioUnitario, 'Precio unitario') : (oldPrecio > 0 ? oldPrecio : cosechasNumero_2026(0, 'Precio unitario')));
+
+    const finalMoneda = p.moneda !== undefined
+      ? (String(p.moneda).trim().toUpperCase() === 'BOB' || String(p.moneda).trim().toUpperCase() === 'BS' ? 'BOB' : 'USD')
+      : oldMoneda;
+    if (hasPayments && finalMoneda !== oldMoneda) {
+      throw new Error('No se puede cambiar la moneda de una venta con cobros registrados.');
+    }
+    const finalTc = p.tc !== undefined ? resolverTipoCambioOperacion_2026(p.tc, oldTc) : oldTc;
+    const finalTotal = finalPrecioPend ? 0 : redondear2_2026(finalCant * finalPrecio);
+    const finalImporteUsd = finalPrecioPend ? 0 : finConvertCurrency_2026(finalTotal, finalMoneda, 'USD', finalTc);
+
+    if (hasPayments) {
+      const apps = getSheetDataAsObjects('CobroAplicaciones').filter(function (a) {
+        return String(a.deudaTipo || '').toUpperCase() === 'VENTA_COSECHA' &&
+          String(a.deudaId || '').trim() === id &&
+          !finParseBool_2026(a.anulado, false);
+      });
+      const paidCap = redondear2_2026(apps.reduce(function (s, a) { return s + (Number(a.capitalPagado) || 0); }, 0));
+      if (finalTotal + 0.01 < paidCap) {
+        throw new Error('El nuevo importe (' + finalTotal.toFixed(2) + ') no puede ser menor al capital ya cobrado (' + paidCap.toFixed(2) + ').');
+      }
+    }
+
+    const oldWasComplete = !oldCompPend && Boolean(oldClienteId) && !oldPrecioPend && oldPrecio > 0;
+    const newIsComplete = !finalCompPend && Boolean(finalClienteId) && !finalPrecioPend && finalPrecio > 0;
+    const oldFechaCompletado = m['fechacompletado'] !== undefined ? finToIsoDate_2026(oldRow[m['fechacompletado']]) : '';
+
+    const resolvedTerms = ventasCosechaResolverCondiciones_2026({
+      isNew: false,
+      wasComplete: oldWasComplete,
+      isComplete: newIsComplete,
+      payload: p,
+      completionBaseDate: getBoliviaTodayStr_(),
+      existing: {
+        fecha: oldFecha,
+        fechaCompletado: oldFechaCompletado,
+        plazoDias: oldRow[m['plazodias']],
+        fechaVencimiento: oldRow[m['fechavencimiento']],
+        aplicarInteres: oldRow[m['aplicarinteres']],
+        tasaInteresMensual: oldRow[m['tasainteresmensual']]
+      }
+    });
+    const finalPlazo = resolvedTerms.plazoDias;
+    const finalVenc = resolvedTerms.fechaVencimiento;
+    const finalFechaCompletado = resolvedTerms.fechaCompletado;
+    const finalAplicarInt = resolvedTerms.aplicarInteres;
+    const finalTasaInt = resolvedTerms.tasaInteresMensual;
+
+    const finalObs = p.observacion !== undefined ? String(p.observacion || '').trim() : String(oldRow[m['observacion']] || '');
+    const finalEstado = ventasCosechaEstado_2026(finalCompPend, finalPrecioPend);
+    const ahora = new Date().toISOString();
+    const usuario = String((userSession && userSession.usuarioId) || 'admin');
+
+    // Conciliación estricta con Movimientos (SIN duplicar ingresos al asignar comprador)
+    const movSheet = findSheetIgnoreCase_('Movimientos');
+    let finalMovId = oldMovId;
+    if (movSheet) {
+      const mVals = movSheet.getDataRange().getValues();
+      const mMap = getHeaderIndexMap_(mVals[0]);
+      let movRowIdx = -1;
+      if (oldMovId) {
+        for (let k = 1; k < mVals.length; k++) {
+          if (String(mVals[k][mMap['id']] || '').trim() === oldMovId) {
+            movRowIdx = k + 1;
+            break;
+          }
+        }
+      }
+      if (movRowIdx === -1) {
+        for (let k = 1; k < mVals.length; k++) {
+          if (String(mVals[k][mMap['trabajoid']] || '').trim() === 'COSECHA:' + id) {
+            movRowIdx = k + 1;
+            finalMovId = String(mVals[k][mMap['id']] || '').trim();
+            break;
+          }
+        }
+      }
+
+      const desc = 'Venta de ' + String(cosecha.producto || 'cosecha') + (finalClienteNombre ? ' (' + finalClienteNombre + ')' : '');
+
+      if (!finalPrecioPend && finalTotal > 0) {
+        if (movRowIdx !== -1) {
+          // Actualizar el ingreso existente sin duplicar
+          const mRow = mVals[movRowIdx - 1].slice();
+          mRow[mMap['fecha']] = finalFecha;
+          mRow[mMap['campanaid']] = oldCampanaId;
+          mRow[mMap['descripcion']] = desc;
+          mRow[mMap['loteid']] = String(cosecha.loteId || '');
+          mRow[mMap['cantidad']] = finalCant;
+          mRow[mMap['unidad']] = 't';
+          mRow[mMap['preciounitario']] = finalPrecio;
+          mRow[mMap['importe']] = finalTotal;
+          mRow[mMap['moneda']] = finalMoneda;
+          mRow[mMap['tc']] = finalTc;
+          mRow[mMap['actualizadoen']] = ahora;
+          movSheet.getRange(movRowIdx, 1, 1, mRow.length).setValues([mRow]);
+        } else {
+          // Primera vez que se asigna precio: crear 1 único ingreso
+          finalMovId = Utilities.getUuid();
+          finAppendObj_2026(movSheet, {
+            id: finalMovId,
+            fecha: finalFecha,
+            campanaId: oldCampanaId,
+            modulo: 'PROPIEDAD',
+            clase: 'INGRESO',
+            itemId: '',
+            descripcion: desc,
+            loteId: String(cosecha.loteId || ''),
+            maquinaId: '',
+            cantidad: finalCant,
+            unidad: 't',
+            precioUnitario: finalPrecio,
+            importe: finalTotal,
+            moneda: finalMoneda,
+            tc: finalTc,
+            trabajoId: 'COSECHA:' + id,
+            creadoPor: usuario,
+            creadoEn: ahora,
+            actualizadoEn: ahora
+          });
+        }
+      } else if (movRowIdx !== -1) {
+        // Se quitó el precio (y no tiene cobros): eliminar el ingreso ficticio
+        movSheet.deleteRow(movRowIdx);
+        finalMovId = '';
+      }
+    }
+
+    const newRow = oldRow.slice();
+    newRow[m['fecha']] = finalFecha;
+    newRow[m['toneladas']] = finalCant;
+    newRow[m['preciousdton']] = finalMoneda === 'USD' ? finalPrecio : (finalPrecioPend ? 0 : redondear2_2026(finalPrecio / finalTc));
+    newRow[m['importeusd']] = finalImporteUsd;
+    newRow[m['tc']] = finalTc;
+    newRow[m['movimientoid']] = finalMovId;
+    newRow[m['clienteid']] = finalClienteId;
+    newRow[m['clientenombre']] = finalClienteNombre;
+    newRow[m['compradorpendiente']] = finalCompPend;
+    newRow[m['preciounitario']] = finalPrecio;
+    newRow[m['moneda']] = finalMoneda;
+    newRow[m['importetotal']] = finalTotal;
+    newRow[m['preciopendiente']] = finalPrecioPend;
+    newRow[m['plazodias']] = finalPlazo;
+    newRow[m['fechavencimiento']] = finalVenc;
+    if (m['fechacompletado'] !== undefined) newRow[m['fechacompletado']] = finalFechaCompletado;
+    newRow[m['aplicarinteres']] = finalAplicarInt;
+    newRow[m['tasainteresmensual']] = finalTasaInt;
+    newRow[m['observacion']] = finalObs;
+    newRow[m['estado']] = finalEstado;
+    newRow[m['actualizadoen']] = ahora;
+
+    shAsig.getRange(targetRow, 1, 1, newRow.length).setValues([newRow]);
+    SpreadsheetApp.flush();
+    logAudit_(usuario, 'UPDATE', 'AsignacionesPrecio', id, 'Venta actualizada: ' + finalEstado);
+
+    const listed = ventasCosechaListar_2026({ includeAnuladas: true });
+    const updated = listed.sales.find(function (s) { return s.id === id; });
+    return { ok: true, result: updated, sale: updated };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function ventasCosechaAnular_2026(p, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const id = String((p && p.id) || '').trim();
+    if (!id) throw new Error('Se requiere el ID de la venta a anular.');
+    if (ventasCosechaTienePagosActivos_2026(id)) {
+      return { ok: false, error: 'No se puede anular esta venta porque tiene cobros activos registrados. Anule primero los cobros correspondientes.' };
+    }
+
+    const shAsig = cosechasHoja_2026('AsignacionesPrecio', PRECIO_CAMPOS_2026);
+    asegurarColumnasOpcionales_2026(shAsig, VENTA_COSECHA_EXTRA_COLS_2026);
+    const vals = shAsig.getDataRange().getValues();
+    if (vals.length < 2) throw new Error('Venta no encontrada.');
+    const m = getHeaderIndexMap_(vals[0]);
+
+    let targetRow = -1;
+    for (let i = 1; i < vals.length; i++) {
+      if (String(vals[i][m['id']] || '').trim() === id) {
+        targetRow = i + 1;
+        break;
+      }
+    }
+    if (targetRow === -1) throw new Error('Venta no encontrada.');
+
+    const movId = String(vals[targetRow - 1][m['movimientoid']] || '').trim();
+    const movSheet = findSheetIgnoreCase_('Movimientos');
+    if (movSheet && movSheet.getLastRow() >= 2) {
+      const mVals = movSheet.getDataRange().getValues();
+      const mMap = getHeaderIndexMap_(mVals[0]);
+      for (let k = mVals.length - 1; k >= 1; k--) {
+        const rid = String(mVals[k][mMap['id']] || '').trim();
+        const tid = String(mVals[k][mMap['trabajoid']] || '').trim();
+        if ((movId && rid === movId) || tid === 'COSECHA:' + id) {
+          movSheet.deleteRow(k + 1);
+        }
+      }
+    }
+
+    const ahora = new Date().toISOString();
+    shAsig.getRange(targetRow, m['anulada'] + 1).setValue(true);
+    shAsig.getRange(targetRow, m['movimientoid'] + 1).setValue('');
+    shAsig.getRange(targetRow, m['actualizadoen'] + 1).setValue(ahora);
+    SpreadsheetApp.flush();
+
+    logAudit_(userSession && userSession.usuarioId, 'CANCEL', 'AsignacionesPrecio', id, 'Venta de cosecha anulada');
+    return { ok: true, result: { id: id, anulada: true } };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// -------------------------------------------------------------
+// 4. CUENTAS POR COBRAR CENTRALIZADAS E INTERÉS SIMPLE POR MORA
+// -------------------------------------------------------------
+
+function arCalcularInteresSimple_2026(debt, activeApps, asOfIso) {
+  const importeOriginal = redondear2_2026(debt.importeOriginal);
+  const aplicarInteres = Boolean(debt.aplicarInteres) && Number(debt.tasaInteresMensual) > 0 && Boolean(debt.fechaVencimiento);
+  const tasa = Number(debt.tasaInteresMensual) || 0;
+  const fechaVenc = finToIsoDate_2026(debt.fechaVencimiento);
+  const refDate = finToIsoDate_2026(asOfIso) || getBoliviaTodayStr_();
+
+  // Excluir pagos con fecha posterior a la fecha de consulta (refDate) o sin fecha válida
+  const sortedApps = (activeApps || [])
+    .filter(function (a) {
+      const payDate = finToIsoDate_2026(a && (a.fechaCobro || a.fecha));
+      return Boolean(payDate) && payDate <= refDate;
+    })
+    .sort(function (a, b) {
+      const fa = finToIsoDate_2026(a.fechaCobro || a.fecha);
+      const fb = finToIsoDate_2026(b.fechaCobro || b.fecha);
+      if (fa !== fb) return fa < fb ? -1 : 1;
+      return String(a.creadoEn || '').localeCompare(String(b.creadoEn || ''));
+    });
+
+  let capitalPendiente = importeOriginal;
+  let interesAcumulado = 0;
+  let cursorDate = fechaVenc;
+  let pagosCapital = 0;
+  let pagosInteres = 0;
+
+  for (let i = 0; i < sortedApps.length; i++) {
+    const app = sortedApps[i];
+    const payDate = finToIsoDate_2026(app.fechaCobro || app.fecha);
+    if (!payDate || payDate > refDate) continue;
+
+    if (aplicarInteres && cursorDate && capitalPendiente > 0.005 && payDate > cursorDate) {
+      const dias = finDaysDiffIso_2026(cursorDate, payDate);
+      if (dias > 0) {
+        const dev = capitalPendiente * (tasa / 100) * (dias / 30);
+        interesAcumulado = redondear2_2026(interesAcumulado + dev);
+      }
+      cursorDate = payDate;
+    }
+
+    const intPaid = redondear2_2026(Number(app.interesPagado) || 0);
+    const capPaid = redondear2_2026(Number(app.capitalPagado) || 0);
+
+    interesAcumulado = redondear2_2026(Math.max(0, interesAcumulado - intPaid));
+    capitalPendiente = redondear2_2026(Math.max(0, capitalPendiente - capPaid));
+    pagosInteres = redondear2_2026(pagosInteres + intPaid);
+    pagosCapital = redondear2_2026(pagosCapital + capPaid);
+  }
+
+  if (aplicarInteres && cursorDate && capitalPendiente > 0.005 && refDate > cursorDate) {
+    const diasFinal = finDaysDiffIso_2026(cursorDate, refDate);
+    if (diasFinal > 0) {
+      const devFinal = capitalPendiente * (tasa / 100) * (diasFinal / 30);
+      interesAcumulado = redondear2_2026(interesAcumulado + devFinal);
+    }
+  }
+
+  if (capitalPendiente <= 0.005) {
+    capitalPendiente = 0;
+    if (interesAcumulado <= 0.005) interesAcumulado = 0;
+  }
+
+  const totalPendiente = redondear2_2026(capitalPendiente + interesAcumulado);
+  const diasAtraso = (totalPendiente > 0.005 && fechaVenc && refDate > fechaVenc)
+    ? Math.max(0, finDaysDiffIso_2026(fechaVenc, refDate))
+    : 0;
+  const vencida = diasAtraso > 0;
+  const pagosAnteriores = redondear2_2026(pagosCapital + pagosInteres);
+  const estado = totalPendiente <= 0.005 ? 'COBRADO' : (pagosAnteriores > 0 ? 'PARCIAL' : 'PENDIENTE');
+
+  return {
+    pagosAnteriores: pagosAnteriores,
+    pagosCapitalAnteriores: pagosCapital,
+    pagosInteresAnteriores: pagosInteres,
+    capitalPendiente: capitalPendiente,
+    interesAcumulado: interesAcumulado,
+    totalPendiente: totalPendiente,
+    diasAtraso: diasAtraso,
+    vencida: vencida,
+    estado: estado
+  };
+}
+
+function arConstruirDeudas_2026(asOfIso) {
+  const refDate = finToIsoDate_2026(asOfIso) || getBoliviaTodayStr_();
+  const clientesMap = {};
+  if (findSheetIgnoreCase_('Clientes')) {
+    getSheetDataAsObjects('Clientes').forEach(function (c) {
+      if (c && c.id) {
+        clientesMap[String(c.id).trim()] = {
+          id: String(c.id).trim(),
+          nombre: String(c.nombre || '').trim(),
+          telefono: String(c.telefono || '').trim(),
+          direccion: String(c.direccion || '').trim(),
+          activo: finParseBool_2026(c.activo, true)
+        };
+      }
+    });
+  }
+  const campanasMap = {};
+  getSheetDataAsObjects('Campanas').forEach(function (c) { campanasMap[String(c.id)] = c; });
+  const lotesMap = {};
+  getSheetDataAsObjects('Lotes').forEach(function (l) { lotesMap[String(l.id)] = l; });
+  const maquinasMap = {};
+  getSheetDataAsObjects('Maquinas').forEach(function (m) { maquinasMap[String(m.id)] = m; });
+  const cosechasMap = {};
+  if (findSheetIgnoreCase_('Cosechas')) {
+    getSheetDataAsObjects('Cosechas').forEach(function (c) { cosechasMap[String(c.id)] = c; });
+  }
+
+  // Detectar encabezados de Cobros en estado PENDIENTE o ANULADO para ignorar registros incompletos
+  const cobrosRaw = findSheetIgnoreCase_('Cobros') ? getSheetDataAsObjects('Cobros') : [];
+  const pendingOrAnnulledCobroIds = {};
+  cobrosRaw.forEach(function (r) {
+    const cid = String(r.id || '').trim();
+    if (!cid) return;
+    const estReg = String(r.estadoRegistro || '').trim().toUpperCase();
+    if (estReg === 'PENDIENTE' || finParseBool_2026(r.anulado, false)) {
+      pendingOrAnnulledCobroIds[cid] = true;
+    }
+  });
+
+  // Cargar aplicaciones modernas (CobroAplicaciones)
+  const appsByDebt = {};
+  const cobroIdsConApps = {};
+  if (findSheetIgnoreCase_('CobroAplicaciones')) {
+    getSheetDataAsObjects('CobroAplicaciones').forEach(function (a) {
+      const appCobroId = String(a.cobroId || '').trim();
+      if (appCobroId) cobroIdsConApps[appCobroId] = true;
+      if (finParseBool_2026(a.anulado, false)) return;
+      if (appCobroId && pendingOrAnnulledCobroIds[appCobroId]) return;
+      const key = String(a.deudaTipo || 'TRABAJO').toUpperCase() + ':' + String(a.deudaId || '').trim();
+      if (!appsByDebt[key]) appsByDebt[key] = [];
+      appsByDebt[key].push({
+        id: String(a.id || ''),
+        cobroId: appCobroId,
+        deudaTipo: String(a.deudaTipo || 'TRABAJO').toUpperCase(),
+        deudaId: String(a.deudaId || ''),
+        clienteId: String(a.clienteId || ''),
+        moduloOrigen: String(a.moduloOrigen || 'MAQUINARIAS').toUpperCase(),
+        campanaOrigenId: String(a.campanaOrigenId || ''),
+        loteOrigenId: String(a.loteOrigenId || ''),
+        fechaCobro: finToIsoDate_2026(a.fechaCobro),
+        monedaDeuda: String(a.monedaDeuda || 'USD').toUpperCase() === 'BOB' ? 'BOB' : 'USD',
+        monedaPago: String(a.monedaPago || 'USD').toUpperCase() === 'BOB' ? 'BOB' : 'USD',
+        tcAplicado: Number(a.tcAplicado) || 6.96,
+        importeOriginalPagado: Number(a.importeOriginalPagado) || 0,
+        importeEquivalenteDeuda: Number(a.importeEquivalenteDeuda) || 0,
+        saldoCapitalAnterior: Number(a.saldoCapitalAnterior) || 0,
+        interesAcumuladoAnterior: Number(a.interesAcumuladoAnterior) || 0,
+        interesPagado: Number(a.interesPagado) || 0,
+        capitalPagado: Number(a.capitalPagado) || 0,
+        saldoCapitalRestante: Number(a.saldoCapitalRestante) || 0,
+        interesRestante: Number(a.interesRestante) || 0,
+        movimientoInteresId: String(a.movimientoInteresId || ''),
+        anulado: false,
+        creadoPor: String(a.creadoPor || ''),
+        creadoEn: String(a.creadoEn || '')
+      });
+    });
+  }
+
+  // Incluir cobros heredados (anteriores a CobroAplicaciones) exactamente una vez y sin desfase cambiario
+  const trabajosMap = {};
+  getSheetDataAsObjects('Trabajos').forEach(function (t) { trabajosMap[String(t.id)] = t; });
+  const defaultTcGlobal = Number(String(getConfigValue('TIPO_CAMBIO', 6.96) || '').replace(',', '.')) || 6.96;
+
+  const legacyByTrabajo = {};
+  const seenLegacyCobroIds = {};
+  cobrosRaw.forEach(function (r) {
+    const cid = String(r.id || '').trim();
+    if (cid && cobroIdsConApps[cid]) return;
+    if (cid && seenLegacyCobroIds[cid]) return;
+    if (finParseBool_2026(r.anulado, false)) return;
+    if (String(r.estadoRegistro || '').trim().toUpperCase() === 'PENDIENTE') return;
+    // Si tiene notaCobroNumero o tipoPago pertenece al flujo moderno (ya gestionado por CobroAplicaciones)
+    if (String(r.notaCobroNumero || '').trim() !== '' || String(r.tipoPago || '').trim() !== '') return;
+    const tid = String(r.trabajoId || '').trim();
+    if (!tid || !trabajosMap[tid]) return;
+    if (cid) seenLegacyCobroIds[cid] = true;
+    if (!legacyByTrabajo[tid]) legacyByTrabajo[tid] = [];
+    legacyByTrabajo[tid].push(r);
+  });
+
+  Object.keys(legacyByTrabajo).forEach(function (tid) {
+    const t = trabajosMap[tid];
+    const rowsLeg = legacyByTrabajo[tid];
+    const monedaDeuda = String(t.moneda || 'BOB').toUpperCase() === 'USD' ? 'USD' : 'BOB';
+    const importeDeuda = redondear2_2026(Number(t.importe) || 0);
+    const tcHist = Number(t.tc) > 0 ? Number(t.tc) : defaultTcGlobal;
+    const importeCuentaUsd = monedaDeuda === 'USD'
+      ? importeDeuda
+      : redondear2_2026(importeDeuda / tcHist);
+
+    const key = 'TRABAJO:' + tid;
+    if (!appsByDebt[key]) appsByDebt[key] = [];
+
+    const normalizedLegs = [];
+    let totalLegUsd = 0;
+    let totalLegEquiv = 0;
+
+    for (let i = 0; i < rowsLeg.length; i++) {
+      const r = rowsLeg[i];
+      const cid = String(r.id || ('ROW-' + i)).trim();
+      const monedaPagoRaw = String(r.monedaCobro || r.moneda || 'USD').trim().toUpperCase();
+      const monedaPago = monedaPagoRaw === 'USD' ? 'USD' : 'BOB';
+      const hasOriginal = r.importeOriginal !== undefined && r.importeOriginal !== '' && r.importeOriginal !== null;
+      const orig = redondear2_2026(hasOriginal ? (Number(r.importeOriginal) || 0) : (Number(r.importe) || 0));
+      const tcPago = Number(r.tc) > 0 ? Number(r.tc) : tcHist;
+      const hasUsd = r.importeUsd !== undefined && r.importeUsd !== '' && r.importeUsd !== null;
+      const impUsd = hasUsd
+        ? redondear2_2026(Number(r.importeUsd) || 0)
+        : (monedaPago === 'USD' ? orig : redondear2_2026(orig / tcPago));
+
+      // Equivalente exacto en monedaDeuda respetando la liquidación histórica en USD del módulo legacy:
+      // - Deuda USD: el monto acreditado siempre fue impUsd.
+      // - Deuda BOB cobrada en BOB: monto directo orig.
+      // - Deuda BOB cobrada en USD: legacy acreditaba impUsd contra importeCuentaUsd (calculado a tcHist),
+      //   por lo que el capital BOB amortizado equivale a impUsd * tcHist.
+      let equiv;
+      if (monedaDeuda === 'USD') {
+        equiv = impUsd;
+      } else if (monedaPago === 'BOB') {
+        equiv = orig;
+      } else {
+        equiv = redondear2_2026(impUsd * tcHist);
+      }
+
+      totalLegUsd = redondear2_2026(totalLegUsd + impUsd);
+      totalLegEquiv = redondear2_2026(totalLegEquiv + equiv);
+      normalizedLegs.push({
+        cid: cid,
+        fechaCobro: finToIsoDate_2026(r.fecha) || finToIsoDate_2026(t.fecha),
+        monedaPago: monedaPago,
+        tcPago: tcPago,
+        orig: orig,
+        equiv: equiv,
+        creadoPor: String(r.creadoPor || ''),
+        creadoEn: String(r.creadoEn || '')
+      });
+    }
+
+    // Si en el esquema histórico el servicio quedó totalmente saldado en USD (saldoUsd === 0),
+    // asegurar que diferencias de redondeo o TC en el último pago no reabran saldo pendiente fantasma.
+    if (normalizedLegs.length > 0 && Math.round(totalLegUsd * 100) >= Math.round(importeCuentaUsd * 100)) {
+      const diff = redondear2_2026(importeDeuda - totalLegEquiv);
+      if (diff > 0) {
+        normalizedLegs[normalizedLegs.length - 1].equiv = redondear2_2026(normalizedLegs[normalizedLegs.length - 1].equiv + diff);
+      }
+    }
+
+    for (let i = 0; i < normalizedLegs.length; i++) {
+      const leg = normalizedLegs[i];
+      appsByDebt[key].push({
+        id: 'LEG-' + leg.cid,
+        cobroId: leg.cid,
+        deudaTipo: 'TRABAJO',
+        deudaId: tid,
+        clienteId: String(t.clienteId || ''),
+        moduloOrigen: 'MAQUINARIAS',
+        campanaOrigenId: String(t.campanaId || ''),
+        loteOrigenId: '',
+        fechaCobro: leg.fechaCobro,
+        monedaDeuda: monedaDeuda,
+        monedaPago: leg.monedaPago,
+        tcAplicado: leg.tcPago,
+        importeOriginalPagado: leg.orig,
+        importeEquivalenteDeuda: leg.equiv,
+        saldoCapitalAnterior: 0,
+        interesAcumuladoAnterior: 0,
+        interesPagado: 0,
+        capitalPagado: leg.equiv,
+        saldoCapitalRestante: 0,
+        interesRestante: 0,
+        movimientoInteresId: '',
+        anulado: false,
+        creadoPor: leg.creadoPor,
+        creadoEn: leg.creadoEn
+      });
+    }
+  });
+
+  function computeAppDateBounds_(apps) {
+    let minD = '';
+    let maxD = '';
+    for (let i = 0; i < apps.length; i++) {
+      const d = finToIsoDate_2026(apps[i].fechaCobro || apps[i].fecha);
+      if (!d) continue;
+      if (!minD || d < minD) minD = d;
+      if (!maxD || d > maxD) maxD = d;
+    }
+    return { minActivePayDate: minD, maxActivePayDate: maxD };
+  }
+
+  const debts = [];
+
+  // A. Servicios externos de Maquinarias (hoja Trabajos, todas las campañas y años)
+  getSheetDataAsObjects('Trabajos').forEach(function (t) {
+    if (String(t.destino || '').toUpperCase() !== 'TERCERO') return;
+    const importe = redondear2_2026(Number(t.importe) || 0);
+    if (importe <= 0) return;
+
+    const id = String(t.id || '').trim();
+    const key = 'TRABAJO:' + id;
+    const clienteId = String(t.clienteId || '').trim();
+    const cliObj = clienteId ? clientesMap[clienteId] : null;
+    const clienteNombre = cliObj ? cliObj.nombre : String(t.cliente || '').trim();
+    const clientePendiente = !clienteId || finParseBool_2026(t.clientePendiente, false);
+    const maqObj = maquinasMap[String(t.maquinaId || '')] || {};
+    const campObj = campanasMap[String(t.campanaId || '')] || {};
+    const moneda = String(t.moneda || 'BOB').toUpperCase() === 'USD' ? 'USD' : 'BOB';
+
+    let labor = String(t.trabajoNombre || '').trim();
+    const obs = String(t.observacion || '');
+    if (!labor && obs.indexOf('[Trabajo:') !== -1) {
+      const m = obs.match(/\[Trabajo:\s*([^\]]+)\]/);
+      if (m && m[1]) labor = m[1].trim();
+    }
+    const concepto = (maqObj.nombre ? maqObj.nombre : 'Maquinaria') + (labor ? ' — ' + labor : ' — Servicio');
+    const fecha = finToIsoDate_2026(t.fecha);
+    const plazoDias = t.plazoDias !== '' && t.plazoDias !== undefined && t.plazoDias !== null ? Math.max(0, Math.round(Number(t.plazoDias))) : 0;
+    const fechaVencimiento = t.fechaVencimiento ? finToIsoDate_2026(t.fechaVencimiento) : '';
+    const aplicarInteres = finParseBool_2026(t.aplicarInteres, false);
+    const tasaInteresMensual = aplicarInteres ? (Number(t.tasaInteresMensual) || 0) : 0;
+
+    const base = {
+      id: key,
+      deudaTipo: 'TRABAJO',
+      deudaId: id,
+      origen: 'MAQUINARIAS',
+      clienteId: clientePendiente ? '' : clienteId,
+      clienteNombre: clientePendiente ? '' : clienteNombre,
+      clientePendiente: clientePendiente,
+      fecha: fecha,
+      concepto: concepto,
+      campanaId: String(t.campanaId || ''),
+      campanaNombre: String(campObj.nombre || ''),
+      loteId: '',
+      loteNombre: '',
+      maquinaId: String(t.maquinaId || ''),
+      maquinaNombre: String(maqObj.nombre || ''),
+      cantidad: Number(t.cantidad) || 0,
+      unidad: String(t.unidad || 'ha'),
+      precioUnitario: Number(t.precioUnitario) || 0,
+      moneda: moneda,
+      tcHistorico: Number(t.tc) > 0 ? Number(t.tc) : 6.96,
+      importeOriginal: importe,
+      plazoDias: plazoDias,
+      fechaVencimiento: fechaVencimiento,
+      aplicarInteres: aplicarInteres,
+      tasaInteresMensual: tasaInteresMensual,
+      observacion: obs
+    };
+
+    const apps = appsByDebt[key] || [];
+    const bounds = computeAppDateBounds_(apps);
+    const calc = arCalcularInteresSimple_2026(base, apps, refDate);
+    debts.push({ ...base, ...calc, ...bounds, aplicaciones: apps });
+  });
+
+  // B. Ventas de cosecha con precio (hoja AsignacionesPrecio, todas las campañas y años)
+  if (findSheetIgnoreCase_('AsignacionesPrecio')) {
+    getSheetDataAsObjects('AsignacionesPrecio').forEach(function (a) {
+      if (finParseBool_2026(a.anulada, false)) return;
+      const id = String(a.id || '').trim();
+      if (!id) return;
+
+      const cant = Number(a.toneladas || 0) || 0;
+      const precio = Number(a.precioUnitario !== undefined && a.precioUnitario !== '' ? a.precioUnitario : (a.precioUsdTon || 0)) || 0;
+      const precioPend = a.precioPendiente !== undefined && a.precioPendiente !== ''
+        ? finParseBool_2026(a.precioPendiente, precio <= 0)
+        : precio <= 0;
+      if (precioPend || precio <= 0) return;
+
+      const moneda = String(a.moneda || 'USD').toUpperCase() === 'BOB' ? 'BOB' : 'USD';
+      const importe = redondear2_2026(
+        a.importeTotal !== undefined && a.importeTotal !== ''
+          ? Number(a.importeTotal)
+          : (a.importeUsd !== undefined && a.importeUsd !== '' ? Number(a.importeUsd) : cant * precio)
+      );
+      if (importe <= 0) return;
+
+      const key = 'VENTA_COSECHA:' + id;
+      const cosecha = cosechasMap[String(a.cosechaId || '')] || {};
+      const loteId = String(a.loteId || cosecha.loteId || '').trim();
+      const campanaId = String(a.campanaId || cosecha.campanaId || '').trim();
+      const producto = String(a.producto || cosecha.producto || 'Cosecha').trim();
+      const loteObj = lotesMap[loteId] || {};
+      const campObj = campanasMap[campanaId] || {};
+
+      const clienteId = String(a.clienteId || '').trim();
+      const cliObj = clienteId ? clientesMap[clienteId] : null;
+      const clienteNombre = cliObj ? cliObj.nombre : String(a.clienteNombre || '').trim();
+      const clientePendiente = !clienteId || finParseBool_2026(a.compradorPendiente, false);
+
+      const fecha = finToIsoDate_2026(a.fecha);
+      // Mientras el comprador esté pendiente (o falte precio), no existe plazo, vencimiento ni interés por mora
+      const saleIsComplete = !clientePendiente && !precioPend && precio > 0;
+      const plazoDias = saleIsComplete && a.plazoDias !== '' && a.plazoDias !== undefined && a.plazoDias !== null
+        ? Math.max(0, Math.round(Number(a.plazoDias)))
+        : 0;
+      const fechaVencimiento = saleIsComplete && a.fechaVencimiento ? finToIsoDate_2026(a.fechaVencimiento) : '';
+      const aplicarInteres = saleIsComplete ? finParseBool_2026(a.aplicarInteres, false) : false;
+      const tasaInteresMensual = aplicarInteres ? (Number(a.tasaInteresMensual) || 0) : 0;
+
+      const base = {
+        id: key,
+        deudaTipo: 'VENTA_COSECHA',
+        deudaId: id,
+        origen: 'PROPIEDAD',
+        clienteId: clientePendiente ? '' : clienteId,
+        clienteNombre: clientePendiente ? '' : clienteNombre,
+        clientePendiente: clientePendiente,
+        fecha: fecha,
+        concepto: 'Venta de ' + producto + (loteObj.nombre ? ' — ' + loteObj.nombre : ''),
+        campanaId: campanaId,
+        campanaNombre: String(campObj.nombre || ''),
+        loteId: loteId,
+        loteNombre: String(loteObj.nombre || ''),
+        maquinaId: '',
+        maquinaNombre: '',
+        cantidad: cant,
+        unidad: String(a.unidad || 't'),
+        precioUnitario: precio,
+        moneda: moneda,
+        tcHistorico: Number(a.tc) > 0 ? Number(a.tc) : 6.96,
+        importeOriginal: importe,
+        plazoDias: plazoDias,
+        fechaVencimiento: fechaVencimiento,
+        aplicarInteres: aplicarInteres,
+        tasaInteresMensual: tasaInteresMensual,
+        observacion: String(a.observacion || '')
+      };
+
+      const apps = appsByDebt[key] || [];
+      const bounds = computeAppDateBounds_(apps);
+      const calc = arCalcularInteresSimple_2026(base, apps, refDate);
+      debts.push({ ...base, ...calc, ...bounds, aplicaciones: apps });
+    });
+  }
+
+  return { debts: debts, clientesMap: clientesMap };
+}
+
+function arResumen_2026(p) {
+  const built = arConstruirDeudas_2026(p && p.fechaCorte);
+  const debts = built.debts;
+  const clientesMap = built.clientesMap;
+
+  const grouped = {};
+  const unassignedDebts = [];
+  const totals = {
+    capitalUsd: 0, interesUsd: 0, totalUsd: 0,
+    capitalBob: 0, interesBob: 0, totalBob: 0,
+    unassignedUsd: 0, unassignedBob: 0, unassignedCount: 0
+  };
+
+  debts.forEach(function (d) {
+    if (d.totalPendiente <= 0.005) return;
+
+    if (d.moneda === 'USD') {
+      totals.capitalUsd = redondear2_2026(totals.capitalUsd + d.capitalPendiente);
+      totals.interesUsd = redondear2_2026(totals.interesUsd + d.interesAcumulado);
+      totals.totalUsd = redondear2_2026(totals.totalUsd + d.totalPendiente);
+    } else {
+      totals.capitalBob = redondear2_2026(totals.capitalBob + d.capitalPendiente);
+      totals.interesBob = redondear2_2026(totals.interesBob + d.interesAcumulado);
+      totals.totalBob = redondear2_2026(totals.totalBob + d.totalPendiente);
+    }
+
+    if (!d.clienteId || d.clientePendiente) {
+      unassignedDebts.push(d);
+      totals.unassignedCount += 1;
+      if (d.moneda === 'USD') totals.unassignedUsd = redondear2_2026(totals.unassignedUsd + d.totalPendiente);
+      else totals.unassignedBob = redondear2_2026(totals.unassignedBob + d.totalPendiente);
+      return;
+    }
+
+    if (!grouped[d.clienteId]) {
+      const cli = clientesMap[d.clienteId] || { id: d.clienteId, nombre: d.clienteNombre || 'Cliente', activo: true };
+      grouped[d.clienteId] = {
+        clienteId: d.clienteId,
+        clienteNombre: cli.nombre,
+        telefono: cli.telefono || '',
+        direccion: cli.direccion || '',
+        activo: cli.activo,
+        registrosPendientes: 0,
+        registrosVencidos: 0,
+        usd: { capitalPendiente: 0, interesAcumulado: 0, totalPendiente: 0 },
+        bob: { capitalPendiente: 0, interesAcumulado: 0, totalPendiente: 0 },
+        deudas: []
+      };
+    }
+
+    const g = grouped[d.clienteId];
+    g.registrosPendientes += 1;
+    if (d.vencida) g.registrosVencidos += 1;
+    const bucket = d.moneda === 'USD' ? g.usd : g.bob;
+    bucket.capitalPendiente = redondear2_2026(bucket.capitalPendiente + d.capitalPendiente);
+    bucket.interesAcumulado = redondear2_2026(bucket.interesAcumulado + d.interesAcumulado);
+    bucket.totalPendiente = redondear2_2026(bucket.totalPendiente + d.totalPendiente);
+    g.deudas.push(d);
+  });
+
+  const customers = Object.keys(grouped).map(function (k) { return grouped[k]; }).sort(function (a, b) {
+    if (b.registrosVencidos !== a.registrosVencidos) return b.registrosVencidos - a.registrosVencidos;
+    return a.clienteNombre.localeCompare(b.clienteNombre, 'es');
+  });
+
+  const payloadOut = { customers: customers, unassignedDebts: unassignedDebts, totals: totals };
+  return { ok: true, result: payloadOut, ...payloadOut };
+}
+
+function arListarDocumentos_2026(p) {
+  const cid = p && p.clienteId ? String(p.clienteId).trim() : '';
+  const debitNotes = [];
+  if (findSheetIgnoreCase_('NotasDebito')) {
+    getSheetDataAsObjects('NotasDebito').forEach(function (r) {
+      if (!r.id) return;
+      if (cid && String(r.clienteId || '').trim() !== cid) return;
+      let items = [];
+      try {
+        const parsed = JSON.parse(String(r.snapshotJson || '[]'));
+        items = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.items) ? parsed.items : []);
+      } catch (e) { items = []; }
+      debitNotes.push({
+        id: String(r.id),
+        numero: String(r.numero || ''),
+        fecha: finToIsoDate_2026(r.fecha),
+        clienteId: String(r.clienteId || ''),
+        clienteNombre: String(r.clienteNombre || ''),
+        clienteTelefono: String(r.clienteTelefono || ''),
+        clienteDireccion: String(r.clienteDireccion || ''),
+        totalUsd: Number(r.totalUsd) || 0,
+        totalBob: Number(r.totalBob) || 0,
+        items: items,
+        observacion: String(r.observacion || ''),
+        creadoPor: String(r.creadoPor || ''),
+        creadoEn: String(r.creadoEn || '')
+      });
+    });
+  }
+
+  const pendingCobroIds = {};
+  if (findSheetIgnoreCase_('Cobros')) {
+    getSheetDataAsObjects('Cobros').forEach(function (c) {
+      const idc = String(c.id || '').trim();
+      if (idc && String(c.estadoRegistro || '').trim().toUpperCase() === 'PENDIENTE') {
+        pendingCobroIds[idc] = true;
+      }
+    });
+  }
+
+  const paymentReceipts = [];
+  if (findSheetIgnoreCase_('NotasCobro')) {
+    getSheetDataAsObjects('NotasCobro').forEach(function (r) {
+      if (!r.id) return;
+      const rcId = String(r.cobroId || '').trim();
+      if (rcId && pendingCobroIds[rcId]) return;
+      if (cid && String(r.clienteId || '').trim() !== cid) return;
+      let items = [];
+      try {
+        const parsed = JSON.parse(String(r.snapshotJson || '[]'));
+        items = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.items) ? parsed.items : []);
+      } catch (e) { items = []; }
+      paymentReceipts.push({
+        id: String(r.id),
+        numero: String(r.numero || ''),
+        cobroId: rcId,
+        fecha: finToIsoDate_2026(r.fecha),
+        clienteId: String(r.clienteId || ''),
+        clienteNombre: String(r.clienteNombre || ''),
+        clienteTelefono: String(r.clienteTelefono || ''),
+        clienteDireccion: String(r.clienteDireccion || ''),
+        tipoPago: String(r.tipoPago || 'PARCIAL').toUpperCase() === 'TOTAL' ? 'TOTAL' : 'PARCIAL',
+        monedaPago: String(r.monedaPago || 'USD').toUpperCase() === 'BOB' ? 'BOB' : 'USD',
+        importeOriginalPagado: Number(r.importeOriginalPagado) || 0,
+        tcAplicado: Number(r.tcAplicado) || 6.96,
+        totalAplicadoUsd: Number(r.totalAplicadoUsd) || 0,
+        totalAplicadoBob: Number(r.totalAplicadoBob) || 0,
+        items: items,
+        observacion: String(r.observacion || ''),
+        anulado: finParseBool_2026(r.anulado, false),
+        creadoPor: String(r.creadoPor || ''),
+        creadoEn: String(r.creadoEn || '')
+      });
+    });
+  }
+
+  debitNotes.sort(function (a, b) { return String(b.creadoEn || b.fecha).localeCompare(String(a.creadoEn || a.fecha)); });
+  paymentReceipts.sort(function (a, b) { return String(b.creadoEn || b.fecha).localeCompare(String(a.creadoEn || a.fecha)); });
+
+  const out = { debitNotes: debitNotes, paymentReceipts: paymentReceipts };
+  return { ok: true, result: out, ...out };
+}
+
+function arDetalleCliente_2026(p) {
+  const clienteId = String((p && p.clienteId) || '').trim();
+  if (!clienteId) return { ok: false, error: 'Se requiere el ID del cliente.' };
+  const customer = clientesBuscarPorId_2026(clienteId);
+  if (!customer) return { ok: false, error: 'Cliente no encontrado.' };
+
+  const built = arConstruirDeudas_2026(p && p.fechaCorte);
+  const customerDebts = built.debts.filter(function (d) { return String(d.clienteId) === clienteId; });
+
+  const summary = {
+    clienteId: customer.id,
+    clienteNombre: customer.nombre,
+    telefono: customer.telefono,
+    direccion: customer.direccion,
+    activo: customer.activo,
+    registrosPendientes: 0,
+    registrosVencidos: 0,
+    usd: { capitalPendiente: 0, interesAcumulado: 0, totalPendiente: 0 },
+    bob: { capitalPendiente: 0, interesAcumulado: 0, totalPendiente: 0 },
+    deudas: customerDebts
+  };
+
+  customerDebts.forEach(function (d) {
+    if (d.totalPendiente <= 0.005) return;
+    summary.registrosPendientes += 1;
+    if (d.vencida) summary.registrosVencidos += 1;
+    const b = d.moneda === 'USD' ? summary.usd : summary.bob;
+    b.capitalPendiente = redondear2_2026(b.capitalPendiente + d.capitalPendiente);
+    b.interesAcumulado = redondear2_2026(b.interesAcumulado + d.interesAcumulado);
+    b.totalPendiente = redondear2_2026(b.totalPendiente + d.totalPendiente);
+  });
+
+  // Historial de cobros del cliente (modernos + heredados de sus trabajos, excluyendo PENDIENTE)
+  const customerTrabajoIds = {};
+  customerDebts.forEach(function (d) {
+    if (d.deudaTipo === 'TRABAJO' && d.deudaId) customerTrabajoIds[String(d.deudaId)] = true;
+  });
+
+  const appsByCobro = {};
+  if (findSheetIgnoreCase_('CobroAplicaciones')) {
+    getSheetDataAsObjects('CobroAplicaciones').forEach(function (a) {
+      if (String(a.clienteId || '').trim() !== clienteId) return;
+      const cid = String(a.cobroId || '').trim();
+      if (!appsByCobro[cid]) appsByCobro[cid] = [];
+      appsByCobro[cid].push(a);
+    });
+  }
+
+  const payments = [];
+  if (findSheetIgnoreCase_('Cobros')) {
+    getSheetDataAsObjects('Cobros').forEach(function (c) {
+      const cid = String(c.id || '').trim();
+      if (!cid) return;
+      if (String(c.estadoRegistro || '').trim().toUpperCase() === 'PENDIENTE') return;
+      const cTrabajoId = String(c.trabajoId || '').trim();
+      const matchesCustomer =
+        String(c.clienteId || '').trim() === clienteId ||
+        Boolean(appsByCobro[cid]) ||
+        Boolean(cTrabajoId && customerTrabajoIds[cTrabajoId]);
+      if (!matchesCustomer) return;
+      const apps = appsByCobro[cid] || [];
+      const monPago = String(c.monedaPago || c.monedaCobro || 'USD').toUpperCase() === 'BOB' ? 'BOB' : 'USD';
+      const monTotales = String(c.monedaTotalesAplicados || monPago).toUpperCase() === 'BOB' ? 'BOB' : 'USD';
+      payments.push({
+        id: cid,
+        cobroId: cid,
+        fecha: finToIsoDate_2026(c.fecha),
+        clienteId: clienteId,
+        clienteNombre: customer.nombre,
+        monedaPago: monPago,
+        importeOriginalPagado: Number(c.importeOriginal || c.importe || 0) || 0,
+        tcAplicado: Number(c.tcAplicado || c.tc || 6.96) || 6.96,
+        tipoPago: String(c.tipoPago || 'PARCIAL').toUpperCase() === 'TOTAL' ? 'TOTAL' : 'PARCIAL',
+        capitalTotalAplicado: Number(c.capitalTotalAplicado || 0) || 0,
+        interesTotalAplicado: Number(c.interesTotalAplicado || 0) || 0,
+        monedaTotalesAplicados: monTotales,
+        capitalAplicadoUsd: Number(c.capitalAplicadoUsd || 0) || 0,
+        interesAplicadoUsd: Number(c.interesAplicadoUsd || 0) || 0,
+        capitalAplicadoBob: Number(c.capitalAplicadoBob || 0) || 0,
+        interesAplicadoBob: Number(c.interesAplicadoBob || 0) || 0,
+        notaCobroNumero: String(c.notaCobroNumero || ''),
+        observacion: String(c.observacion || ''),
+        anulado: finParseBool_2026(c.anulado, false),
+        creadoPor: String(c.creadoPor || ''),
+        creadoEn: String(c.creadoEn || ''),
+        aplicaciones: apps
+      });
+    });
+  }
+  payments.sort(function (a, b) { return String(b.creadoEn || b.fecha).localeCompare(String(a.creadoEn || a.fecha)); });
+
+  const docs = arListarDocumentos_2026({ clienteId: clienteId });
+  const out = {
+    customer: customer,
+    summary: summary,
+    debts: customerDebts,
+    payments: payments,
+    debitNotes: docs.debitNotes,
+    paymentReceipts: docs.paymentReceipts
+  };
+  return { ok: true, result: out, ...out };
+}
+
+function arAsignarClienteDeuda_2026(p, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const deudaTipo = String((p && p.deudaTipo) || '').toUpperCase();
+    const deudaId = String((p && p.deudaId) || '').trim();
+    const clienteId = String((p && p.clienteId) || '').trim();
+    if (!deudaId || !clienteId) return { ok: false, error: 'Se requiere la deuda y el cliente.' };
+    const cli = clientesBuscarPorId_2026(clienteId);
+    if (!cli) return { ok: false, error: 'Cliente no encontrado en el catálogo.' };
+    const ahora = new Date().toISOString();
+
+    if (deudaTipo === 'TRABAJO') {
+      const sh = findSheetIgnoreCase_('Trabajos');
+      if (!sh) throw new Error('Hoja Trabajos no encontrada.');
+      asegurarColumnasOpcionales_2026(sh, ['clienteId', 'clientePendiente']);
+      const vals = sh.getDataRange().getValues();
+      const m = getHeaderIndexMap_(vals[0]);
+      let rowIdx = -1;
+      for (let i = 1; i < vals.length; i++) {
+        if (String(vals[i][m['id']] || '').trim() === deudaId) { rowIdx = i + 1; break; }
+      }
+      if (rowIdx === -1) return { ok: false, error: 'Servicio no encontrado.' };
+      sh.getRange(rowIdx, m['clienteid'] + 1).setValue(cli.id);
+      sh.getRange(rowIdx, m['cliente'] + 1).setValue(cli.nombre);
+      sh.getRange(rowIdx, m['clientependiente'] + 1).setValue(false);
+      if (m['actualizadoen'] !== undefined) sh.getRange(rowIdx, m['actualizadoen'] + 1).setValue(ahora);
+      SpreadsheetApp.flush();
+      logAudit_(userSession && userSession.usuarioId, 'ASSIGN_CUSTOMER', 'Trabajos', deudaId, 'Cliente asignado: ' + cli.nombre);
+      return { ok: true, result: { deudaTipo: deudaTipo, deudaId: deudaId, clienteId: cli.id, clienteNombre: cli.nombre } };
+    }
+
+    if (deudaTipo === 'VENTA_COSECHA') {
+      const sh = cosechasHoja_2026('AsignacionesPrecio', PRECIO_CAMPOS_2026);
+      asegurarColumnasOpcionales_2026(sh, VENTA_COSECHA_EXTRA_COLS_2026);
+      const vals = sh.getDataRange().getValues();
+      const m = getHeaderIndexMap_(vals[0]);
+      let rowIdx = -1;
+      for (let i = 1; i < vals.length; i++) {
+        if (String(vals[i][m['id']] || '').trim() === deudaId) { rowIdx = i + 1; break; }
+      }
+      if (rowIdx === -1) return { ok: false, error: 'Venta de cosecha no encontrada.' };
+      const existingRow = vals[rowIdx - 1];
+      const oldClienteId = String(existingRow[m['clienteid']] || '').trim();
+      const oldCompPend = finParseBool_2026(existingRow[m['compradorpendiente']], !oldClienteId);
+      const precioVal = Number(existingRow[m['preciounitario']] !== '' ? existingRow[m['preciounitario']] : existingRow[m['preciousdton']]) || 0;
+      const precioPend = finParseBool_2026(existingRow[m['preciopendiente']], precioVal <= 0);
+      const oldWasComplete = !oldCompPend && Boolean(oldClienteId) && !precioPend && precioVal > 0;
+      const newIsComplete = !precioPend && precioVal > 0;
+
+      const resolvedTerms = ventasCosechaResolverCondiciones_2026({
+        isNew: false,
+        wasComplete: oldWasComplete,
+        isComplete: newIsComplete,
+        payload: {},
+        completionBaseDate: getBoliviaTodayStr_(),
+        existing: {
+          fecha: finToIsoDate_2026(existingRow[m['fecha']]),
+          fechaCompletado: m['fechacompletado'] !== undefined ? finToIsoDate_2026(existingRow[m['fechacompletado']]) : '',
+          plazoDias: existingRow[m['plazodias']],
+          fechaVencimiento: existingRow[m['fechavencimiento']],
+          aplicarInteres: existingRow[m['aplicarinteres']],
+          tasaInteresMensual: existingRow[m['tasainteresmensual']]
+        }
+      });
+
+      sh.getRange(rowIdx, m['clienteid'] + 1).setValue(cli.id);
+      sh.getRange(rowIdx, m['clientenombre'] + 1).setValue(cli.nombre);
+      sh.getRange(rowIdx, m['compradorpendiente'] + 1).setValue(false);
+      sh.getRange(rowIdx, m['estado'] + 1).setValue(ventasCosechaEstado_2026(false, precioPend));
+      sh.getRange(rowIdx, m['plazodias'] + 1).setValue(resolvedTerms.plazoDias);
+      sh.getRange(rowIdx, m['fechavencimiento'] + 1).setValue(resolvedTerms.fechaVencimiento);
+      if (m['fechacompletado'] !== undefined) {
+        sh.getRange(rowIdx, m['fechacompletado'] + 1).setValue(resolvedTerms.fechaCompletado);
+      }
+      sh.getRange(rowIdx, m['aplicarinteres'] + 1).setValue(resolvedTerms.aplicarInteres);
+      sh.getRange(rowIdx, m['tasainteresmensual'] + 1).setValue(resolvedTerms.tasaInteresMensual);
+      sh.getRange(rowIdx, m['actualizadoen'] + 1).setValue(ahora);
+      SpreadsheetApp.flush();
+      logAudit_(userSession && userSession.usuarioId, 'ASSIGN_CUSTOMER', 'AsignacionesPrecio', deudaId, 'Comprador asignado: ' + cli.nombre);
+      return { ok: true, result: { deudaTipo: deudaTipo, deudaId: deudaId, clienteId: cli.id, clienteNombre: cli.nombre } };
+    }
+
+    return { ok: false, error: 'Tipo de deuda inválido.' };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function finValidarFechaCobroEstricta_2026(rawDate, fallbackIso) {
+  if (rawDate === undefined || rawDate === null || String(rawDate).trim() === '') {
+    return fallbackIso || getBoliviaTodayStr_();
+  }
+  const s = String(rawDate).trim();
+  let y, m, d;
+  const isoM = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const dmyM = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (isoM) {
+    y = parseInt(isoM[1], 10);
+    m = parseInt(isoM[2], 10);
+    d = parseInt(isoM[3], 10);
+  } else if (dmyM) {
+    d = parseInt(dmyM[1], 10);
+    m = parseInt(dmyM[2], 10);
+    y = parseInt(dmyM[3], 10);
+  } else {
+    throw new Error('Fecha de cobro inválida ("' + s + '"). Use formato YYYY-MM-DD.');
+  }
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (
+    isNaN(dt.getTime()) ||
+    dt.getUTCFullYear() !== y ||
+    dt.getUTCMonth() !== (m - 1) ||
+    dt.getUTCDate() !== d ||
+    y < 2000 || y > 2100
+  ) {
+    throw new Error('Fecha de cobro fuera de rango o inexistente: "' + s + '".');
+  }
+  return String(y) + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+}
+
+function arLimpiarCobroParcial_2026(cobroId, writtenMovIds) {
+  const cid = String(cobroId || '').trim();
+  if (!cid) return;
+  const movIdSet = {};
+  (writtenMovIds || []).forEach(function (mid) {
+    if (mid) movIdSet[String(mid).trim()] = true;
+  });
+
+  // 1. Eliminar movimientos de interés parciales
+  const movSh = findSheetIgnoreCase_('Movimientos');
+  const prefix = 'INTERES_COBRO:' + cid + ':';
+  if (movSh && movSh.getLastRow() >= 2) {
+    const mVals = movSh.getDataRange().getValues();
+    const mMap = getHeaderIndexMap_(mVals[0]);
+    for (let k = mVals.length - 1; k >= 1; k--) {
+      const rid = String(mVals[k][mMap['id']] || '').trim();
+      const tid = String(mVals[k][mMap['trabajoid']] || '').trim();
+      if (movIdSet[rid] || tid.indexOf(prefix) === 0) {
+        movSh.deleteRow(k + 1);
+      }
+    }
+  }
+
+  // 2. Eliminar NotasCobro parciales
+  const ncSh = findSheetIgnoreCase_('NotasCobro');
+  if (ncSh && ncSh.getLastRow() >= 2) {
+    const nVals = ncSh.getDataRange().getValues();
+    const nMap = getHeaderIndexMap_(nVals[0]);
+    for (let k = nVals.length - 1; k >= 1; k--) {
+      if (String(nVals[k][nMap['cobroid']] || '').trim() === cid) {
+        ncSh.deleteRow(k + 1);
+      }
+    }
+  }
+
+  // 3. Eliminar CobroAplicaciones parciales
+  const appsSh = findSheetIgnoreCase_('CobroAplicaciones');
+  if (appsSh && appsSh.getLastRow() >= 2) {
+    const aVals = appsSh.getDataRange().getValues();
+    const aMap = getHeaderIndexMap_(aVals[0]);
+    for (let k = aVals.length - 1; k >= 1; k--) {
+      if (String(aVals[k][aMap['cobroid']] || '').trim() === cid) {
+        appsSh.deleteRow(k + 1);
+      }
+    }
+  }
+
+  // 4. Eliminar encabezado en Cobros
+  const cobrosSh = findSheetIgnoreCase_('Cobros');
+  if (cobrosSh && cobrosSh.getLastRow() >= 2) {
+    const cVals = cobrosSh.getDataRange().getValues();
+    const cMap = getHeaderIndexMap_(cVals[0]);
+    for (let k = cVals.length - 1; k >= 1; k--) {
+      if (String(cVals[k][cMap['id']] || '').trim() === cid) {
+        cobrosSh.deleteRow(k + 1);
+      }
+    }
+  }
+
+  SpreadsheetApp.flush();
+}
+
+function arRegistrarCobroInternal_2026(p, userSession) {
+  const clienteId = String((p && p.clienteId) || '').trim();
+  const cli = clientesBuscarPorId_2026(clienteId);
+  if (!cli) return { ok: false, error: 'Cliente no encontrado.' };
+
+  const cobrosSh = cobrosPrepararHoja_2026();
+  asegurarColumnasOpcionales_2026(cobrosSh, COBROS_EXTRA_COLS_2026);
+  const appsSh = finEnsureSheet_2026('CobroAplicaciones', SHEET_SCHEMAS.CobroAplicaciones);
+  const notasCobroSh = finEnsureSheet_2026('NotasCobro', SHEET_SCHEMAS.NotasCobro);
+
+  const idem = String((p && p.idempotencyKey) || '').trim();
+  if (idem) {
+    const dup = getSheetDataAsObjects('Cobros').find(function (c) {
+      return String(c.idempotencyKey || '').trim() === idem;
+    });
+    if (dup) {
+      const dupEstado = String(dup.estadoRegistro || '').trim().toUpperCase();
+      if (dupEstado === 'PENDIENTE') {
+        // Recuperación automática tras fallo intermedio previo con la misma clave de idempotencia
+        arLimpiarCobroParcial_2026(String(dup.id || '').trim(), []);
+      } else {
+        const docs = arListarDocumentos_2026({ clienteId: clienteId });
+        const rec = docs.paymentReceipts.find(function (r) { return r.cobroId === String(dup.id); }) || null;
+        const existingApps = getSheetDataAsObjects('CobroAplicaciones').filter(function (a) {
+          return String(a.cobroId || '').trim() === String(dup.id || '').trim();
+        });
+        const paymentExisting = {
+          ...dup,
+          cobroId: String(dup.id || ''),
+          importeOriginalPagado: Number(dup.importeOriginal || dup.importe || 0) || 0,
+          aplicaciones: existingApps
+        };
+        return { ok: true, result: { payment: paymentExisting, receipt: rec }, payment: paymentExisting, receipt: rec };
+      }
+    }
+  }
+
+  const fecha = finValidarFechaCobroEstricta_2026(p.fecha, getBoliviaTodayStr_());
+  const rawMon = String(p.monedaPago || 'USD').trim().toUpperCase();
+  const monedaPago = rawMon === 'BOB' || rawMon === 'BS' || rawMon === 'BS.' ? 'BOB' : 'USD';
+  const tcAplicado = resolverTipoCambioOperacion_2026(p.tcAplicado !== undefined ? p.tcAplicado : p.tc);
+  const aplicacionesReq = Array.isArray(p.aplicaciones) ? p.aplicaciones : [];
+  if (aplicacionesReq.length === 0) return { ok: false, error: 'Debe seleccionar al menos una deuda para cobrar.' };
+
+  // Calcular deudas exactas a la fecha efectiva del cobro (excluyendo pagos posteriores a fecha)
+  const built = arConstruirDeudas_2026(fecha);
+  const debtMap = {};
+  built.debts.forEach(function (d) { debtMap[d.deudaTipo + ':' + d.deudaId] = d; });
+
+  const cobroId = 'COB-' + Utilities.getUuid().slice(0, 8).toUpperCase();
+  const ahora = new Date().toISOString();
+  const usuario = String((userSession && userSession.usuarioId) || 'admin');
+  const obs = String(p.observacion || '').trim();
+
+  let totalOriginalPagado = 0;
+  let totalAplicadoUsd = 0;
+  let totalAplicadoBob = 0;
+  let capitalAplicadoUsd = 0;
+  let interesAplicadoUsd = 0;
+  let capitalAplicadoBob = 0;
+  let interesAplicadoBob = 0;
+  let capitalTotalMonedaPago = 0;
+  let interesTotalMonedaPago = 0;
+  let todasLiquidadas = true;
+
+  const preparedApps = [];
+  const receiptItems = [];
+  const seenDebtKeys = {};
+  const cumulativeAppliedByDebt = {};
+
+  for (let i = 0; i < aplicacionesReq.length; i++) {
+    const req = aplicacionesReq[i] || {};
+    const deudaTipoNorm = String(req.deudaTipo || 'TRABAJO').trim().toUpperCase();
+    const deudaIdNorm = String(req.deudaId || '').trim();
+    if (!deudaIdNorm || (deudaTipoNorm !== 'TRABAJO' && deudaTipoNorm !== 'VENTA_COSECHA')) {
+      throw new Error('Referencia de deuda inválida en la solicitud de cobro.');
+    }
+    const key = deudaTipoNorm + ':' + deudaIdNorm;
+
+    // 1. Impedir aplicaciones duplicadas sobre la misma deuda en una sola solicitud
+    if (seenDebtKeys[key]) {
+      throw new Error('No se permiten aplicaciones duplicadas sobre la misma deuda (' + key + ') dentro de una misma solicitud.');
+    }
+    seenDebtKeys[key] = true;
+
+    const debt = debtMap[key];
+    if (!debt) throw new Error('Deuda no encontrada: ' + key);
+    if (String(debt.clienteId) !== clienteId) throw new Error('La deuda seleccionada no pertenece a este cliente.');
+    if (debt.totalPendiente <= 0.005) throw new Error('La deuda "' + debt.concepto + '" ya se encuentra saldada.');
+
+    // 3. Validar fechas de cobro: no antes de la operación ni retroactivo antes del último cobro activo
+    if (debt.fecha && fecha < debt.fecha) {
+      throw new Error('La fecha del cobro (' + fecha + ') no puede ser anterior a la fecha de la operación (' + debt.fecha + ') de "' + debt.concepto + '".');
+    }
+    if (debt.maxActivePayDate && fecha < debt.maxActivePayDate) {
+      throw new Error('No se permite registrar un cobro retroactivo (' + fecha + ') anterior al último pago registrado (' + debt.maxActivePayDate + ') en "' + debt.concepto + '". Anule el pago posterior antes de corregir el historial.');
+    }
+
+    const origPaidRaw = Number(String(req.importeOriginalPagado ?? '').trim().replace(',', '.'));
+    if (!Number.isFinite(origPaidRaw) || origPaidRaw <= 0) {
+      throw new Error('El importe a pagar debe ser mayor a 0.');
+    }
+    const origPaid = redondear2_2026(origPaidRaw);
+    if (Math.abs(origPaidRaw - origPaid) > 0.0001) {
+      throw new Error('El importe a pagar debe tener como máximo dos decimales.');
+    }
+
+    const equivDeuda = finConvertCurrency_2026(origPaid, monedaPago, debt.moneda, tcAplicado);
+    const prevCumulative = cumulativeAppliedByDebt[key] || 0;
+    const saldoDisponible = redondear2_2026(Math.max(0, debt.totalPendiente - prevCumulative));
+
+    if (monedaPago === debt.moneda) {
+      if (origPaid > saldoDisponible + 0.005) {
+        throw new Error('El importe aplicado (' + origPaid.toFixed(2) + ' ' + debt.moneda + ') supera el saldo pendiente (' + saldoDisponible.toFixed(2) + ' ' + debt.moneda + ') de "' + debt.concepto + '".');
+      }
+    } else {
+      const maxOrigAllowed = finConvertCurrency_2026(saldoDisponible, debt.moneda, monedaPago, tcAplicado);
+      if (origPaid > maxOrigAllowed + 0.01 || equivDeuda > saldoDisponible + 0.02) {
+        throw new Error('El importe aplicado (' + equivDeuda.toFixed(2) + ' ' + debt.moneda + ') supera el saldo pendiente (' + saldoDisponible.toFixed(2) + ' ' + debt.moneda + ') de "' + debt.concepto + '".');
+      }
+    }
+    const clampedEquiv = redondear2_2026(Math.min(equivDeuda, saldoDisponible));
+    cumulativeAppliedByDebt[key] = redondear2_2026(prevCumulative + clampedEquiv);
+    if (cumulativeAppliedByDebt[key] > debt.totalPendiente + 0.005) {
+      throw new Error('El saldo acumulado aplicado supera el saldo pendiente de "' + debt.concepto + '".');
+    }
+
+    // Orden de imputación obligatorio: 1° interés vencido, 2° capital
+    const interesPagado = redondear2_2026(Math.min(clampedEquiv, debt.interesAcumulado));
+    const capitalPagado = redondear2_2026(Math.min(Math.max(0, clampedEquiv - interesPagado), debt.capitalPendiente));
+    const interesRestante = redondear2_2026(Math.max(0, debt.interesAcumulado - interesPagado));
+    const saldoCapitalRestante = redondear2_2026(Math.max(0, debt.capitalPendiente - capitalPagado));
+    if (saldoCapitalRestante > 0.01 || interesRestante > 0.01) todasLiquidadas = false;
+
+    const appId = 'APP-' + Utilities.getUuid().slice(0, 8).toUpperCase();
+    preparedApps.push({
+      id: appId,
+      debt: debt,
+      cobroId: cobroId,
+      deudaTipo: debt.deudaTipo,
+      deudaId: debt.deudaId,
+      clienteId: clienteId,
+      moduloOrigen: debt.origen,
+      campanaOrigenId: debt.campanaId || '',
+      loteOrigenId: debt.loteId || '',
+      fechaCobro: fecha,
+      monedaDeuda: debt.moneda,
+      monedaPago: monedaPago,
+      tcAplicado: tcAplicado,
+      importeOriginalPagado: origPaid,
+      importeEquivalenteDeuda: clampedEquiv,
+      saldoCapitalAnterior: debt.capitalPendiente,
+      interesAcumuladoAnterior: debt.interesAcumulado,
+      interesPagado: interesPagado,
+      capitalPagado: capitalPagado,
+      saldoCapitalRestante: saldoCapitalRestante,
+      interesRestante: interesRestante,
+      movimientoInteresId: '',
+      anulado: false,
+      creadoPor: usuario,
+      creadoEn: ahora
+    });
+
+    totalOriginalPagado = redondear2_2026(totalOriginalPagado + origPaid);
+
+    // 4. Totales estrictamente separados por moneda de deuda + totales convertidos explícitamente a monedaPago
+    if (debt.moneda === 'USD') {
+      totalAplicadoUsd = redondear2_2026(totalAplicadoUsd + clampedEquiv);
+      capitalAplicadoUsd = redondear2_2026(capitalAplicadoUsd + capitalPagado);
+      interesAplicadoUsd = redondear2_2026(interesAplicadoUsd + interesPagado);
+    } else {
+      totalAplicadoBob = redondear2_2026(totalAplicadoBob + clampedEquiv);
+      capitalAplicadoBob = redondear2_2026(capitalAplicadoBob + capitalPagado);
+      interesAplicadoBob = redondear2_2026(interesAplicadoBob + interesPagado);
+    }
+
+    const intEnMonPago = finConvertCurrency_2026(interesPagado, debt.moneda, monedaPago, tcAplicado);
+    const capEnMonPago = debt.moneda === monedaPago
+      ? capitalPagado
+      : redondear2_2026(Math.max(0, origPaid - intEnMonPago));
+    interesTotalMonedaPago = redondear2_2026(interesTotalMonedaPago + intEnMonPago);
+    capitalTotalMonedaPago = redondear2_2026(capitalTotalMonedaPago + capEnMonPago);
+
+    receiptItems.push({
+      deudaTipo: debt.deudaTipo,
+      deudaId: debt.deudaId,
+      origen: debt.origen,
+      fechaOperacion: debt.fecha,
+      concepto: debt.concepto,
+      monedaDeuda: debt.moneda,
+      saldoAnterior: debt.totalPendiente,
+      interesPagado: interesPagado,
+      capitalPagado: capitalPagado,
+      importeAplicadoDeuda: clampedEquiv,
+      saldoRestante: redondear2_2026(saldoCapitalRestante + interesRestante)
+    });
+  }
+
+  // Verificar si el cliente tiene otras deudas pendientes no incluidas para definir TOTAL vs PARCIAL
+  const paidKeys = {};
+  preparedApps.forEach(function (a) { paidKeys[a.deudaTipo + ':' + a.deudaId] = true; });
+  const hasOtherPending = built.debts.some(function (d) {
+    return String(d.clienteId) === clienteId && d.totalPendiente > 0.005 && !paidKeys[d.deudaTipo + ':' + d.deudaId];
+  });
+  const tipoPago = (todasLiquidadas && !hasOtherPending) ? 'TOTAL' : 'PARCIAL';
+
+  // Preparar en memoria todas las filas antes de escribir (y resolver campaña por fecha efectiva de cobro)
+  const movSheet = findSheetIgnoreCase_('Movimientos');
+  const needsInterestIncome = preparedApps.some(function (a) { return a.interesPagado > 0.005; });
+  if (needsInterestIncome && !movSheet) {
+    throw new Error('Hoja Movimientos no encontrada para registrar el ingreso por interés de mora.');
+  }
+
+  const notaNumero = finNextSequentialNumber_2026('NotasCobro', 'NC');
+  const notaId = 'NRC-' + Utilities.getUuid().slice(0, 8).toUpperCase();
+  const importeUsdTotal = finConvertCurrency_2026(totalOriginalPagado, monedaPago, 'USD', tcAplicado);
+
+  const cobroHeader = {
+    id: cobroId,
+    trabajoId: preparedApps.length === 1 && preparedApps[0].deudaTipo === 'TRABAJO' ? preparedApps[0].deudaId : '',
+    fecha: fecha,
+    importe: importeUsdTotal,
+    importeOriginal: totalOriginalPagado,
+    monedaCobro: monedaPago,
+    monedaPago: monedaPago,
+    tc: tcAplicado,
+    tcAplicado: tcAplicado,
+    importeUsd: importeUsdTotal,
+    observacion: obs,
+    creadoPor: usuario,
+    creadoEn: ahora,
+    clienteId: cli.id,
+    clienteNombre: cli.nombre,
+    tipoPago: tipoPago,
+    capitalTotalAplicado: capitalTotalMonedaPago,
+    interesTotalAplicado: interesTotalMonedaPago,
+    monedaTotalesAplicados: monedaPago,
+    capitalAplicadoUsd: capitalAplicadoUsd,
+    interesAplicadoUsd: interesAplicadoUsd,
+    capitalAplicadoBob: capitalAplicadoBob,
+    interesAplicadoBob: interesAplicadoBob,
+    notaCobroNumero: notaNumero,
+    anulado: false,
+    estadoRegistro: 'PENDIENTE',
+    idempotencyKey: idem
+  };
+
+  const receiptRecord = {
+    id: notaId,
+    numero: notaNumero,
+    cobroId: cobroId,
+    fecha: fecha,
+    clienteId: cli.id,
+    clienteNombre: cli.nombre,
+    clienteTelefono: cli.telefono,
+    clienteDireccion: cli.direccion,
+    tipoPago: tipoPago,
+    monedaPago: monedaPago,
+    importeOriginalPagado: totalOriginalPagado,
+    tcAplicado: tcAplicado,
+    totalAplicadoUsd: totalAplicadoUsd,
+    totalAplicadoBob: totalAplicadoBob,
+    snapshotJson: JSON.stringify({
+      items: receiptItems,
+      monedaTotalesAplicados: monedaPago,
+      capitalTotalAplicado: capitalTotalMonedaPago,
+      interesTotalAplicado: interesTotalMonedaPago,
+      porMoneda: {
+        USD: { capital: capitalAplicadoUsd, interes: interesAplicadoUsd, total: totalAplicadoUsd },
+        BOB: { capital: capitalAplicadoBob, interes: interesAplicadoBob, total: totalAplicadoBob }
+      }
+    }),
+    observacion: obs,
+    anulado: false,
+    creadoPor: usuario,
+    creadoEn: ahora
+  };
+
+  // Fase de escritura transaccional con encabezado PENDIENTE primero y reversión completa ante error intermedio
+  const writtenMovIds = [];
+  let headerRowIdx = -1;
+  try {
+    // Paso 1: Escribir encabezado en Cobros como PENDIENTE (ancla la clave de idempotencia desde el inicio)
+    finAppendObj_2026(cobrosSh, cobroHeader);
+    headerRowIdx = cobrosSh.getLastRow();
+
+    // Paso 2: Escribir ingresos por interés cobrado (asignados a la campaña/periodo de la fecha efectiva de cobro) y aplicaciones
+    let ensuredConcept = false;
+    for (let i = 0; i < preparedApps.length; i++) {
+      const app = preparedApps[i];
+      if (app.interesPagado > 0.005 && movSheet) {
+        if (!ensuredConcept) {
+          finEnsureInterestConcept_2026();
+          ensuredConcept = true;
+        }
+        const movIntId = Utilities.getUuid();
+        app.movimientoInteresId = movIntId;
+        const campForIncome = finResolverCampanaPorFecha_2026(fecha, app.campanaOrigenId);
+        const moduloDestino = app.moduloOrigen === 'PROPIEDAD' ? 'PROPIEDAD' : 'MAQUINARIAS';
+        finAppendObj_2026(movSheet, {
+          id: movIntId,
+          fecha: fecha,
+          campanaId: campForIncome,
+          modulo: moduloDestino,
+          clase: 'INGRESO',
+          itemId: 'SYS_INTERES_MORA',
+          descripcion: 'Interés por mora - ' + cli.nombre + ' (' + app.debt.concepto + ')',
+          loteId: moduloDestino === 'PROPIEDAD' ? (app.loteOrigenId || '') : '',
+          maquinaId: moduloDestino === 'MAQUINARIAS' ? (app.debt.maquinaId || '') : '',
+          cantidad: 1,
+          unidad: 'mora',
+          precioUnitario: app.interesPagado,
+          importe: app.interesPagado,
+          moneda: app.monedaDeuda,
+          tc: tcAplicado,
+          trabajoId: 'INTERES_COBRO:' + cobroId + ':' + app.id,
+          creadoPor: usuario,
+          creadoEn: ahora,
+          actualizadoEn: ahora
+        });
+        writtenMovIds.push(movIntId);
+      }
+      const appToSave = { ...app };
+      delete appToSave.debt;
+      finAppendObj_2026(appsSh, appToSave);
+    }
+
+    // Paso 3: Escribir Nota de Cobro correlativa
+    finAppendObj_2026(notasCobroSh, receiptRecord);
+
+    // Paso 4: Confirmar encabezado del cobro (CONFIRMADO)
+    const cHeaders = getSheetHeaders_(cobrosSh);
+    const cMap = getHeaderIndexMap_(cHeaders);
+    if (cMap['estadoregistro'] !== undefined) {
+      // Verificar que headerRowIdx sigue correspondiendo a cobroId
+      let confirmRow = headerRowIdx;
+      if (confirmRow < 2 || String(cobrosSh.getRange(confirmRow, cMap['id'] + 1).getValue() || '').trim() !== cobroId) {
+        const cVals = cobrosSh.getDataRange().getValues();
+        for (let rIdx = cVals.length - 1; rIdx >= 1; rIdx--) {
+          if (String(cVals[rIdx][cMap['id']] || '').trim() === cobroId) {
+            confirmRow = rIdx + 1;
+            break;
+          }
+        }
+      }
+      if (confirmRow >= 2) {
+        cobrosSh.getRange(confirmRow, cMap['estadoregistro'] + 1).setValue('CONFIRMADO');
+      }
+    }
+    cobroHeader.estadoRegistro = 'CONFIRMADO';
+    SpreadsheetApp.flush();
+  } catch (writeErr) {
+    try {
+      arLimpiarCobroParcial_2026(cobroId, writtenMovIds);
+    } catch (cleanupErr) {
+      Logger.log('Error al limpiar cobro parcial ' + cobroId + ': ' + cleanupErr.message);
+    }
+    throw new Error('Error al guardar el cobro (se revirtieron los registros parciales): ' + writeErr.message);
+  }
+
+  logAudit_(usuario, 'CREATE', 'Cobros', cobroId, notaNumero + ' | ' + cli.nombre + ' | ' + totalOriginalPagado + ' ' + monedaPago);
+
+  const paymentOut = {
+    ...cobroHeader,
+    cobroId: cobroId,
+    importeOriginalPagado: totalOriginalPagado,
+    aplicaciones: preparedApps.map(function (a) { const x = { ...a }; delete x.debt; return x; })
+  };
+  const receiptOut = { ...receiptRecord, items: receiptItems };
+  return { ok: true, result: { payment: paymentOut, receipt: receiptOut }, payment: paymentOut, receipt: receiptOut };
+}
+
+function arRegistrarCobro_2026(p, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    return arRegistrarCobroInternal_2026(p, userSession);
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function arAnularCobro_2026(p, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const cobroId = String((p && (p.cobroId || p.id)) || '').trim();
+    if (!cobroId) return { ok: false, error: 'Se requiere el ID del cobro a anular.' };
+
+    const cobrosSh = cobrosPrepararHoja_2026();
+    asegurarColumnasOpcionales_2026(cobrosSh, COBROS_EXTRA_COLS_2026);
+    const cVals = cobrosSh.getDataRange().getValues();
+    const cMap = getHeaderIndexMap_(cVals[0]);
+    let foundCobroRow = -1;
+    for (let i = 1; i < cVals.length; i++) {
+      if (String(cVals[i][cMap['id']] || '').trim() === cobroId) {
+        foundCobroRow = i + 1;
+        break;
+      }
+    }
+    if (foundCobroRow === -1) return { ok: false, error: 'Cobro no encontrado.' };
+
+    const cobroYaAnulado = finParseBool_2026(cVals[foundCobroRow - 1][cMap['anulado']], false);
+    const oldCobroEstado = cMap['estadoregistro'] !== undefined ? cVals[foundCobroRow - 1][cMap['estadoregistro']] : '';
+
+    // Inspeccionar estado actual en hojas hijas para soportar recuperación idempotente de anulaciones interrumpidas
+    const appsSh = findSheetIgnoreCase_('CobroAplicaciones');
+    const appsToAnnul = [];
+    const movIdsToDelete = {};
+    if (appsSh && appsSh.getLastRow() >= 2) {
+      const aVals = appsSh.getDataRange().getValues();
+      const aMap = getHeaderIndexMap_(aVals[0]);
+      for (let i = 1; i < aVals.length; i++) {
+        if (String(aVals[i][aMap['cobroid']] || '').trim() === cobroId) {
+          const mid = String(aVals[i][aMap['movimientointeresid']] || '').trim();
+          if (mid) movIdsToDelete[mid] = true;
+          if (!finParseBool_2026(aVals[i][aMap['anulado']], false)) {
+            appsToAnnul.push({ rowIdx: i + 1, colIdx: aMap['anulado'] + 1 });
+          }
+        }
+      }
+    }
+
+    const ncSh = findSheetIgnoreCase_('NotasCobro');
+    const notasToAnnul = [];
+    if (ncSh && ncSh.getLastRow() >= 2) {
+      const nVals = ncSh.getDataRange().getValues();
+      const nMap = getHeaderIndexMap_(nVals[0]);
+      for (let i = 1; i < nVals.length; i++) {
+        if (String(nVals[i][nMap['cobroid']] || '').trim() === cobroId) {
+          if (!finParseBool_2026(nVals[i][nMap['anulado']], false)) {
+            notasToAnnul.push({ rowIdx: i + 1, colIdx: nMap['anulado'] + 1 });
+          }
+        }
+      }
+    }
+
+    const movSh = findSheetIgnoreCase_('Movimientos');
+    const prefix = 'INTERES_COBRO:' + cobroId + ':';
+    const movRowsToDelete = [];
+    if (movSh && movSh.getLastRow() >= 2) {
+      const mVals = movSh.getDataRange().getValues();
+      const mMap = getHeaderIndexMap_(mVals[0]);
+      for (let k = mVals.length - 1; k >= 1; k--) {
+        const rid = String(mVals[k][mMap['id']] || '').trim();
+        const tid = String(mVals[k][mMap['trabajoid']] || '').trim();
+        if (movIdsToDelete[rid] || tid.indexOf(prefix) === 0) {
+          movRowsToDelete.push({ rowIdx: k + 1, values: mVals[k].slice() });
+        }
+      }
+    }
+
+    if (cobroYaAnulado && appsToAnnul.length === 0 && notasToAnnul.length === 0 && movRowsToDelete.length === 0) {
+      return { ok: false, error: 'Este cobro ya se encuentra anulado.' };
+    }
+
+    const modifiedApps = [];
+    const modifiedNotas = [];
+    const deletedMovValues = [];
+    let cobroMarked = false;
+
+    try {
+      // 1. Marcar CobroAplicaciones.anulado = true
+      for (let i = 0; i < appsToAnnul.length; i++) {
+        appsSh.getRange(appsToAnnul[i].rowIdx, appsToAnnul[i].colIdx).setValue(true);
+        modifiedApps.push(appsToAnnul[i]);
+      }
+
+      // 2. Marcar NotasCobro.anulado = true
+      for (let i = 0; i < notasToAnnul.length; i++) {
+        ncSh.getRange(notasToAnnul[i].rowIdx, notasToAnnul[i].colIdx).setValue(true);
+        modifiedNotas.push(notasToAnnul[i]);
+      }
+
+      // 3. Eliminar movimientos de interés por mora vinculados (de abajo hacia arriba)
+      for (let i = 0; i < movRowsToDelete.length; i++) {
+        movSh.deleteRow(movRowsToDelete[i].rowIdx);
+        deletedMovValues.push(movRowsToDelete[i].values);
+      }
+
+      // 4. Marcar Cobros.anulado = true al final (si falla antes, reintentar converge sin falsos positivos)
+      if (!cobroYaAnulado) {
+        cobrosSh.getRange(foundCobroRow, cMap['anulado'] + 1).setValue(true);
+        if (cMap['estadoregistro'] !== undefined) {
+          cobrosSh.getRange(foundCobroRow, cMap['estadoregistro'] + 1).setValue('ANULADO');
+        }
+        cobroMarked = true;
+      }
+
+      SpreadsheetApp.flush();
+    } catch (cancelErr) {
+      // Reversión de emergencia si ocurrió un fallo intermedio durante la anulación
+      try {
+        if (cobroMarked && !cobroYaAnulado) {
+          cobrosSh.getRange(foundCobroRow, cMap['anulado'] + 1).setValue(false);
+          if (cMap['estadoregistro'] !== undefined) {
+            cobrosSh.getRange(foundCobroRow, cMap['estadoregistro'] + 1).setValue(oldCobroEstado);
+          }
+        }
+        for (let i = deletedMovValues.length - 1; i >= 0; i--) {
+          movSh.appendRow(deletedMovValues[i]);
+        }
+        for (let i = 0; i < modifiedNotas.length; i++) {
+          ncSh.getRange(modifiedNotas[i].rowIdx, modifiedNotas[i].colIdx).setValue(false);
+        }
+        for (let i = 0; i < modifiedApps.length; i++) {
+          appsSh.getRange(modifiedApps[i].rowIdx, modifiedApps[i].colIdx).setValue(false);
+        }
+        SpreadsheetApp.flush();
+      } catch (rbErr) {
+        Logger.log('Error en rollback de anulación ' + cobroId + ': ' + rbErr.message);
+      }
+      throw new Error('Error al anular el cobro (se revirtieron los cambios parciales): ' + cancelErr.message);
+    }
+
+    logAudit_(userSession && userSession.usuarioId, 'CANCEL', 'Cobros', cobroId, 'Cobro anulado e intereses revertidos');
+    return { ok: true, result: { cobroId: cobroId, anulado: true } };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function arCrearNotaDebito_2026(p, userSession) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const clienteId = String((p && p.clienteId) || '').trim();
+    const cli = clientesBuscarPorId_2026(clienteId);
+    if (!cli) return { ok: false, error: 'Cliente no encontrado.' };
+
+    const sh = finEnsureSheet_2026('NotasDebito', SHEET_SCHEMAS.NotasDebito);
+    const idem = String((p && p.idempotencyKey) || '').trim();
+    if (idem) {
+      const dup = getSheetDataAsObjects('NotasDebito').find(function (n) {
+        return String(n.idempotencyKey || '').trim() === idem;
+      });
+      if (dup) {
+        const docs = arListarDocumentos_2026({ clienteId: clienteId });
+        const found = docs.debitNotes.find(function (d) { return d.id === String(dup.id); });
+        return { ok: true, result: found || dup, debitNote: found || dup };
+      }
+    }
+
+    const fecha = validarFechaIso_2026(p.fecha, getBoliviaTodayStr_());
+    const reqDeudas = Array.isArray(p.deudas) ? p.deudas : [];
+    if (reqDeudas.length === 0) return { ok: false, error: 'Seleccione al menos una deuda pendiente para emitir la nota de débito.' };
+
+    const built = arConstruirDeudas_2026(fecha);
+    const debtMap = {};
+    built.debts.forEach(function (d) { debtMap[d.deudaTipo + ':' + d.deudaId] = d; });
+
+    const items = [];
+    let totalUsd = 0;
+    let totalBob = 0;
+
+    for (let i = 0; i < reqDeudas.length; i++) {
+      const ref = reqDeudas[i];
+      const key = String(ref.deudaTipo || 'TRABAJO').toUpperCase() + ':' + String(ref.deudaId || '').trim();
+      const debt = debtMap[key];
+      if (!debt) throw new Error('Deuda no encontrada: ' + key);
+      if (String(debt.clienteId) !== clienteId) throw new Error('Todas las deudas deben pertenecer al mismo cliente.');
+      if (debt.totalPendiente <= 0.005) continue;
+
+      items.push({
+        deudaTipo: debt.deudaTipo,
+        deudaId: debt.deudaId,
+        origen: debt.origen,
+        fechaOperacion: debt.fecha,
+        concepto: debt.concepto,
+        cantidad: debt.cantidad,
+        unidad: debt.unidad,
+        precioUnitario: debt.precioUnitario,
+        moneda: debt.moneda,
+        importeOriginal: debt.importeOriginal,
+        pagosAnteriores: debt.pagosAnteriores,
+        capitalPendiente: debt.capitalPendiente,
+        fechaVencimiento: debt.fechaVencimiento,
+        diasAtraso: debt.diasAtraso,
+        tasaInteresMensual: debt.tasaInteresMensual,
+        interesAcumulado: debt.interesAcumulado,
+        totalPendiente: debt.totalPendiente
+      });
+      if (debt.moneda === 'USD') totalUsd = redondear2_2026(totalUsd + debt.totalPendiente);
+      else totalBob = redondear2_2026(totalBob + debt.totalPendiente);
+    }
+
+    if (items.length === 0) return { ok: false, error: 'Las deudas seleccionadas no tienen saldo pendiente.' };
+
+    const numero = finNextSequentialNumber_2026('NotasDebito', 'ND');
+    const id = 'NDB-' + Utilities.getUuid().slice(0, 8).toUpperCase();
+    const ahora = new Date().toISOString();
+    const usuario = String((userSession && userSession.usuarioId) || 'admin');
+    const obs = String(p.observacion || '').trim();
+
+    const record = {
+      id: id,
+      numero: numero,
+      fecha: fecha,
+      clienteId: cli.id,
+      clienteNombre: cli.nombre,
+      clienteTelefono: cli.telefono,
+      clienteDireccion: cli.direccion,
+      totalUsd: totalUsd,
+      totalBob: totalBob,
+      snapshotJson: JSON.stringify({ items: items }),
+      observacion: obs,
+      creadoPor: usuario,
+      creadoEn: ahora,
+      idempotencyKey: idem
+    };
+
+    finAppendObj_2026(sh, record);
+    SpreadsheetApp.flush();
+    logAudit_(usuario, 'CREATE', 'NotasDebito', id, numero + ' | ' + cli.nombre);
+
+    const out = { ...record, items: items };
+    return { ok: true, result: out, debitNote: out };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// -------------------------------------------------------------
+// 5. MIGRACIÓN NO DESTRUCTIVA E IDEMPOTENTE (2026)
+// Ejecutar manualmente en Apps Script tras desplegar el código.
+// -------------------------------------------------------------
+
+function finNormNameLoose_2026(s) {
+  return finNormName_2026(s).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function migrarEstructuraFinanciera2026() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const summary = {
+      ok: true,
+      hojasCreadasOVerificadas: [],
+      columnasAgregadas: [],
+      conceptoInteresCreado: false,
+      clientesMigrados: 0,
+      trabajosVinculados: 0,
+      trabajosOmitidosPorAmbiguedad: 0,
+      clientesAmbiguos: [],
+      detalleOmitidosPorAmbiguedad: []
+    };
+
+    // 1. Crear o verificar hojas nuevas
+    ['Clientes', 'CobroAplicaciones', 'NotasDebito', 'NotasCobro'].forEach(function (name) {
+      finEnsureSheet_2026(name, SHEET_SCHEMAS[name]);
+      summary.hojasCreadasOVerificadas.push(name);
+    });
+    cobrosPrepararHoja_2026();
+    cosechasHoja_2026('Cosechas', COSECHA_CAMPOS_2026);
+    cosechasHoja_2026('AsignacionesPrecio', PRECIO_CAMPOS_2026);
+
+    // 2. Asegurar columnas opcionales sin borrar ni reordenar datos existentes
+    const trabajosSh = findSheetIgnoreCase_('Trabajos');
+    if (trabajosSh) {
+      asegurarColumnasOpcionales_2026(trabajosSh, ['clienteId', 'clientePendiente', 'plazoDias', 'fechaVencimiento', 'aplicarInteres', 'tasaInteresMensual']);
+      summary.columnasAgregadas.push('Trabajos');
+    }
+    const asigSh = findSheetIgnoreCase_('AsignacionesPrecio');
+    if (asigSh) {
+      asegurarColumnasOpcionales_2026(asigSh, VENTA_COSECHA_EXTRA_COLS_2026);
+      summary.columnasAgregadas.push('AsignacionesPrecio');
+    }
+    const cobrosSh = findSheetIgnoreCase_('Cobros');
+    if (cobrosSh) {
+      asegurarColumnasOpcionales_2026(cobrosSh, COBROS_EXTRA_COLS_2026);
+      summary.columnasAgregadas.push('Cobros');
+    }
+    const cosechasSh = findSheetIgnoreCase_('Cosechas');
+    if (cosechasSh) {
+      asegurarColumnasOpcionales_2026(cosechasSh, ['actualizadoEn']);
+      summary.columnasAgregadas.push('Cosechas');
+    }
+
+    // 3. Asegurar concepto de sistema Interés por mora
+    summary.conceptoInteresCreado = finEnsureInterestConcept_2026();
+
+    // 4. Migrar nombres históricos de clientes desde Trabajos → Clientes evitando vinculaciones ambiguas
+    const clientesSh = findSheetIgnoreCase_('Clientes');
+    if (trabajosSh && clientesSh && trabajosSh.getLastRow() >= 2) {
+      const existingClientes = getSheetDataAsObjects('Clientes');
+      const existingByNorm = {};
+      const existingByLoose = {};
+
+      existingClientes.forEach(function (c) {
+        if (!c || !c.nombre || !c.id) return;
+        const cid = String(c.id).trim();
+        const cname = String(c.nombre).trim();
+        const norm = finNormName_2026(cname);
+        const loose = finNormNameLoose_2026(cname);
+        if (!existingByNorm[norm]) existingByNorm[norm] = [];
+        existingByNorm[norm].push({ id: cid, nombre: cname });
+        if (loose) {
+          if (!existingByLoose[loose]) existingByLoose[loose] = [];
+          existingByLoose[loose].push({ id: cid, nombre: cname });
+        }
+      });
+
+      const tVals = trabajosSh.getDataRange().getValues();
+      const tMap = getHeaderIndexMap_(tVals[0]);
+      const ahora = new Date().toISOString();
+
+      // Pre-escaneo de nombres históricos en Trabajos para detectar colisiones de normalización laxa (ej. "Agro-Sur" vs "Agro Sur")
+      const legacyNormsByLoose = {};
+      for (let i = 1; i < tVals.length; i++) {
+        const dest = String(tVals[i][tMap['destino']] || '').toUpperCase();
+        if (dest !== 'TERCERO') continue;
+        const currentCid = String(tVals[i][tMap['clienteid']] || '').trim();
+        if (currentCid) continue;
+        const legacyName = String(tVals[i][tMap['cliente']] || '').trim().replace(/\s+/g, ' ');
+        if (!legacyName) continue;
+        const norm = finNormName_2026(legacyName);
+        const loose = finNormNameLoose_2026(legacyName);
+        if (!loose) continue;
+        if (!legacyNormsByLoose[loose]) legacyNormsByLoose[loose] = {};
+        legacyNormsByLoose[loose][norm] = legacyName;
+      }
+
+      const ambiguousReported = {};
+      const registerAmbiguity = function (key, motivo, candidatos) {
+        if (ambiguousReported[key]) return;
+        ambiguousReported[key] = true;
+        summary.clientesAmbiguos.push({
+          clave: key,
+          motivo: motivo,
+          candidatos: candidatos
+        });
+      };
+
+      const createdByNorm = {};
+      const createdByLoose = {};
+
+      for (let i = 1; i < tVals.length; i++) {
+        const dest = String(tVals[i][tMap['destino']] || '').toUpperCase();
+        if (dest !== 'TERCERO') continue;
+        const currentCid = String(tVals[i][tMap['clienteid']] || '').trim();
+        if (currentCid) continue;
+        const legacyName = String(tVals[i][tMap['cliente']] || '').trim().replace(/\s+/g, ' ');
+        if (!legacyName) continue;
+
+        const trabajoId = String(tVals[i][tMap['id']] || ('ROW-' + (i + 1))).trim();
+        const norm = finNormName_2026(legacyName);
+        const loose = finNormNameLoose_2026(legacyName);
+
+        const normMatches = existingByNorm[norm] || [];
+        const looseMatches = loose ? (existingByLoose[loose] || []) : [];
+        const distinctLegacyForLoose = loose && legacyNormsByLoose[loose] ? Object.keys(legacyNormsByLoose[loose]) : [];
+
+        // Caso A: Múltiples clientes existentes comparten el mismo nombre normalizado -> AMBIGUO
+        if (normMatches.length > 1) {
+          const candIds = normMatches.map(function (x) { return x.id; });
+          registerAmbiguity(norm, 'Múltiples clientes existentes comparten el mismo nombre normalizado', normMatches);
+          summary.trabajosOmitidosPorAmbiguedad += 1;
+          summary.detalleOmitidosPorAmbiguedad.push({
+            trabajoId: trabajoId,
+            clienteTexto: legacyName,
+            motivo: 'Múltiples clientes en catálogo con el mismo nombre normalizado',
+            candidatosIds: candIds
+          });
+          if (tMap['clientependiente'] !== undefined && String(tVals[i][tMap['clientependiente']] || '').trim() === '') {
+            trabajosSh.getRange(i + 1, tMap['clientependiente'] + 1).setValue(true);
+          }
+          continue;
+        }
+
+        // Caso B: Colisión con cliente(s) existente(s) que difieren solo en puntuación/separadores -> AMBIGUO
+        if (looseMatches.length > 1 || (normMatches.length === 0 && looseMatches.length >= 1)) {
+          const candIds = looseMatches.map(function (x) { return x.id; });
+          registerAmbiguity(loose || norm, 'Coincidencia ambigua por puntuación o variantes en catálogo Clientes', looseMatches);
+          summary.trabajosOmitidosPorAmbiguedad += 1;
+          summary.detalleOmitidosPorAmbiguedad.push({
+            trabajoId: trabajoId,
+            clienteTexto: legacyName,
+            motivo: 'Coincidencia ambigua con clientes existentes en catálogo',
+            candidatosIds: candIds
+          });
+          if (tMap['clientependiente'] !== undefined && String(tVals[i][tMap['clientependiente']] || '').trim() === '') {
+            trabajosSh.getRange(i + 1, tMap['clientependiente'] + 1).setValue(true);
+          }
+          continue;
+        }
+
+        // Caso C: Sin cliente existente, pero múltiples variantes históricas en Trabajos colisionan en clave laxa -> AMBIGUO
+        if (normMatches.length === 0 && distinctLegacyForLoose.length > 1) {
+          const variants = distinctLegacyForLoose.map(function (k) { return legacyNormsByLoose[loose][k]; });
+          registerAmbiguity(loose, 'Múltiples variantes de nombre histórico en Trabajos', variants);
+          summary.trabajosOmitidosPorAmbiguedad += 1;
+          summary.detalleOmitidosPorAmbiguedad.push({
+            trabajoId: trabajoId,
+            clienteTexto: legacyName,
+            motivo: 'Múltiples variantes de nombre histórico requieren confirmación manual',
+            candidatosIds: []
+          });
+          if (tMap['clientependiente'] !== undefined && String(tVals[i][tMap['clientependiente']] || '').trim() === '') {
+            trabajosSh.getRange(i + 1, tMap['clientependiente'] + 1).setValue(true);
+          }
+          continue;
+        }
+
+        // Caso seguro e inequívoco: exactamente 1 cliente existente o 1 nombre histórico único
+        let cid = normMatches.length === 1 ? normMatches[0].id : (createdByNorm[norm] || (loose ? createdByLoose[loose] : ''));
+        if (!cid) {
+          cid = 'CLI-' + Utilities.getUuid().slice(0, 8).toUpperCase();
+          finAppendObj_2026(clientesSh, {
+            id: cid,
+            nombre: legacyName,
+            telefono: '',
+            direccion: '',
+            activo: true,
+            creadoEn: ahora,
+            actualizadoEn: ahora
+          });
+          createdByNorm[norm] = cid;
+          if (loose) createdByLoose[loose] = cid;
+          existingByNorm[norm] = [{ id: cid, nombre: legacyName }];
+          if (loose) existingByLoose[loose] = [{ id: cid, nombre: legacyName }];
+          summary.clientesMigrados += 1;
+        }
+        trabajosSh.getRange(i + 1, tMap['clienteid'] + 1).setValue(cid);
+        trabajosSh.getRange(i + 1, tMap['clientependiente'] + 1).setValue(false);
+        summary.trabajosVinculados += 1;
+      }
+    }
+
+    SpreadsheetApp.flush();
+    Logger.log(JSON.stringify(summary));
+    return summary;
+  } finally {
+    lock.releaseLock();
+  }
+}
+

@@ -227,6 +227,23 @@ export function setQueryData<T>(
 }
 
 /**
+ * Convenience reader returning cached data directly (or undefined if not loaded).
+ */
+export function getCachedQuery<T>(key: string): { data: T; updatedAt: number | null } | undefined {
+  const snap = getQuerySnapshot<T>(key);
+  return snap.hasLoaded && snap.data !== undefined
+    ? { data: snap.data, updatedAt: snap.updatedAt }
+    : undefined;
+}
+
+/**
+ * Convenience writer storing data directly into the shared in-memory SWR cache.
+ */
+export function setCachedQuery<T>(key: string, data: T): void {
+  setQueryData<T>(key, data);
+}
+
+/**
  * Patch all loaded cached entries whose key starts with `prefix`.
  * Useful for immediately updating an item (e.g., a CobroCuenta or HarvestRecord)
  * across all cached filter variants without waiting for full refetch.
@@ -309,6 +326,13 @@ export const cacheKeys = {
   harvestPending: () => 'harvest.pending:all',
   harvestList: (campanaId?: string) =>
     `harvest.list:${campanaId && campanaId !== 'all' ? campanaId : 'all'}`,
+  harvestSalesList: (campanaId?: string) =>
+    `harvestSale.list:${campanaId && campanaId !== 'all' ? campanaId : 'all'}`,
+  customersList: () => 'customer.list:all',
+  paymentSettings: () => 'paymentSettings.get:all',
+  arSummary: () => 'ar.summary:all',
+  arCustomerDetail: (clienteId: string) => `ar.customer:${clienteId}`,
+  arDocuments: (clienteId?: string) => `ar.documents:${clienteId || 'all'}`,
   expenseAllocations: (campanaId?: string) =>
     `expense.allocations:${campanaId && campanaId !== 'all' ? campanaId : 'all'}`,
   machineTypes: () => 'machineType.list:all',
