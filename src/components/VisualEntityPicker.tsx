@@ -138,7 +138,13 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
         className={`w-full h-[40px] px-3 py-1.5 rounded-xl border flex items-center justify-between gap-2 text-left transition cursor-pointer focus:outline-none ${styles.button}`}
       >
         <div className="flex items-center gap-2 min-w-0 flex-1">
-          <Tractor className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
+          {selectedMachine && selectedMachine.icono ? (
+            <div className="w-6 h-6 flex items-center justify-center shrink-0">
+              <VisualIcon iconId={selectedMachine.icono} nameHint={selectedMachine.nombre} category="maquinaria" size={26} />
+            </div>
+          ) : (
+            <Tractor className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
+          )}
           <span className={`text-sm font-semibold truncate ${styles.text}`}>
             {selectedMachine ? selectedMachine.nombre : t('picker.machinePlaceholder')}
           </span>
@@ -376,7 +382,13 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
         className={`w-full h-[40px] px-3 py-1.5 rounded-xl border flex items-center justify-between gap-2 text-left transition cursor-pointer focus:outline-none ${styles.button}`}
       >
         <div className="flex items-center gap-2 min-w-0 flex-1">
-          <Wrench className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
+          {selectedJob && selectedJob.icono ? (
+            <div className="w-6 h-6 flex items-center justify-center shrink-0">
+              <VisualIcon iconId={selectedJob.icono} nameHint={selectedJob.nombre} category="implemento" size={26} />
+            </div>
+          ) : (
+            <Wrench className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
+          )}
           <span className={`text-sm font-semibold truncate ${styles.text}`}>
             {selectedJob ? selectedJob.nombre : t('picker.implementPlaceholder')}
           </span>
@@ -586,7 +598,16 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
         className={`w-full h-[40px] px-3 py-1.5 rounded-xl border flex items-center justify-between gap-2 text-left transition cursor-pointer focus:outline-none ${styles.button}`}
       >
         <div className="flex items-center gap-2 min-w-0 flex-1">
-          <List className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
+          {(() => {
+            const expItem = items.find((i) => i.nombre.toLowerCase() === currentName.toLowerCase());
+            return expItem && expItem.icono ? (
+              <div className="w-6 h-6 flex items-center justify-center shrink-0">
+                <VisualIcon iconId={expItem.icono} nameHint={currentName} category="gasto" size={26} />
+              </div>
+            ) : (
+              <List className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
+            );
+          })()}
           <span className={`text-sm font-semibold truncate ${styles.text}`}>
             {currentName || t('picker.expensePlaceholder')}
           </span>
@@ -784,7 +805,16 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
         className={`w-full h-[40px] px-3 py-1.5 rounded-xl border flex items-center justify-between gap-2 text-left transition cursor-pointer focus:outline-none ${styles.button}`}
       >
         <div className="flex items-center gap-2 min-w-0 flex-1">
-          <List className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
+          {(() => {
+            const incItem = effectiveItems.find((i) => i.nombre.toLowerCase() === currentName.toLowerCase());
+            return incItem && incItem.icono ? (
+              <div className="w-6 h-6 flex items-center justify-center shrink-0">
+                <VisualIcon iconId={incItem.icono} nameHint={currentName} category="ingreso" size={26} />
+              </div>
+            ) : (
+              <List className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
+            );
+          })()}
           <span className={`text-sm font-semibold truncate ${styles.text}`}>
             {currentName || t('picker.incomePlaceholder')}
           </span>

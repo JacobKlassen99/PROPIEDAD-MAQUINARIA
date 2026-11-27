@@ -41,6 +41,20 @@ import {
   resetAllCache,
 } from './dataCache';
 import { computeHarvestAvailability, normalizeHarvestUnit } from './harvestAvailability';
+import {
+  getBoliviaTodayIso,
+  toBoliviaIsoDate,
+  formatBoliviaDateDDMMAAAA,
+  parseOperationalDateTimestamp,
+} from './boliviaDate';
+
+export {
+  BOLIVIA_TIMEZONE,
+  getBoliviaTodayIso,
+  toBoliviaIsoDate,
+  addDaysOperational,
+  diffDaysOperational,
+} from './boliviaDate';
 
 /**
  * Backend Communication Service for MAQUINARIAS Y PROPIEDAD
@@ -237,35 +251,11 @@ export function checkIsAdmin(_session?: UserSession | any): boolean {
 }
 
 export function getLocalDateString(dateInput: Date | string = new Date()): string {
-  const d = dateInput instanceof Date ? dateInput : new Date(dateInput);
-  if (isNaN(d.getTime())) {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  }
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return toBoliviaIsoDate(dateInput, true);
 }
 
 export function getBoliviaDateString(dateInput: Date | string = new Date()): string {
-  const d = dateInput instanceof Date ? dateInput : new Date(dateInput);
-  const safeDate = isNaN(d.getTime()) ? new Date() : d;
-  try {
-    const parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'America/La_Paz',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).formatToParts(safeDate);
-    const year = parts.find((p) => p.type === 'year')?.value;
-    const month = parts.find((p) => p.type === 'month')?.value;
-    const day = parts.find((p) => p.type === 'day')?.value;
-    if (year && month && day) return `${year}-${month}-${day}`;
-  } catch {
-    // Fallback below
-  }
-  return getLocalDateString(safeDate);
+  return toBoliviaIsoDate(dateInput, true);
 }
 
 /**
@@ -327,28 +317,7 @@ export function formatExchangeRateDate(dateInput?: string | Date | null): string
  * without timezone offset shifts.
  */
 export function formatDateDDMMAAAA(dateInput?: string | Date | null): string {
-  if (!dateInput) return '';
-  if (dateInput instanceof Date) {
-    if (isNaN(dateInput.getTime())) return '';
-    const day = String(dateInput.getDate()).padStart(2, '0');
-    const month = String(dateInput.getMonth() + 1).padStart(2, '0');
-    const year = dateInput.getFullYear();
-    return `${day}/${month}/${year}`;
-  }
-  const str = String(dateInput).trim();
-  // Match YYYY-MM-DD anywhere in the string (including ISO 2026-10-23T...)
-  const matchYMD = str.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (matchYMD) {
-    const [, year, month, day] = matchYMD;
-    return `${day.padStart(2, '0')}/${month.padStart(2, '0')}/${year}`;
-  }
-  // Match DD/MM/YYYY
-  const matchDMY = str.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-  if (matchDMY) {
-    const [, day, month, year] = matchDMY;
-    return `${day.padStart(2, '0')}/${month.padStart(2, '0')}/${year}`;
-  }
-  return str;
+  return formatBoliviaDateDDMMAAAA(dateInput);
 }
 
 /**
@@ -1760,7 +1729,7 @@ export function normalizeMachineryJob(raw: any): MachineryJob {
     return {
       id: '',
       tipoTrabajo: 'tercero',
-      fecha: new Date().toISOString().slice(0, 10),
+      fecha: getBoliviaTodayIso(),
       campanaId: '',
       maquinariaId: '',
       cantidad: 0,
@@ -2489,7 +2458,7 @@ export async function getAssets(useCache = true): Promise<Asset[]> {
     const normalizedMejoras: AssetImprovement[] = rawMejoras.map((m: any, idx: number) => ({
       id: String(m.id || m.mejoraId || `imp_${a.id}_${idx + 1}`),
       activoId: String(m.activoId || a.id || ''),
-      fecha: String(m.fecha || new Date().toISOString().slice(0, 10)),
+      fecha: toBoliviaIsoDate(m.fecha, true),
       descripcion: String(m.descripcion || m.detalle || 'Mejora'),
       costo: parseDecimalNumber(m.importe ?? m.costo ?? 0),
       moneda: (String(m.moneda || 'USD').toUpperCase().includes('BOB') ? 'BOB' : 'USD') as Currency,
@@ -2554,8 +2523,8 @@ export async function createAsset(asset: Omit<Asset, 'id' | 'valorAcumulado' | '
     moneda: gasMoneda,
     tc: tcNum,
     tipoCambio: tcNum,
-    fecha: asset.fechaAdquisicion || new Date().toISOString().slice(0, 10),
-    fechaAdquisicion: asset.fechaAdquisicion || new Date().toISOString().slice(0, 10),
+    fecha: toBoliviaIsoDate(asset.fechaAdquisicion, true),
+    fechaAdquisicion: toBoliviaIsoDate(asset.fechaAdquisicion, true),
     ...(asset.icono ? { icono: asset.icono } : {}),
   };
 
@@ -2713,7 +2682,7 @@ export async function upsertAssetForEntity(
         icono,
         valorInicial: val,
         moneda: 'USD',
-        fechaAdquisicion: new Date().toISOString().slice(0, 10),
+        fechaAdquisicion: getBoliviaTodayIso(),
       });
     }
   } catch (err) {
@@ -3626,35 +3595,7 @@ export async function getExpenseAllocations(
 }
 
 export function parseFlexibleDate(dateStr: string | undefined | null): number {
-  if (!dateStr) return 0;
-  const str = String(dateStr).trim();
-  const dmyMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
-  if (dmyMatch) {
-    const day = parseInt(dmyMatch[1], 10);
-    const month = parseInt(dmyMatch[2], 10) - 1;
-    let year = parseInt(dmyMatch[3], 10);
-    if (year < 100) year += 2000;
-    const hour = dmyMatch[4] ? parseInt(dmyMatch[4], 10) : 0;
-    const minute = dmyMatch[5] ? parseInt(dmyMatch[5], 10) : 0;
-    const second = dmyMatch[6] ? parseInt(dmyMatch[6], 10) : 0;
-    const dt = new Date(year, month, day, hour, minute, second);
-    const ts = dt.getTime();
-    if (!isNaN(ts)) return ts;
-  }
-  const ymdMatch = str.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})(?:\s+T?(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
-  if (ymdMatch) {
-    const year = parseInt(ymdMatch[1], 10);
-    const month = parseInt(ymdMatch[2], 10) - 1;
-    const day = parseInt(ymdMatch[3], 10);
-    const hour = ymdMatch[4] ? parseInt(ymdMatch[4], 10) : 0;
-    const minute = ymdMatch[5] ? parseInt(ymdMatch[5], 10) : 0;
-    const second = ymdMatch[6] ? parseInt(ymdMatch[6], 10) : 0;
-    const dt = new Date(year, month, day, hour, minute, second);
-    const ts = dt.getTime();
-    if (!isNaN(ts)) return ts;
-  }
-  const parsed = Date.parse(str);
-  return isNaN(parsed) ? 0 : parsed;
+  return parseOperationalDateTimestamp(dateStr);
 }
 
 export function compareChronologicalDesc(

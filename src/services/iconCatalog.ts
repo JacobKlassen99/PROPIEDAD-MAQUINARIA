@@ -13,51 +13,51 @@ export const ICON_CATALOG: IconDefinition[] = [
   // --- 1. INGRESOS AGRÍCOLAS ---
   {
     id: 'soya',
-    name: 'Venta de Soya',
-    label: 'Venta de Soya',
+    name: 'Soya',
+    label: 'Soya',
     category: 'ingreso',
     keywords: ['soya', 'soja', 'cosecha', 'granos', 'venta de soya', 'legumbre', 'grano de oro', 'oleaginosa'],
-    description: 'Venta o cosecha de granos de soya',
+    description: 'Granos o cosecha de soya',
   },
   {
     id: 'maiz',
-    name: 'Venta de Maíz',
-    label: 'Venta de Maíz',
+    name: 'Maíz',
+    label: 'Maíz',
     category: 'ingreso',
     keywords: ['maiz', 'maíz', 'choclo', 'grano', 'venta de maiz', 'cosecha', 'cereal'],
-    description: 'Venta o cosecha de maíz amarillo o blanco',
+    description: 'Granos o cosecha de maíz amarillo o blanco',
   },
   {
     id: 'trigo',
-    name: 'Venta de Trigo',
-    label: 'Venta de Trigo',
+    name: 'Trigo',
+    label: 'Trigo',
     category: 'ingreso',
     keywords: ['trigo', 'espiga', 'cereal', 'harina', 'venta de trigo', 'cosecha', 'pan'],
-    description: 'Venta o cosecha de trigo harinero o forrajero',
+    description: 'Granos o cosecha de trigo harinero o forrajero',
   },
   {
     id: 'sorgo',
-    name: 'Venta de Sorgo',
-    label: 'Venta de Sorgo',
+    name: 'Sorgo',
+    label: 'Sorgo',
     category: 'ingreso',
     keywords: ['sorgo', 'panoja', 'grano rojo', 'venta de sorgo', 'cosecha', 'forraje'],
-    description: 'Venta o cosecha de sorgo granífero',
+    description: 'Granos o cosecha de sorgo granífero',
   },
   {
     id: 'girasol',
-    name: 'Venta de Girasol',
-    label: 'Venta de Girasol',
+    name: 'Girasol',
+    label: 'Girasol',
     category: 'ingreso',
     keywords: ['girasol', 'pepitas', 'semilla', 'aceitera', 'venta de girasol', 'flor', 'cosecha'],
-    description: 'Venta o cosecha de semillas de girasol',
+    description: 'Semillas o cosecha de girasol',
   },
   {
     id: 'granos',
-    name: 'Otros Granos Agrícolas',
-    label: 'Otros Granos Agrícolas',
+    name: 'Otros Granos',
+    label: 'Otros Granos',
     category: 'ingreso',
     keywords: ['granos', 'productos', 'agricolas', 'chia', 'chía', 'sesamo', 'sésamo', 'frijol', 'cosecha'],
-    description: 'Venta de chía, sésamo, frijol u otros productos agrícolas',
+    description: 'Chía, sésamo, frijol u otros granos agrícolas',
   },
   {
     id: 'otros-ingresos',
@@ -124,6 +124,14 @@ export const ICON_CATALOG: IconDefinition[] = [
     category: 'maquinaria',
     keywords: ['pulverizadora', 'fumigadora', 'mosquito', 'botalon', 'quimicos'],
     description: 'Pulverizadora autopropulsada de alto despeje con barras de aplicación',
+  },
+  {
+    id: 'drone-agricola',
+    name: 'Drone agrícola',
+    label: 'Drone agrícola',
+    category: 'maquinaria',
+    keywords: ['drone', 'dron', 'drone agricola', 'dron agricola', 'fumigacion', 'pulverizacion', 'aereo', 'uav', 'aspersion'],
+    description: 'Drone agrícola pulverizador con tanque líquido y brazos con hélices',
   },
   {
     id: 'otros-equipos',
@@ -369,6 +377,7 @@ export function getIconDefinition(idOrName?: string, categoryHint?: IconCategory
   if (clean.includes('fungicida')) return findIcon('insecticida');
 
   // 5. Mapeos de maquinarias
+  if (clean.includes('drone') || clean.includes('dron')) return findIcon('drone-agricola');
   if (clean.includes('new holland') || clean.includes('ts115') || clean.includes('ts 115')) return findIcon('tractor-blue');
   if (clean.includes('cosechadora') || clean.includes('trilladora')) return findIcon('cosechadora');
   if (clean.includes('camion') || clean.includes('camión')) return findIcon('camion');
@@ -396,6 +405,11 @@ export function getDefaultIconForCategory(cat: IconCategory): IconDefinition {
   if (cat === 'gasto') return findIcon('diesel');
   if (cat === 'ingreso') return findIcon('soya');
   return findIcon('tractor');
+}
+
+export function getIconAssetUrl(iconId: string): string {
+  const base = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+  return `${base}/icons/${iconId}.webp`;
 }
 
 export function searchIcons(query: string, categoryFilter?: IconCategory | 'todos'): IconDefinition[] {

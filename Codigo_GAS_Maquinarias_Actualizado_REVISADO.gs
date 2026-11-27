@@ -3278,6 +3278,20 @@ function getBoliviaTimestampStr_() {
   return Utilities.formatDate(new Date(), BOLIVIA_TZ_, 'yyyy-MM-dd HH:mm');
 }
 
+function verificarZonaHorariaBolivia_2026() {
+  const scriptTz = Session.getScriptTimeZone();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetTz = ss ? ss.getSpreadsheetTimeZone() : '';
+  return {
+    operativa: BOLIVIA_TZ_,
+    scriptTimeZone: scriptTz,
+    spreadsheetTimeZone: sheetTz,
+    scriptCoincide: scriptTz === BOLIVIA_TZ_,
+    spreadsheetCoincide: sheetTz === BOLIVIA_TZ_,
+    hoyBolivia: getBoliviaTodayStr_(),
+  };
+}
+
 function normalizeConfigDateStr_(val) {
   if (!val) return '';
   if (val instanceof Date) {
@@ -3285,12 +3299,17 @@ function normalizeConfigDateStr_(val) {
     return Utilities.formatDate(val, BOLIVIA_TZ_, 'yyyy-MM-dd');
   }
   const s = String(val).trim();
-  const ymd = s.match(/^(\d{4}-\d{2}-\d{2})/);
-  if (ymd) return ymd[1];
+  if (!s) return '';
+  // Strict date-only YYYY-MM-DD (never shift)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // Local Bolivia timestamp without timezone suffix (e.g. "2026-11-26 22:30")
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(:\d{2})?$/.test(s)) return s.slice(0, 10);
+  // DD/MM/YYYY (never shift)
   const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (dmy) {
     return dmy[3] + '-' + ('0' + dmy[2]).slice(-2) + '-' + ('0' + dmy[1]).slice(-2);
   }
+  // Full ISO timestamp with time + timezone (e.g. "2026-11-27T02:30:00.000Z") -> convert to America/La_Paz
   const parsed = new Date(s);
   if (!isNaN(parsed.getTime())) {
     return Utilities.formatDate(parsed, BOLIVIA_TZ_, 'yyyy-MM-dd');
@@ -3779,7 +3798,7 @@ function handleCreateAsset(a, userSession) {
     row[map['valorinicial']] = valIni;
     row[map['moneda']] = String(a.moneda || 'USD').toUpperCase();
     row[map['tc']] = rawTc;
-    row[map['fecha']] = String(a.fecha || a.fechaAdquisicion || new Date().toISOString().slice(0, 10));
+    row[map['fecha']] = validarFechaIso_2026(a.fecha || a.fechaAdquisicion, getBoliviaTodayStr_());
     row[map['observacion']] = String(a.observacion || a.observaciones || '');
     row[map['activo']] = a.activo !== false;
 
@@ -3820,7 +3839,7 @@ function handleAddAssetImprovement(assetId, imp, userSession) {
     const row = [];
     row[map['id']] = id;
     row[map['activoid']] = String(assetId);
-    row[map['fecha']] = String(imp.fecha || new Date().toISOString().slice(0, 10));
+    row[map['fecha']] = validarFechaIso_2026(imp.fecha, getBoliviaTodayStr_());
     row[map['descripcion']] = String(imp.descripcion || '').trim();
     row[map['importe']] = impVal;
     row[map['moneda']] = String(imp.moneda || 'USD').toUpperCase();
@@ -4955,9 +4974,11 @@ function cosechasActualizar_2026(p, userSession) {
     const summaryItem = cosechasResumen_2026().find(function (c) { return String(c.id) === id; });
     const asignadas = summaryItem ? Number(summaryItem.asignadas || 0) : 0;
     const asignaciones = summaryItem ? (summaryItem.asignaciones || []) : [];
+    const distribuciones = summaryItem ? (summaryItem.distribuciones || []) : [];
+    const hasLinkedSales = asignadas > 0.0001 || distribuciones.length > 0 || asignaciones.length > 0;
 
-    if (asignadas > 0.0001 && (finalCampanaId !== oldCampanaId || finalLoteId !== oldLoteId || almacenNormalizarProducto_2026(finalProducto) !== almacenNormalizarProducto_2026(oldProducto) || finalUnidad !== oldUnidad)) {
-      throw new Error('Una cosecha con cantidades ya vendidas o comprometidas no puede cambiar de campaña, lote, producto o unidad.');
+    if (hasLinkedSales && (finalCampanaId !== oldCampanaId || finalLoteId !== oldLoteId || almacenNormalizarProducto_2026(finalProducto) !== almacenNormalizarProducto_2026(oldProducto) || finalUnidad !== oldUnidad)) {
+      throw new Error('Una cosecha con ventas o cantidades comprometidas no puede cambiar de campaña, lote, producto o unidad.');
     }
 
     if (finalToneladas + 0.000001 < asignadas) {
@@ -5038,13 +5059,29 @@ function cosechasEliminar_2026(p, userSession) {
 
     const summaryItem = cosechasResumen_2026().find(function (c) { return String(c.id) === id; });
     const committed = summaryItem ? Number(summaryItem.asignadas || 0) : 0;
-    if (committed > 0.0001) {
-      throw new Error('No se puede eliminar esta cosecha porque tiene ' + committed + ' t comprometidas en ventas o distribuciones activas.');
+    const activeDistCount = summaryItem && Array.isArray(summaryItem.distribuciones) ? summaryItem.distribuciones.length : 0;
+    const activeAssignCount = summaryItem && Array.isArray(summaryItem.asignaciones) ? summaryItem.asignaciones.length : 0;
+    const unit = (summaryItem && summaryItem.unidad) ? String(summaryItem.unidad) : 't';
+    if (committed > 0.0001 || activeDistCount > 0 || activeAssignCount > 0) {
+      const committedLabel = committed > 0
+        ? (Math.round(committed * 100) / 100) + ' ' + unit
+        : 'cantidades';
+      throw new Error(
+        'No se puede eliminar esta cosecha porque tiene ' + committedLabel + ' comprometidas en ventas activas. Primero debe anular las ventas vinculadas.'
+      );
     }
 
     sh.deleteRow(targetRow);
     SpreadsheetApp.flush();
-    logAudit_(userSession && userSession.usuarioId, 'DELETE', 'Cosechas', id, 'Cosecha eliminada');
+    const deletedProd = summaryItem ? String(summaryItem.producto || '') : '';
+    const deletedQty = summaryItem ? Number(summaryItem.toneladas || 0) : 0;
+    logAudit_(
+      userSession && userSession.usuarioId,
+      'DELETE',
+      'Cosechas',
+      id,
+      'Cosecha eliminada' + (deletedProd ? ' (' + deletedProd + ' · ' + deletedQty + ' ' + unit + ')' : '')
+    );
     return { ok: true, result: { id: id, deleted: true } };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -5313,11 +5350,16 @@ function finToIsoDate_2026(val) {
   }
   const s = String(val).trim();
   if (!s) return '';
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  // Strict date-only YYYY-MM-DD (never shift)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // Local Bolivia timestamp without timezone suffix (e.g. "2026-11-26 22:30")
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(:\d{2})?$/.test(s)) return s.slice(0, 10);
+  // DD/MM/YYYY (never shift)
   const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (dmy) {
     return dmy[3] + '-' + String(dmy[2]).padStart(2, '0') + '-' + String(dmy[1]).padStart(2, '0');
   }
+  // Full ISO timestamp with time + timezone (e.g. "2026-11-27T02:30:00.000Z") -> convert to America/La_Paz
   const parsed = new Date(s);
   if (!isNaN(parsed.getTime())) {
     return Utilities.formatDate(parsed, BOLIVIA_TZ_, 'yyyy-MM-dd');

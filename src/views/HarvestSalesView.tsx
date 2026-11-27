@@ -26,7 +26,8 @@ import type {
   WarehouseProductSummary,
 } from '../types';
 import * as backend from '../services/backend';
-import { cacheKeys, getCachedQuery, setCachedQuery } from '../services/dataCache';
+import { cacheKeys, getCachedQuery, revalidateQuery } from '../services/dataCache';
+import { fetchNormalizedHarvestSalesBundle } from '../services/preloader';
 import { usePersistedMemoryState } from '../hooks/useSwrQuery';
 import {
   HARVEST_AVAILABILITY_EPSILON,
@@ -34,7 +35,6 @@ import {
   buildWarehouseSummaries,
   computeHarvestAvailability,
   computeProportionalDistribution,
-  filterAvailableHarvests,
   formatSaleOriginSummary,
 } from '../services/harvestAvailability';
 import { addDaysToIso, round2 } from '../services/interestEngine';
@@ -43,7 +43,7 @@ import { VisualIcon } from '../components/VisualIcon';
 import { CustomerPicker } from '../components/CustomerPicker';
 import { ObservationField } from '../components/ObservationField';
 import { Switch } from '../components/Switch';
-import { formatDateLocale, formatMoneyLocale, formatNumberLocale } from '../services/formatters';
+import { formatDateLocale, formatMoneyLocale, formatNumberLocale, formatPercentMax1 } from '../services/formatters';
 
 interface HarvestSalesViewProps {
   customers: Customer[];
@@ -63,22 +63,11 @@ type SaleScreen = 'list' | 'warehouse_detail' | 'detail' | 'form';
 type ListTab = 'sales' | 'warehouse';
 
 function todayIso(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return backend.getBoliviaTodayIso();
 }
 
 function toInputIso(dateStr?: string): string {
-  if (!dateStr) return todayIso();
-  const s = String(dateStr).trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-  if (m) {
-    const dd = m[1].padStart(2, '0');
-    const mm = m[2].padStart(2, '0');
-    const yyyy = m[3].length === 2 ? `20${m[3]}` : m[3];
-    return `${yyyy}-${mm}-${dd}`;
-  }
-  return todayIso();
+  return backend.toBoliviaIsoDate(dateStr, true);
 }
 
 function makeSaleIdempotencyKey(): string {
@@ -162,31 +151,29 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
   const loadData = useCallback(async (forceFresh = false) => {
     const key = cacheKeys.harvestSalesList('all');
     const c = getCachedQuery<{ sales: HarvestSale[]; harvests: HarvestRecord[] }>(key);
-    if (c?.data && !forceFresh) {
+    if (c?.data) {
       const reconciledCached = computeHarvestAvailability(c.data.harvests, c.data.sales);
       setSales(c.data.sales);
       setHarvests(reconciledCached);
       setHasLoaded(true);
       setLoading(false);
-      setRefreshing(true);
-    } else if (!c?.data) {
+      setRefreshing(forceFresh);
+    } else {
       setLoading(true);
       setRefreshing(false);
-    } else {
-      setRefreshing(true);
     }
 
     setLoadError(null);
 
     try {
-      const fresh = await backend.getHarvestSales({}, !forceFresh);
-      const reconciledHarvests = computeHarvestAvailability(fresh.harvests, fresh.sales);
-      const normalizedBundle = {
-        sales: fresh.sales,
-        harvests: reconciledHarvests,
-      };
-      setCachedQuery(key, normalizedBundle);
-      setCachedQuery(cacheKeys.harvestPending(), filterAvailableHarvests(reconciledHarvests));
+      const normalizedBundle = await revalidateQuery(
+        key,
+        () => fetchNormalizedHarvestSalesBundle(!forceFresh),
+        {
+          force: forceFresh,
+          minIntervalMs: 15_000,
+        }
+      );
       setSales(normalizedBundle.sales);
       setHarvests(normalizedBundle.harvests);
       setHasLoaded(true);
@@ -198,7 +185,11 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
           'No se pudieron cargar las ventas y el almacén de cosechas. Verifica tu conexión e intenta nuevamente.',
           'Could not load sales and harvest warehouse. Check your connection and try again.'
         );
-      setLoadError(errMsg);
+      if (!c?.data) {
+        setLoadError(errMsg);
+      } else {
+        setNotice({ type: 'err', text: errMsg });
+      }
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -809,7 +800,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
               {bi('Desglose por lote y campaña', 'Breakdown by lot & campaign')}
             </h3>
             <span className="text-[11px] font-semibold text-[#5E6D64] tabular-nums">
-              {fmtNum(prod.porcentajeVendido, 1)}% {bi('vendido', 'sold')}
+              {formatPercentMax1(prod.porcentajeVendido, lang)} {bi('vendido', 'sold')}
             </span>
           </div>
 
@@ -828,7 +819,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
                         {fmtNum(row.disponible)} {prod.unidad} {bi('disp.', 'avail.')}
                       </p>
                       <p className="text-[11px] font-semibold text-[#5E6D64] tabular-nums whitespace-nowrap">
-                        {fmtNum(row.porcentajeVendido, 1)}% {bi('vendido', 'sold')}
+                        {formatPercentMax1(row.porcentajeVendido, lang)} {bi('vendido', 'sold')}
                       </p>
                     </div>
                   </div>
@@ -849,7 +840,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
                     </span>
                     {row.disponible > HARVEST_AVAILABILITY_EPSILON && (
                       <span className="text-[#1D704B] font-semibold">
-                        {fmtNum(row.participacionStockPct, 1)}% {bi('del stock actual', 'of current stock')}
+                        {formatPercentMax1(row.participacionStockPct, lang)} {bi('del stock actual', 'of current stock')}
                       </span>
                     )}
                   </div>
@@ -1212,7 +1203,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
                     <div className="min-w-0">
                       <p className="font-semibold text-[#1F2D25] truncate">{r.loteNombre}</p>
                       <p className="text-[11px] text-[#5E6D64] truncate">
-                        {r.campanaNombre} · {fmtNum(r.participacionPct, 1)}%
+                        {r.campanaNombre} · {formatPercentMax1(r.participacionPct, lang)}
                       </p>
                     </div>
                     <div className="text-right shrink-0 tabular-nums">
@@ -1459,7 +1450,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
                       <div className="min-w-0">
                         <p className="font-semibold text-[#1F2D25] truncate">{dLot}</p>
                         <p className="text-[11px] text-[#64746B] truncate">
-                          {[dCamp, `${fmtNum(d.participacionPct, 1)}%`].filter(Boolean).join(' · ')}
+                          {[dCamp, formatPercentMax1(d.participacionPct, lang)].filter(Boolean).join(' · ')}
                         </p>
                       </div>
                       <div className="text-right shrink-0 tabular-nums">
@@ -1827,7 +1818,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
             <div className="rounded-2xl border border-[#E2E7E3] bg-white divide-y divide-[#EEF2EF] overflow-hidden">
               {warehouseSummaries.map((prod) => {
                 const hasStock = prod.totalDisponible > HARVEST_AVAILABILITY_EPSILON;
-                const lotsCountToDisplay = hasStock ? prod.lotesDisponiblesCount : prod.lotesCount;
+                const lotsCountToDisplay = prod.lotesCount;
                 return (
                   <div
                     key={prod.key}
@@ -1857,7 +1848,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
                         <p className="text-xs text-[#64746B] truncate">
                           {lotsCountToDisplay} {lotsCountToDisplay === 1 ? bi('lote', 'lot') : bi('lotes', 'lots')}
                           {' · '}
-                          {fmtNum(prod.porcentajeVendido, 0)}% {bi('vendido', 'sold')}
+                          {formatPercentMax1(prod.porcentajeVendido, lang)} {bi('vendido', 'sold')}
                         </p>
                         <p
                           className={`text-xs font-extrabold tabular-nums whitespace-nowrap mt-0.5 ${

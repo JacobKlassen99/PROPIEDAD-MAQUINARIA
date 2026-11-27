@@ -30,7 +30,7 @@ import * as backend from '../services/backend';
 import {
   cacheKeys,
   getCachedQuery,
-  setCachedQuery,
+  revalidateQuery,
 } from '../services/dataCache';
 import {
   convertDebtToPaymentCurrency,
@@ -44,6 +44,7 @@ import { DocumentPreviewScreen } from '../components/DocumentPreviewScreen';
 import { Switch } from '../components/Switch';
 import { ObservationField } from '../components/ObservationField';
 import { formatDateLocale, formatMoneyLocale, formatNumberLocale } from '../services/formatters';
+import { getBoliviaTodayIso } from '../services/boliviaDate';
 
 interface AccountsReceivableViewProps {
   customers: Customer[];
@@ -62,11 +63,7 @@ type ArScreen =
   | 'preview_receipt';
 
 function todayIso(): string {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  return getBoliviaTodayIso();
 }
 
 export const AccountsReceivableView: React.FC<AccountsReceivableViewProps> = ({
@@ -137,20 +134,23 @@ export const AccountsReceivableView: React.FC<AccountsReceivableViewProps> = ({
   const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
   const loadSummary = useCallback(async (forceFresh = false) => {
-    const cached = getCachedQuery<backend.ArSummaryResponse>(cacheKeys.arSummary());
+    const key = cacheKeys.arSummary();
+    const cached = getCachedQuery<backend.ArSummaryResponse>(key);
     setSummaryError(null);
-    if (cached?.data && !forceFresh) {
+    if (cached?.data) {
       setSummaryData(cached.data);
       setLoadingSummary(false);
-      setRefreshingSummary(true);
-    } else if (!cached?.data) {
-      setLoadingSummary(true);
+      if (forceFresh) {
+        setRefreshingSummary(true);
+      }
     } else {
-      setRefreshingSummary(true);
+      setLoadingSummary(true);
     }
     try {
-      const fresh = await backend.getArSummary(!forceFresh);
-      setCachedQuery(cacheKeys.arSummary(), fresh);
+      const fresh = await revalidateQuery(key, () => backend.getArSummary(!forceFresh), {
+        force: forceFresh,
+        minIntervalMs: 15_000,
+      });
       setSummaryData(fresh);
       setSummaryError(null);
     } catch (err: any) {
@@ -172,18 +172,24 @@ export const AccountsReceivableView: React.FC<AccountsReceivableViewProps> = ({
     const key = cacheKeys.arCustomerDetail(clienteId);
     const cached = getCachedQuery<backend.ArCustomerDetailResponse>(key);
     setDetailError(null);
-    if (cached?.data && !forceFresh) {
+    if (cached?.data) {
       setDetailData(cached.data);
       setLoadingDetail(false);
-      setRefreshingDetail(true);
-    } else if (!cached?.data) {
-      setLoadingDetail(true);
+      if (forceFresh) {
+        setRefreshingDetail(true);
+      }
     } else {
-      setRefreshingDetail(true);
+      setLoadingDetail(true);
     }
     try {
-      const fresh = await backend.getArCustomerDetail(clienteId, !forceFresh);
-      setCachedQuery(key, fresh);
+      const fresh = await revalidateQuery(
+        key,
+        () => backend.getArCustomerDetail(clienteId, !forceFresh),
+        {
+          force: forceFresh,
+          minIntervalMs: 15_000,
+        }
+      );
       setDetailData(fresh);
       setDetailError(null);
     } catch (err: any) {

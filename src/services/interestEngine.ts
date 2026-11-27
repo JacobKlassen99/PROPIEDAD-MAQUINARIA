@@ -1,4 +1,5 @@
 import type { Currency } from '../types';
+import { toBoliviaIsoDate } from './boliviaDate';
 
 /**
  * Simple Mora Interest & Multi-Currency Accounts Receivable Calculation Engine.
@@ -20,8 +21,9 @@ export function round2(n: number): number {
 
 export function parseIsoDay(isoDate?: string | null): Date | null {
   if (!isoDate) return null;
-  const s = String(isoDate).trim();
-  const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  const normalized = toBoliviaIsoDate(isoDate, false);
+  if (!normalized) return null;
+  const m = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return null;
   const y = parseInt(m[1], 10);
   const mo = parseInt(m[2], 10) - 1;

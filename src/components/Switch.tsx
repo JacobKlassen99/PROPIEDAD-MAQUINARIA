@@ -198,7 +198,9 @@ export function Switch<T extends string | boolean>({
         role="group"
         aria-label={ariaLabel || cleanLabel || `${leftOption.label} / ${rightOption.label}`}
         aria-disabled={disabled || undefined}
-        className={`w-full ${heightClass} px-2.5 rounded-xl border border-[#DCE3DF] bg-[#F8FAF8] flex items-center justify-center gap-2.5 select-none transition-opacity ${
+        className={`w-full ${heightClass} ${
+          size === 'sm' ? 'px-2 gap-1.5' : 'px-2.5 gap-2.5'
+        } rounded-xl border border-[#DCE3DF] bg-[#F8FAF8] flex items-center justify-center select-none transition-opacity ${
           disabled ? 'opacity-60' : ''
         }`}
       >
@@ -206,7 +208,7 @@ export function Switch<T extends string | boolean>({
           type="button"
           disabled={isLeftDisabled}
           onClick={() => handleSelect(leftOption)}
-          className={`min-w-0 flex-1 text-right text-xs sm:text-[13px] leading-tight truncate py-1 transition-colors focus-visible:outline-none ${
+          className={`min-w-0 flex-1 text-right text-xs sm:text-[13px] leading-tight whitespace-nowrap py-1 transition-colors focus-visible:outline-none ${
             isLeftDisabled
               ? !isRightSelected
                 ? 'font-extrabold text-[#175B3D] cursor-not-allowed'
@@ -240,7 +242,7 @@ export function Switch<T extends string | boolean>({
           type="button"
           disabled={isRightDisabled}
           onClick={() => handleSelect(rightOption)}
-          className={`min-w-0 flex-1 text-left text-xs sm:text-[13px] leading-tight truncate py-1 transition-colors focus-visible:outline-none ${
+          className={`min-w-0 flex-1 text-left text-xs sm:text-[13px] leading-tight whitespace-nowrap py-1 transition-colors focus-visible:outline-none ${
             isRightDisabled
               ? isRightSelected
                 ? 'font-extrabold text-[#175B3D] cursor-not-allowed'

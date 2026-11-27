@@ -42,8 +42,10 @@ import {
   Wallet,
   SlidersHorizontal,
   UserRound,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/ConfirmationModal';
+import { NumericInput } from '../components/NumericInput';
 import {
   Campaign,
   Machine,
@@ -528,7 +530,7 @@ export const AdminView: React.FC<Props> = ({
   const [mNombre, setMNombre] = useState('');
   const [mIdentificacion, setMIdentificacion] = useState('');
   const [mTipo, setMTipo] = useState('');
-  const [mIcono, setMIcono] = useState<string>('tractor');
+  const [mIcono, setMIcono] = useState<string>('');
   const [showMachineIconSheet, setShowMachineIconSheet] = useState(false);
   const [mTarifa, setMTarifa] = useState<string>('250');
   const [mUnidad, setMUnidad] = useState<'h' | 'ha'>('ha');
@@ -565,7 +567,7 @@ export const AdminView: React.FC<Props> = ({
   const [aIdentificador, setAIdentificador] = useState('');
   const [aValorInicial, setAValorInicial] = useState<number | ''>(85000);
   const [aMoneda, setAMoneda] = useState<Currency>('USD');
-  const [aFecha, setAFecha] = useState(new Date().toISOString().slice(0, 10));
+  const [aFecha, setAFecha] = useState(() => getBoliviaDateString());
 
   // Item Form State
   const [itemsSubView, setItemsSubView] = useState<null | 'INGRESO' | 'GASTO'>(null);
@@ -576,7 +578,7 @@ export const AdminView: React.FC<Props> = ({
   const [itemName, setItemName] = useState('');
   const [itemModulo, setItemModulo] = useState<'' | 'MAQUINARIAS' | 'PROPIEDAD'>('');
   const [itemClase, setItemClase] = useState<'GASTO' | 'INGRESO'>('GASTO');
-  const [itemIcono, setItemIcono] = useState<string>('diesel');
+  const [itemIcono, setItemIcono] = useState<string>('');
   const [showItemIconSheet, setShowItemIconSheet] = useState(false);
   const [itemUnidad, setItemUnidad] = useState('unidades');
   const [itemPrecio, setItemPrecio] = useState<number | ''>('');
@@ -598,12 +600,26 @@ export const AdminView: React.FC<Props> = ({
     type: 'maquinaria' | 'lote' | 'implemento';
     entity: Machine | Lot | ImplementItem;
   } | null>(null);
+  const [returningPatrimonyEntity, setReturningPatrimonyEntity] = useState<{
+    type: 'maquinaria' | 'lote' | 'implemento';
+    entity: Machine | Lot | ImplementItem;
+  } | null>(null);
+
+  const closeAssetFormAndReturn = (type: 'machine' | 'implement' | 'lot') => {
+    if (type === 'machine') setShowMachineForm(false);
+    if (type === 'implement') setShowImplementForm(false);
+    if (type === 'lot') setShowLotForm(false);
+    if (returningPatrimonyEntity) {
+      setSelectedEntityForDetail(returningPatrimonyEntity);
+      setReturningPatrimonyEntity(null);
+    }
+  };
 
   // Implement Creation/Edit Modal State
   const [showImplementForm, setShowImplementForm] = useState(false);
   const [editingImplement, setEditingImplement] = useState<ImplementItem | null>(null);
   const [impFormNombre, setImpFormNombre] = useState('');
-  const [impFormIcono, setImpFormIcono] = useState('implemento');
+  const [impFormIcono, setImpFormIcono] = useState('');
   const [impFormValorInicial, setImpFormValorInicial] = useState('');
   const [impFormFecha, setImpFormFecha] = useState(getLocalDateString());
   const [showImpFormIconSheet, setShowImpFormIconSheet] = useState(false);
@@ -611,7 +627,7 @@ export const AdminView: React.FC<Props> = ({
 
   // Asset Improvement Creation Form State
   const [showAddImprovementModal, setShowAddImprovementModal] = useState(false);
-  const [impFecha, setImpFecha] = useState(new Date().toISOString().slice(0, 10));
+  const [impFecha, setImpFecha] = useState(() => getBoliviaDateString());
   const [impDesc, setImpDesc] = useState('');
   const [impCosto, setImpCosto] = useState<string>('');
 
@@ -832,8 +848,7 @@ export const AdminView: React.FC<Props> = ({
   const [selectedAdminMachine, setSelectedAdminMachine] = useState<Machine | null>(null);
   const [selectedAdminImplement, setSelectedAdminImplement] = useState<MachineJobType | null>(null);
   const [machineSearch, setMachineSearch] = useState('');
-  const [machineShowInactive, setMachineShowInactive] = usePersistedMemoryState<boolean>('admin.machines.showInactive', false);
-  const [implementShowInactive, setImplementShowInactive] = usePersistedMemoryState<boolean>('admin.implements.showInactive', false);
+
   const [machinesGroupOpen, setMachinesGroupOpen] = useState(true);
   const [equipmentsGroupOpen, setEquipmentsGroupOpen] = useState(false);
   const [togglingMachineId, setTogglingMachineId] = useState<string | null>(null);
@@ -843,7 +858,7 @@ export const AdminView: React.FC<Props> = ({
   const [jtMaquinaId, setJtMaquinaId] = useState('');
   const [jtCompatibleTipo, setJtCompatibleTipo] = useState('Tractor');
   const [jtNombre, setJtNombre] = useState('');
-  const [jtIcono, setJtIcono] = useState<string>('implemento');
+  const [jtIcono, setJtIcono] = useState<string>('');
   const [showJtIconSheet, setShowJtIconSheet] = useState(false);
   const [jtTarifa, setJtTarifa] = useState('');
   const [jtUnidad, setJtUnidad] = useState<'ha' | 'hora'>('ha');
@@ -916,7 +931,7 @@ export const AdminView: React.FC<Props> = ({
     setJtCompatibleTipo(tipoInit);
     setEditingJobTypeId(null);
     setJtNombre(opts.nombre || '');
-    setJtIcono(opts.icono || 'implemento');
+    setJtIcono(opts.icono || '');
     setJtTarifa('');
     setJtUnidad(opts.unidad || 'ha');
     setJtMoneda('USD');
@@ -932,7 +947,7 @@ export const AdminView: React.FC<Props> = ({
     setJtCompatibleTipo(jt.tipoMaquina || linked?.tipo || 'Tractor');
     setEditingJobTypeId(jt.id);
     setJtNombre(jt.nombre);
-    setJtIcono(jt.icono || 'implemento');
+    setJtIcono(jt.icono || '');
     setJtTarifa(String(jt.tarifa));
     const rawU = String(jt.unidad || 'ha').toLowerCase();
     setJtUnidad(rawU.includes('hora') || rawU === 'h' ? 'hora' : 'ha');
@@ -1065,6 +1080,7 @@ export const AdminView: React.FC<Props> = ({
           : bi('Implemento agrícola registrado.', 'Agricultural implement registered.')
       );
       setShowJobTypeModal(false);
+      setJtIcono('');
       setSelectedAdminImplement(null);
       onRefreshData('catalogs_and_assets');
     } catch (err: unknown) {
@@ -1288,7 +1304,7 @@ export const AdminView: React.FC<Props> = ({
       const res = await createCampaign({
         nombre: cNombre.trim(),
         activa: cActiva,
-        fechaInicio: new Date().toISOString().split('T')[0],
+        fechaInicio: getBoliviaDateString(),
         estado: cActiva ? 'activa' : 'cerrada',
       });
 
@@ -1394,7 +1410,7 @@ export const AdminView: React.FC<Props> = ({
       setLotObs('');
       setLotValorPatrimonial('');
       setEditingLotId(null);
-      setShowLotForm(false);
+      closeAssetFormAndReturn('lot');
 
       // Sincronizar inmediatamente desde Google Sheets
       await onRefreshData('catalogs_and_assets');
@@ -1512,9 +1528,9 @@ export const AdminView: React.FC<Props> = ({
       setEditingMachineId(null);
       setMNombre('');
       setMIdentificacion('');
-      setMIcono('tractor');
+      setMIcono('');
       setMValorPatrimonial('');
-      setShowMachineForm(false);
+      closeAssetFormAndReturn('machine');
 
       // Sincronizar inmediatamente desde Google Sheets
       await onRefreshData('catalogs_and_assets');
@@ -1550,7 +1566,7 @@ export const AdminView: React.FC<Props> = ({
     setMNombre(m.nombre);
     setMIdentificacion(m.identificacion);
     setMTipo(m.tipo);
-    setMIcono(m.icono || 'tractor');
+    setMIcono(m.icono || '');
     setMTarifa(String(m.tarifa || ''));
     setMUnidad(m.unidad === 'ha' || m.unidad === 'hectarea' ? 'ha' : 'h');
     setMMoneda(m.moneda);
@@ -1760,7 +1776,7 @@ export const AdminView: React.FC<Props> = ({
   const handleOpenEditImplement = (imp: ImplementItem) => {
     setEditingImplement(imp);
     setImpFormNombre(imp.nombre);
-    setImpFormIcono(imp.icono || 'implemento');
+    setImpFormIcono(imp.icono || '');
     const baseVal = getBaseValueForImplement(imp, assets);
     setImpFormValorInicial(baseVal > 0 ? String(baseVal) : '');
     const linked = findAssetForImplement(imp, assets);
@@ -1823,8 +1839,9 @@ export const AdminView: React.FC<Props> = ({
         );
       }
 
-      setShowImplementForm(false);
+      closeAssetFormAndReturn('implement');
       setEditingImplement(null);
+      setImpFormIcono('');
       await onRefreshData('assets');
     } catch (err: unknown) {
       if (isAuthError(err)) {
@@ -2039,7 +2056,7 @@ export const AdminView: React.FC<Props> = ({
       setEditingItemHasHistory(false);
       setItemName('');
       setItemModulo('');
-      setItemIcono((itemsSubView || itemClassTab) === 'INGRESO' ? 'soya' : 'diesel');
+      setItemIcono('');
       setItemPrecio('');
       onRefreshData('catalogs');
     } catch (err: unknown) {
@@ -2092,10 +2109,10 @@ export const AdminView: React.FC<Props> = ({
     // Mandatory explicit module selection on creation
     setItemModulo('');
     if (cls === 'INGRESO') {
-      setItemIcono('soya');
+      setItemIcono('');
       setItemUnidad('toneladas');
     } else {
-      setItemIcono('diesel');
+      setItemIcono('');
       setItemUnidad('litros');
     }
     setItemPrecio('');
@@ -2112,7 +2129,7 @@ export const AdminView: React.FC<Props> = ({
     const normCls: 'GASTO' | 'INGRESO' = rawCls.includes('ING') ? 'INGRESO' : 'GASTO';
     setItemClase(normCls);
 
-    setItemIcono(item.icono || (normCls === 'INGRESO' ? 'soya' : 'diesel'));
+    setItemIcono(item.icono || '');
 
     const rawMod = String(item.modulo || (item.tipo && item.tipo.includes('maquinaria') ? 'MAQUINARIAS' : 'PROPIEDAD')).toUpperCase();
     const normMod: 'MAQUINARIAS' | 'PROPIEDAD' = rawMod.includes('MAQ') ? 'MAQUINARIAS' : 'PROPIEDAD';
@@ -3600,7 +3617,7 @@ export const AdminView: React.FC<Props> = ({
                 setMNombre('');
                 setMIdentificacion('');
                 setMTipo('');
-                setMIcono('tractor');
+                setMIcono('');
                 setMTarifa('');
                 setMUnidad('ha');
                 setMMoneda('USD');
@@ -3936,14 +3953,11 @@ export const AdminView: React.FC<Props> = ({
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-[#7A8780]">
                     USD
                   </span>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="any"
+                  <NumericInput
                     value={lotValorPatrimonial}
-                    onChange={(e) => setLotValorPatrimonial(e.target.value)}
+                    onChange={setLotValorPatrimonial}
                     placeholder="120000"
-                    className={`${FORM_INPUT_CLASS} pl-11 font-semibold tabular-nums`}
+                    className="pl-11 font-semibold tabular-nums"
                   />
                 </div>
               </div>
@@ -3997,7 +4011,7 @@ export const AdminView: React.FC<Props> = ({
 
         const filteredMachines = machines.filter((m) => {
           const isActive = m.estado !== 'inactivo' && m.activo !== false;
-          if (!machineShowInactive && !isActive) return false;
+
           if (!searchNorm) return true;
           const idLabel = m.identificacion && !isTechnicalId(m.identificacion) ? m.identificacion : '';
           return `${m.nombre} ${m.tipo} ${translateMachineTypeLabel(m.tipo || '')} ${idLabel} ${m.estado}`
@@ -4037,7 +4051,7 @@ export const AdminView: React.FC<Props> = ({
 
         const filteredEquipments = allEquipments.filter((jt) => {
           const isActive = jt.activo !== false;
-          if (!implementShowInactive && !isActive) return false;
+
           if (!searchNorm) return true;
           const parentMachine = machineById.get(String(jt.maquinaId));
           return `${jt.nombre} ${jt.tipoMaquina || ''} ${parentMachine?.nombre || ''} ${parentMachine?.tipo || ''}`
@@ -4084,16 +4098,6 @@ export const AdminView: React.FC<Props> = ({
                     <ChevronDown className="h-4.5 w-4.5 text-[#5E6D64] shrink-0 ml-1" />
                   )}
                 </button>
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="text-[#5E6D64] font-medium hidden sm:inline">{bi('Mostrar inactivos', 'Show inactive')}</span>
-                  <Switch<boolean>
-                    value={machineShowInactive}
-                    onChange={setMachineShowInactive}
-                    mode="boolean"
-                    inline={true}
-                    ariaLabel={bi('Mostrar máquinas inactivas', 'Show inactive machines')}
-                  />
-                </div>
               </div>
 
               {machinesGroupOpen && (
@@ -4179,16 +4183,6 @@ export const AdminView: React.FC<Props> = ({
                     <ChevronDown className="h-4.5 w-4.5 text-[#5E6D64] shrink-0 ml-1" />
                   )}
                 </button>
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="text-[#5E6D64] font-medium hidden sm:inline">{bi('Mostrar inactivos', 'Show inactive')}</span>
-                  <Switch<boolean>
-                    value={implementShowInactive}
-                    onChange={setImplementShowInactive}
-                    mode="boolean"
-                    inline={true}
-                    ariaLabel={bi('Mostrar implementos inactivos', 'Show inactive implements')}
-                  />
-                </div>
               </div>
 
               {showEquipmentsExpanded && (
@@ -4734,10 +4728,23 @@ export const AdminView: React.FC<Props> = ({
                   className="w-full h-[40px] flex items-center justify-between px-3 rounded-xl border border-[#CFD8D2] bg-white hover:border-[#24875B] transition cursor-pointer"
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    <VisualIcon name={mIcono || 'tractor'} size="xs" />
-                    <span className="text-sm font-semibold text-[#1F2D25] truncate">
-                      {translateIcon(mIcono || 'tractor', getIconDefinition(mIcono || 'tractor').label)}
-                    </span>
+                    {mIcono ? (
+                      <>
+                        <VisualIcon iconId={mIcono} category="maquinaria" size="xs" />
+                        <span className="text-sm font-semibold text-[#1F2D25] truncate">
+                          {translateIcon(mIcono, getIconDefinition(mIcono, 'maquinaria').label)}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="w-6 h-6 rounded-md bg-[#F2F5F3] border border-[#E2E8E4] flex items-center justify-center text-[#7A8780] shrink-0">
+                          <ImageIcon className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="text-sm font-medium text-[#7A8780] truncate">
+                          {bi('Seleccionar icono', 'Select icon')}
+                        </span>
+                      </>
+                    )}
                   </div>
                   <span className="text-xs font-semibold text-[#24875B] shrink-0">{bi('Elegir', 'Choose')}</span>
                 </button>
@@ -4823,14 +4830,11 @@ export const AdminView: React.FC<Props> = ({
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-[#7A8780]">
                     USD
                   </span>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="any"
+                  <NumericInput
                     value={mValorPatrimonial}
-                    onChange={(e) => setMValorPatrimonial(e.target.value)}
+                    onChange={setMValorPatrimonial}
                     placeholder="65000"
-                    className={`${FORM_INPUT_CLASS} pl-11 font-semibold tabular-nums`}
+                    className="pl-11 font-semibold tabular-nums"
                   />
                 </div>
               </div>
@@ -4920,10 +4924,23 @@ export const AdminView: React.FC<Props> = ({
                   className="w-full h-[40px] flex items-center justify-between px-3 rounded-xl border border-[#CFD8D2] bg-white hover:border-[#24875B] transition cursor-pointer"
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    <VisualIcon name={jtIcono || 'implemento'} size="xs" />
-                    <span className="text-sm font-semibold text-[#1F2D25] truncate">
-                      {translateIcon(jtIcono || 'implemento', getIconDefinition(jtIcono || 'implemento').label)}
-                    </span>
+                    {jtIcono ? (
+                      <>
+                        <VisualIcon iconId={jtIcono} category="implemento" size="xs" />
+                        <span className="text-sm font-semibold text-[#1F2D25] truncate">
+                          {translateIcon(jtIcono, getIconDefinition(jtIcono, 'implemento').label)}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="w-6 h-6 rounded-md bg-[#F2F5F3] border border-[#E2E8E4] flex items-center justify-center text-[#7A8780] shrink-0">
+                          <ImageIcon className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="text-sm font-medium text-[#7A8780] truncate">
+                          {bi('Seleccionar icono', 'Select icon')}
+                        </span>
+                      </>
+                    )}
                   </div>
                   <span className="text-xs font-semibold text-[#24875B] shrink-0">{bi('Elegir', 'Choose')}</span>
                 </button>
@@ -4996,14 +5013,11 @@ export const AdminView: React.FC<Props> = ({
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-[#7A8780]">
                     USD
                   </span>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="any"
+                  <NumericInput
                     value={jtValorPatrimonial}
-                    onChange={(e) => setJtValorPatrimonial(e.target.value)}
+                    onChange={setJtValorPatrimonial}
                     placeholder="18000"
-                    className={`${FORM_INPUT_CLASS} pl-11 font-semibold tabular-nums`}
+                    className="pl-11 font-semibold tabular-nums"
                   />
                 </div>
               </div>
@@ -5333,21 +5347,33 @@ export const AdminView: React.FC<Props> = ({
                     className="w-full h-[40px] flex items-center justify-between px-3 rounded-xl border border-[#CFD8D2] bg-white hover:border-[#24875B] transition cursor-pointer"
                   >
                     <div className="flex items-center gap-2 min-w-0">
-                      <VisualIcon
-                        iconId={itemIcono}
-                        nameHint={itemName || (itemClase === 'INGRESO' ? 'soya' : 'diesel')}
-                        category={itemClase === 'INGRESO' ? 'ingreso' : 'gasto'}
-                        size="xs"
-                      />
-                      <span className="text-sm font-semibold text-[#1F2D25] truncate">
-                        {translateIcon(
-                          itemIcono || (itemClase === 'INGRESO' ? 'soya' : 'diesel'),
-                          getIconDefinition(
-                            itemIcono || (itemClase === 'INGRESO' ? 'soya' : 'diesel'),
-                            itemClase === 'INGRESO' ? 'ingreso' : 'gasto'
-                          ).label
-                        )}
-                      </span>
+                      {itemIcono ? (
+                        <>
+                          <VisualIcon
+                            iconId={itemIcono}
+                            category={itemClase === 'INGRESO' ? 'ingreso' : 'gasto'}
+                            size="xs"
+                          />
+                          <span className="text-sm font-semibold text-[#1F2D25] truncate">
+                            {translateIcon(
+                              itemIcono,
+                              getIconDefinition(
+                                itemIcono,
+                                itemClase === 'INGRESO' ? 'ingreso' : 'gasto'
+                              ).label
+                            )}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="w-6 h-6 rounded-md bg-[#F2F5F3] border border-[#E2E8E4] flex items-center justify-center text-[#7A8780] shrink-0">
+                            <ImageIcon className="h-3.5 w-3.5" />
+                          </span>
+                          <span className="text-sm font-medium text-[#7A8780] truncate">
+                            {bi('Seleccionar icono', 'Select icon')}
+                          </span>
+                        </>
+                      )}
                     </div>
                     <span className="text-xs font-semibold text-[#24875B] shrink-0">{bi('Elegir', 'Choose')}</span>
                   </button>
@@ -5886,7 +5912,7 @@ export const AdminView: React.FC<Props> = ({
                           onClick={() => {
                             setEditingImplement(null);
                             setImpFormNombre('');
-                            setImpFormIcono('implemento');
+                            setImpFormIcono('');
                             setImpFormValorInicial('');
                             setImpFormFecha(getLocalDateString());
                             setShowImplementForm(true);
@@ -6189,6 +6215,7 @@ export const AdminView: React.FC<Props> = ({
                         type="button"
                         onClick={() => {
                           const targetEnt = selectedEntityForDetail;
+                          setReturningPatrimonyEntity(targetEnt);
                           setSelectedEntityForDetail(null);
                           if (targetEnt.type === 'maquinaria') {
                             handleEditMachine(targetEnt.entity as Machine);
@@ -6201,7 +6228,13 @@ export const AdminView: React.FC<Props> = ({
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#EAF5EE] hover:bg-[#DCEFE4] text-[#24875B] text-xs font-bold transition cursor-pointer shrink-0 min-h-[36px]"
                       >
                         <Edit3 className="h-3.5 w-3.5" />
-                        <span>{bi('Editar valor inicial', 'Edit initial value')}</span>
+                        <span>
+                          {selectedEntityForDetail?.type === 'maquinaria'
+                            ? bi('Editar máquina', 'Edit machine')
+                            : selectedEntityForDetail?.type === 'implemento'
+                            ? bi('Editar implemento', 'Edit implement')
+                            : bi('Editar lote', 'Edit lot')}
+                        </span>
                       </button>
                     </div>
 
@@ -6575,10 +6608,23 @@ export const AdminView: React.FC<Props> = ({
                   className="w-full h-[40px] flex items-center justify-between px-3 rounded-xl border border-[#CFD8D2] bg-white hover:border-[#24875B] transition cursor-pointer"
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    <VisualIcon name={impFormIcono || 'implemento'} size="xs" />
-                    <span className="text-sm font-semibold text-[#1F2D25] truncate">
-                      {translateIcon(impFormIcono || 'implemento', getIconDefinition(impFormIcono || 'implemento').label)}
-                    </span>
+                    {impFormIcono ? (
+                      <>
+                        <VisualIcon iconId={impFormIcono} category="implemento" size="xs" />
+                        <span className="text-sm font-semibold text-[#1F2D25] truncate">
+                          {translateIcon(impFormIcono, getIconDefinition(impFormIcono, 'implemento').label)}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="w-6 h-6 rounded-md bg-[#F2F5F3] border border-[#E2E8E4] flex items-center justify-center text-[#7A8780] shrink-0">
+                          <ImageIcon className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="text-sm font-medium text-[#7A8780] truncate">
+                          {bi('Seleccionar icono', 'Select icon')}
+                        </span>
+                      </>
+                    )}
                   </div>
                   <span className="text-xs font-semibold text-[#24875B] shrink-0">{bi('Elegir', 'Choose')}</span>
                 </button>
@@ -6594,14 +6640,11 @@ export const AdminView: React.FC<Props> = ({
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-[#7A8780]">
                       USD
                     </span>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="any"
+                    <NumericInput
                       value={impFormValorInicial}
-                      onChange={(e) => setImpFormValorInicial(e.target.value)}
+                      onChange={setImpFormValorInicial}
                       placeholder="18000"
-                      className={`${FORM_INPUT_CLASS} pl-11 font-semibold tabular-nums`}
+                      className="pl-11 font-semibold tabular-nums"
                     />
                   </div>
                 </div>

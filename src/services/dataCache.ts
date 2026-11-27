@@ -48,6 +48,54 @@ export function getCacheSessionGeneration(): number {
   return sessionGeneration;
 }
 
+/**
+ * Lightweight user-priority request counter so background preloading always yields
+ * to direct user navigation, manual refreshes, and mutations.
+ */
+let activeUserPriorityRequests = 0;
+const userIdleWaiters = new Set<() => void>();
+
+export function beginUserPriorityRequest(): void {
+  activeUserPriorityRequests += 1;
+}
+
+export function endUserPriorityRequest(): void {
+  activeUserPriorityRequests = Math.max(0, activeUserPriorityRequests - 1);
+  if (activeUserPriorityRequests === 0 && userIdleWaiters.size > 0) {
+    const waiters = Array.from(userIdleWaiters);
+    userIdleWaiters.clear();
+    waiters.forEach((resolve) => {
+      try {
+        resolve();
+      } catch {
+        // Ignore waiter error
+      }
+    });
+  }
+}
+
+export function hasActiveUserRequests(): boolean {
+  return activeUserPriorityRequests > 0;
+}
+
+export function waitForUserRequestsIdle(maxWaitMs = 1500): Promise<void> {
+  if (activeUserPriorityRequests === 0) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      userIdleWaiters.delete(finish);
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, maxWaitMs);
+    userIdleWaiters.add(finish);
+  });
+}
+
 function getOrCreateEntry<T>(key: string): CacheEntry<T> {
   let entry = cacheStore.get(key) as CacheEntry<T> | undefined;
   if (!entry) {
@@ -119,6 +167,8 @@ export interface RevalidateOptions {
   force?: boolean;
   /** Minimum ms between automatic background revalidations when entry is not stale (default: 2500ms) */
   minIntervalMs?: number;
+  /** Request priority: 'user' (default) signals background preloading to yield; 'background' does not block preload */
+  priority?: 'user' | 'background';
 }
 
 /**
@@ -133,7 +183,7 @@ export function revalidateQuery<T>(
   fetcher: () => Promise<T>,
   options: RevalidateOptions = {}
 ): Promise<T> {
-  const { force = false, minIntervalMs = 2500 } = options;
+  const { force = false, minIntervalMs = 2500, priority = 'user' } = options;
   const entry = getOrCreateEntry<T>(key);
 
   // Deduplicate simultaneous identical calls when not forcing a post-mutation refresh
@@ -155,6 +205,11 @@ export function revalidateQuery<T>(
 
   const reqSeq = ++entry.latestSeq;
   const reqGen = sessionGeneration;
+  const trackUserPriority = priority !== 'background';
+
+  if (trackUserPriority) {
+    beginUserPriorityRequest();
+  }
 
   // Transition to fetching WITHOUT clearing data or hasLoaded
   updateSnapshot(entry, {
@@ -165,6 +220,9 @@ export function revalidateQuery<T>(
   const promise = Promise.resolve()
     .then(() => fetcher())
     .then((result) => {
+      if (trackUserPriority) {
+        endUserPriorityRequest();
+      }
       // Discard stale response if a newer request started or session was reset
       if (reqGen !== sessionGeneration || reqSeq !== entry.latestSeq) {
         return result;
@@ -182,6 +240,9 @@ export function revalidateQuery<T>(
       return result;
     })
     .catch((err: unknown) => {
+      if (trackUserPriority) {
+        endUserPriorityRequest();
+      }
       if (reqGen !== sessionGeneration || reqSeq !== entry.latestSeq) {
         throw err;
       }
@@ -283,12 +344,63 @@ export function invalidateQueries(prefixes: string | string[]) {
   }
 }
 
+export const ADMIN_CACHE_PREFIXES: readonly string[] = [
+  'ar.',
+  'harvestSale.',
+  'cobros.',
+  'report.',
+  'asset.',
+];
+
+/**
+ * Remove matching cached entries from memory and notify subscribers with an empty snapshot.
+ * Invalidates any in-flight responses for those keys by incrementing latestSeq.
+ */
+export function clearQueriesByPrefixes(prefixes: readonly string[]) {
+  if (!prefixes || prefixes.length === 0) return;
+  for (const [key, entry] of Array.from(cacheStore.entries())) {
+    if (prefixes.some((p) => key.startsWith(p))) {
+      entry.inFlightPromise = null;
+      entry.inFlightSeq = 0;
+      entry.latestSeq += 1;
+      entry.snapshot = { ...EMPTY_SNAPSHOT };
+      notifyEntry(entry);
+      cacheStore.delete(key);
+    }
+  }
+  for (const key of Array.from(viewStateStore.keys())) {
+    if (prefixes.some((p) => key.startsWith(p)) || key.startsWith('harvestSales.')) {
+      viewStateStore.delete(key);
+    }
+  }
+}
+
+/**
+ * Purge admin-only cached entries immediately when administrative authorization is revoked,
+ * while preserving non-admin operational cache entries.
+ */
+export function clearAdminCache() {
+  clearQueriesByPrefixes(ADMIN_CACHE_PREFIXES);
+}
+
 /**
  * Hard reset all private in-memory cache and view filter state.
  * MUST be called on logout, session expiration, user switch, or admin revocation.
  */
 export function resetAllCache() {
   sessionGeneration += 1;
+  activeUserPriorityRequests = 0;
+  if (userIdleWaiters.size > 0) {
+    const waiters = Array.from(userIdleWaiters);
+    userIdleWaiters.clear();
+    waiters.forEach((resolve) => {
+      try {
+        resolve();
+      } catch {
+        // Ignore
+      }
+    });
+  }
   viewStateStore.clear();
   for (const entry of cacheStore.values()) {
     entry.inFlightPromise = null;

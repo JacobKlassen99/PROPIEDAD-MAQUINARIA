@@ -5,10 +5,15 @@ import {
   FileSpreadsheet,
   ArrowLeft,
   AlertCircle,
-  CheckCircle2,
   Info,
   ChevronDown,
   ChevronUp,
+  BarChart3,
+  Tractor,
+  Sprout,
+  Calendar,
+  FileText,
+  List,
 } from 'lucide-react';
 import {
   Campaign,
@@ -32,12 +37,20 @@ import {
   convertHistoricalAmount,
   formatCurrencyAmount,
 } from '../services/financialSummary';
-import { formatDateDDMMAAAA, getBoliviaDateString, getHarvestSales } from '../services/backend';
-import { cacheKeys, getCachedQuery, setCachedQuery } from '../services/dataCache';
+import {
+  formatDateDDMMAAAA,
+  getBoliviaDateString,
+  getHarvests,
+  hasAdminAuthorization,
+} from '../services/backend';
+import { cacheKeys, getCachedQuery, revalidateQuery } from '../services/dataCache';
+import { fetchNormalizedHarvestSalesBundle } from '../services/preloader';
 import { computeHarvestAvailability, roundPct2, roundTons } from '../services/harvestAvailability';
-import { formatNumberLocale } from '../services/formatters';
+import { formatNumberLocale, formatPercentMax1 } from '../services/formatters';
+import { resolveJobDisplay } from '../services/jobDisplay';
 import { CompactFilter } from '../components/CompactListUI';
 import { Switch } from '../components/Switch';
+import { SlidingSelector } from '../components/SlidingSelector';
 import { usePersistedMemoryState } from '../hooks/useSwrQuery';
 import { getCurrentLanguage, useI18n } from '../services/i18n';
 
@@ -226,11 +239,11 @@ const ReportsViewInner: React.FC<Props> = ({
   campaigns = [],
   activeCampaign = null,
   machines = [],
+  machineJobTypes = [],
   lots = [],
   jobs = [],
   expenses = [],
   incomes = [],
-  currency: initialCurrency = 'USD',
   exchangeRate,
   initialScreen = 'general',
   onRootBackLabel,
@@ -249,6 +262,10 @@ const ReportsViewInner: React.FC<Props> = ({
         naturalCompare(a.nombre || '', b.nombre || '')
       ),
     [machines]
+  );
+  const safeMachineJobTypes = useMemo(
+    () => (Array.isArray(machineJobTypes) ? machineJobTypes.filter(Boolean) : []),
+    [machineJobTypes]
   );
   const safeLots = useMemo(
     () =>
@@ -290,7 +307,7 @@ const ReportsViewInner: React.FC<Props> = ({
     `reports.${rootMode}.campaignId`,
     defaultCampaignId
   );
-  const [activeCurrency, setActiveCurrency] = useState<Currency>(initialCurrency || 'USD');
+  const [activeCurrency, setActiveCurrency] = useState<Currency>('USD');
   const [detailLevel, setDetailLevel] = usePersistedMemoryState<ReportDetailLevel>(
     `reports.${rootMode}.detailLevel`,
     'resumido'
@@ -307,30 +324,40 @@ const ReportsViewInner: React.FC<Props> = ({
     `reports.${rootMode}.lotId`,
     'all'
   );
-  const [showReconciliation, setShowReconciliation] = useState<boolean>(false);
   const [expandedReportLotId, setExpandedReportLotId] = useState<string | null>(null);
 
   // Load harvests & sale distributions (via shared SWR cache) for per-lot physical production & sales metrics
   const cachedHarvestBundle = getCachedQuery<{ sales: HarvestSale[]; harvests: HarvestRecord[] }>(
     cacheKeys.harvestSalesList('all')
   );
-  const [warehouseHarvests, setWarehouseHarvests] = useState<HarvestRecord[]>(
-    () =>
-      cachedHarvestBundle?.data
-        ? computeHarvestAvailability(cachedHarvestBundle.data.harvests, cachedHarvestBundle.data.sales)
-        : []
-  );
+  const cachedHarvestList = getCachedQuery<HarvestRecord[]>(cacheKeys.harvestList('all'));
+  const [warehouseHarvests, setWarehouseHarvests] = useState<HarvestRecord[]>(() => {
+    if (cachedHarvestBundle?.data) {
+      return computeHarvestAvailability(
+        cachedHarvestBundle.data.harvests,
+        cachedHarvestBundle.data.sales
+      );
+    }
+    return cachedHarvestList?.data || [];
+  });
 
   useEffect(() => {
     let cancelled = false;
-    getHarvestSales({ includeAnuladas: false }, true)
-      .then((bundle) => {
+    const loadPromise = hasAdminAuthorization()
+      ? revalidateQuery(
+          cacheKeys.harvestSalesList('all'),
+          () => fetchNormalizedHarvestSalesBundle(true),
+          { force: false, minIntervalMs: 30_000 }
+        ).then((bundle) => bundle.harvests)
+      : revalidateQuery(
+          cacheKeys.harvestList('all'),
+          () => getHarvests({ soloPendientes: false }, false),
+          { force: false, minIntervalMs: 30_000 }
+        );
+
+    loadPromise
+      .then((reconciled) => {
         if (cancelled) return;
-        const reconciled = computeHarvestAvailability(bundle.harvests, bundle.sales);
-        setCachedQuery(cacheKeys.harvestSalesList('all'), {
-          sales: bundle.sales,
-          harvests: reconciled,
-        });
         setWarehouseHarvests(reconciled);
       })
       .catch(() => {
@@ -727,7 +754,7 @@ const ReportsViewInner: React.FC<Props> = ({
       const entry = ensureLot(job.loteId, job.loteNombre);
       const val = toView(Number(job.total) || 0, job.moneda, job.tipoCambio || job.tc);
       entry.gastosMaquinaria += val;
-      const labor = cleanConceptLabel(job.trabajoNombre || (job as any).trabajo, bi('Labor de maquinaria', 'Machinery job'));
+      const labor = resolveJobDisplay(job, safeMachines, safeMachineJobTypes, lang).title;
       const key = labor.toLowerCase();
       const prev = entry.maquinariaByLabor.get(key);
       if (prev) {
@@ -872,6 +899,8 @@ const ReportsViewInner: React.FC<Props> = ({
     campaignJobs,
     campaignHarvests,
     safeLots,
+    safeMachines,
+    safeMachineJobTypes,
     activeScope,
     selectedLotId,
     activeCurrency,
@@ -1234,16 +1263,7 @@ const ReportsViewInner: React.FC<Props> = ({
         Number(consolidatedData.propResultado.toFixed(2)),
       ]);
       rows.push([
-        bi(
-          'Eliminación de operaciones internas (Maquinarias ↔ Propiedad)',
-          'Internal operation elimination (Machinery ↔ Property)'
-        ),
-        Number((-consolidatedData.operacionesInternas).toFixed(2)),
-        Number((-consolidatedData.operacionesInternas).toFixed(2)),
-        0,
-      ]);
-      rows.push([
-        bi('CONSOLIDADO GENERAL (frente a terceros)', 'GENERAL CONSOLIDATED (external)'),
+        bi('CONSOLIDADO GENERAL', 'GENERAL CONSOLIDATED'),
         Number(consolidatedData.ingresosConsolidados.toFixed(2)),
         Number(consolidatedData.gastosConsolidados.toFixed(2)),
         Number(consolidatedData.resultadoConsolidado.toFixed(2)),
@@ -1252,11 +1272,11 @@ const ReportsViewInner: React.FC<Props> = ({
       if (detailLevel === 'detallado') {
         rows.push([]);
         rows.push([
-          bi('Detalle consolidado — Ingresos frente a terceros', 'Consolidated detail — External income'),
+          bi('Detalle consolidado — Ingresos', 'Consolidated detail — Income'),
           `${t('common.amount')} (${currencyLabel})`,
         ]);
         consolidatedData.ingresosExtPorMaquina.forEach((r) => {
-          rows.push([`${bi('Maquinarias externos', 'External machinery')} · ${r.label}`, Number(r.amount.toFixed(2))]);
+          rows.push([`${t('nav.machinery')} · ${r.label}`, Number(r.amount.toFixed(2))]);
         });
         consolidatedData.ingresosPropPorLote.forEach((r) => {
           rows.push([`${t('nav.property')} · ${r.label}`, Number(r.amount.toFixed(2))]);
@@ -1274,7 +1294,7 @@ const ReportsViewInner: React.FC<Props> = ({
 
         rows.push([]);
         rows.push([
-          bi('Detalle consolidado — Gastos frente a terceros', 'Consolidated detail — External expenses'),
+          bi('Detalle consolidado — Gastos', 'Consolidated detail — Expenses'),
           `${t('common.amount')} (${currencyLabel})`,
         ]);
         consolidatedData.gastosMaqPorConcepto.forEach((r) => {
@@ -1368,61 +1388,98 @@ const ReportsViewInner: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* COMPACT SELECTORS */}
-      <div className="no-print flex flex-wrap items-center gap-1.5">
+      {/* COMPACT 3-ROW MOBILE-FIRST FILTERS */}
+      <div className="no-print space-y-2">
+        {/* Row 1: General | Maquinarias | Propiedad */}
         {rootMode === 'general' && (
-          <CompactFilter
+          <SlidingSelector<GeneralScopeTab>
             value={generalTab}
-            onChange={(val) => setGeneralTab(val as GeneralScopeTab)}
+            onChange={(val) => setGeneralTab(val)}
             ariaLabel={bi('Sección del reporte', 'Report section')}
             options={[
-              { value: 'consolidado', label: t('reports.tab.consolidated') },
-              { value: 'maquinarias', label: t('reports.tab.machinery') },
-              { value: 'propiedad', label: t('reports.tab.property') },
+              {
+                value: 'consolidado',
+                label: bi('General', 'General'),
+                icon: <BarChart3 className="h-3.5 w-3.5" />,
+              },
+              {
+                value: 'maquinarias',
+                label: t('reports.tab.machinery'),
+                icon: <Tractor className="h-3.5 w-3.5" />,
+              },
+              {
+                value: 'propiedad',
+                label: t('reports.tab.property'),
+                icon: <Sprout className="h-3.5 w-3.5" />,
+              },
             ]}
           />
         )}
 
-        <CompactFilter
-          value={effectiveCampaignId}
-          onChange={(val) => setSelectedCampaignId(val)}
-          ariaLabel={t('common.campaign')}
-          options={[
-            ...safeCampaigns.map((c) => ({
-              value: String(c.id),
-              label: c.activa ? `${c.nombre} (${t('common.activeFem')})` : c.nombre,
-            })),
-            ...(safeCampaigns.length > 1 || effectiveCampaignId === 'all' || safeCampaigns.length === 0
-              ? [{ value: 'all', label: bi('Todas las campañas', 'All campaigns') }]
-              : []),
-          ]}
-        />
+        {/* Row 2: Campaign / Gestión dropdown | USD/Bs Switch (2 equal columns) */}
+        <div className="grid grid-cols-2 gap-2 items-center">
+          <div className="relative w-full min-w-0">
+            <Calendar
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-[#526058]"
+              aria-hidden="true"
+            />
+            <select
+              value={effectiveCampaignId}
+              onChange={(e) => setSelectedCampaignId(e.target.value)}
+              aria-label={t('common.campaign')}
+              className="w-full h-9 appearance-none rounded-xl border border-[#DCE3DF] bg-[#F8FAF8] pl-7 pr-6 text-xs sm:text-[13px] font-semibold text-[#26352D] truncate focus:border-[#24875B] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#24875B]/20 cursor-pointer transition-colors"
+            >
+              {safeCampaigns.map((c) => (
+                <option key={String(c.id)} value={String(c.id)}>
+                  {c.activa ? `${c.nombre} (${t('common.activeFem')})` : c.nombre}
+                </option>
+              ))}
+              {(safeCampaigns.length > 1 || effectiveCampaignId === 'all' || safeCampaigns.length === 0) && (
+                <option value="all">{bi('Todas las campañas', 'All campaigns')}</option>
+              )}
+            </select>
+            <ChevronDown
+              className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-[#64746B]"
+              aria-hidden="true"
+            />
+          </div>
 
-        <Switch<Currency>
-          size="sm"
-          value={activeCurrency}
-          onChange={(val) => setActiveCurrency(val)}
-          ariaLabel={t('common.currency')}
-          leftOption={{ value: 'USD', label: 'USD' }}
-          rightOption={{ value: 'BOB', label: 'Bs' }}
-          className="!w-auto shrink-0"
-        />
+          <Switch<Currency>
+            size="sm"
+            value={activeCurrency}
+            onChange={(val) => setActiveCurrency(val)}
+            ariaLabel={t('common.currency')}
+            leftOption={{ value: 'USD', label: 'USD' }}
+            rightOption={{ value: 'BOB', label: 'Bs' }}
+          />
+        </div>
 
-        <CompactFilter
+        {/* Row 3: Resumen | Detallado */}
+        <SlidingSelector<ReportDetailLevel>
           value={detailLevel}
-          onChange={(val) => setDetailLevel(val as ReportDetailLevel)}
+          onChange={(val) => setDetailLevel(val)}
           ariaLabel={bi('Nivel de detalle', 'Detail level')}
           options={[
-            { value: 'resumido', label: bi('Resumido', 'Summary') },
-            { value: 'detallado', label: bi('Detallado', 'Detailed') },
+            {
+              value: 'resumido',
+              label: bi('Resumen', 'Summary'),
+              icon: <FileText className="h-3.5 w-3.5" />,
+            },
+            {
+              value: 'detallado',
+              label: bi('Detallado', 'Detailed'),
+              icon: <List className="h-3.5 w-3.5" />,
+            },
           ]}
         />
 
+        {/* Secondary entity filter when viewing Maquinarias or Propiedad */}
         {activeScope === 'maquinarias' && (
           <CompactFilter
             value={selectedMachineId}
             onChange={(val) => setSelectedMachineId(val)}
             ariaLabel={bi('Filtrar por máquina', 'Filter by machine')}
+            className="w-full"
             options={[
               { value: 'all', label: t('picker.machineAll') },
               ...safeMachines.map((m) => ({
@@ -1438,6 +1495,7 @@ const ReportsViewInner: React.FC<Props> = ({
             value={selectedLotId}
             onChange={(val) => setSelectedLotId(val)}
             ariaLabel={bi('Filtrar por lote', 'Filter by lot')}
+            className="w-full"
             options={[
               { value: 'all', label: t('picker.lotAll') },
               ...safeLots.map((l) => ({
@@ -1797,7 +1855,7 @@ const ReportsViewInner: React.FC<Props> = ({
                                 </span>
                                 {lot.toneladasCosechadas > 0.0001 && (
                                   <span className="text-[#5E6D64] font-medium">
-                                    · {formatNumberEs(lot.toneladasVendidas, 1)}/{formatNumberEs(lot.toneladasCosechadas, 1)} t ({formatNumberEs(lot.porcentajeVendido, 0)}%)
+                                    · {formatNumberEs(lot.toneladasVendidas, 1)}/{formatNumberEs(lot.toneladasCosechadas, 1)} t ({formatPercentMax1(lot.porcentajeVendido, lang)})
                                   </span>
                                 )}
                               </div>
@@ -1831,7 +1889,7 @@ const ReportsViewInner: React.FC<Props> = ({
                                 <div className="flex items-center justify-between text-[11px] font-bold text-[#26352D]">
                                   <span>{bi('Producción y ventas', 'Production & sales')}</span>
                                   <span className="text-[#1D704B] tabular-nums">
-                                    {formatNumberEs(lot.porcentajeVendido, 1)}% {bi('vendido', 'sold')}
+                                    {formatPercentMax1(lot.porcentajeVendido, lang)} {bi('vendido', 'sold')}
                                   </span>
                                 </div>
                                 <div className="h-1.5 w-full rounded-full bg-[#E8EFEA] overflow-hidden">
@@ -2087,7 +2145,10 @@ const ReportsViewInner: React.FC<Props> = ({
             <div className="divide-y divide-[#EFF2EF] tabular-nums">
               <div className="px-4 py-3 flex items-center justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-bold text-[#26352D]">{t('nav.machinery')}</p>
+                  <p className="text-sm font-bold text-[#26352D] flex items-center gap-1.5">
+                    <Tractor className="h-4 w-4 text-[#526058] shrink-0" />
+                    <span className="truncate">{t('nav.machinery')}</span>
+                  </p>
                   <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] mt-0.5">
                     <span className="text-[#24875B] font-semibold">
                       {bi('Ing', 'Inc')}: {fmt(consolidatedData.machIngresosTotales)}
@@ -2108,7 +2169,10 @@ const ReportsViewInner: React.FC<Props> = ({
 
               <div className="px-4 py-3 flex items-center justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-bold text-[#26352D]">{t('nav.property')}</p>
+                  <p className="text-sm font-bold text-[#26352D] flex items-center gap-1.5">
+                    <Sprout className="h-4 w-4 text-[#526058] shrink-0" />
+                    <span className="truncate">{t('nav.property')}</span>
+                  </p>
                   <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] mt-0.5">
                     <span className="text-[#24875B] font-semibold">
                       {bi('Ing', 'Inc')}: {fmt(consolidatedData.propIngresosTotales)}
@@ -2133,8 +2197,11 @@ const ReportsViewInner: React.FC<Props> = ({
                 )}`}
               >
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-extrabold text-[#26352D]">
-                    {bi('Consolidado general', 'General consolidated')}
+                  <p className="text-sm font-extrabold text-[#26352D] flex items-center gap-1.5">
+                    <BarChart3 className="h-4 w-4 text-[#24875B] shrink-0" />
+                    <span className="truncate">
+                      {bi('Consolidado general', 'General consolidated')}
+                    </span>
                   </p>
                   <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] mt-0.5">
                     <span className="text-[#24875B] font-bold">
@@ -2154,66 +2221,6 @@ const ReportsViewInner: React.FC<Props> = ({
                 </span>
               </div>
             </div>
-
-            <div className="no-print border-t border-[#EFF2EF] bg-[#FAFBF8]">
-              <button
-                type="button"
-                onClick={() => setShowReconciliation((prev) => !prev)}
-                aria-expanded={showReconciliation}
-                className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-semibold text-[#526058] hover:text-[#26352D] transition cursor-pointer"
-              >
-                <span className="inline-flex items-center gap-1.5">
-                  <CheckCircle2
-                    className={`h-3.5 w-3.5 shrink-0 ${
-                      consolidatedData.conciliacionExacta ? 'text-[#24875B]' : 'text-[#C44545]'
-                    }`}
-                  />
-                  <span>{bi('Ver conciliación', 'View reconciliation')}</span>
-                </span>
-                {showReconciliation ? (
-                  <ChevronUp className="h-4 w-4 text-[#7A8780]" />
-                ) : (
-                  <ChevronDown className="h-4 w-4 text-[#7A8780]" />
-                )}
-              </button>
-            </div>
-
-            <div
-              className={`${
-                showReconciliation ? 'block' : 'hidden print:block'
-              } px-4 py-3 border-t border-[#EFF2EF] bg-[#FAFBF8] space-y-2 text-xs text-[#526058] tabular-nums`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span>
-                  {bi(
-                    'Eliminación interna (Maquinarias ↔ Propiedad)',
-                    'Internal elimination (Machinery ↔ Property)'
-                  )}
-                </span>
-                <span className="font-semibold text-[#26352D] shrink-0">
-                  −{fmt(consolidatedData.operacionesInternas)}
-                </span>
-              </div>
-              {consolidatedData.operacionesInternasCount > 0 && (
-                <div className="flex items-center justify-between gap-2">
-                  <span>{bi('Trabajos internos eliminados', 'Internal jobs eliminated')}</span>
-                  <span className="font-semibold text-[#26352D]">
-                    {consolidatedData.operacionesInternasCount}
-                  </span>
-                </div>
-              )}
-              <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-[#E6EBE7]">
-                <span>
-                  {bi(
-                    'Suma de resultados (Maquinarias + Propiedad)',
-                    'Sum of results (Machinery + Property)'
-                  )}
-                </span>
-                <strong className="text-[#26352D] shrink-0">
-                  {fmt(consolidatedData.sumaResultadosModulos)}
-                </strong>
-              </div>
-            </div>
           </div>
 
           {detailLevel === 'detallado' && (
@@ -2221,7 +2228,7 @@ const ReportsViewInner: React.FC<Props> = ({
               <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
                 <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#EAF5EE]/55 flex items-center justify-between">
                   <h4 className="text-xs sm:text-sm font-bold text-[#24875B]">
-                    {bi('Ingresos frente a terceros', 'External income')}
+                    {t('reports.incomes')}
                   </h4>
                   <span className="text-xs sm:text-sm font-extrabold text-[#24875B] tabular-nums">
                     {fmt(consolidatedData.ingresosConsolidados)}
@@ -2269,8 +2276,8 @@ const ReportsViewInner: React.FC<Props> = ({
                     consolidatedData.ingresosInteresesTotales <= 0.004 && (
                       <p className="px-4 py-5 text-center text-xs text-[#7A8780]">
                         {bi(
-                          'Sin ingresos frente a terceros en esta campaña.',
-                          'No external income in this campaign.'
+                          'No hay ingresos en esta campaña.',
+                          'No income in this campaign.'
                         )}
                       </p>
                     )}
@@ -2280,7 +2287,7 @@ const ReportsViewInner: React.FC<Props> = ({
               <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
                 <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#FCECEC]/55 flex items-center justify-between">
                   <h4 className="text-xs sm:text-sm font-bold text-[#C44545]">
-                    {bi('Gastos frente a terceros', 'External expenses')}
+                    {t('reports.expenses')}
                   </h4>
                   <span className="text-xs sm:text-sm font-extrabold text-[#C44545] tabular-nums">
                     {fmt(consolidatedData.gastosConsolidados)}
@@ -2307,8 +2314,8 @@ const ReportsViewInner: React.FC<Props> = ({
                     consolidatedData.gastosPropPorConcepto.length === 0 && (
                       <p className="px-4 py-5 text-center text-xs text-[#7A8780]">
                         {bi(
-                          'Sin gastos frente a terceros en esta campaña.',
-                          'No external expenses in this campaign.'
+                          'No hay gastos en esta campaña.',
+                          'No expenses in this campaign.'
                         )}
                       </p>
                     )}

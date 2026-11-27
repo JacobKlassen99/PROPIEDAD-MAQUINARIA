@@ -80,14 +80,19 @@ import {
   getPendingHarvests,
   createHarvest,
   updateHarvest,
+  deleteHarvest,
   assignHarvestPrice,
   allocateExpense,
   getExpenseAllocations,
   compareChronologicalDesc,
   getMachineIcon,
+  getBoliviaTodayIso,
+  toBoliviaIsoDate,
 } from '../services/backend';
+import { ConfirmationModal } from '../components/ConfirmationModal';
 import { isDirectPropertyIncome } from '../services/financialSummary';
 import { countAvailableHarvests } from '../services/harvestAvailability';
+import { resolveJobDisplay } from '../services/jobDisplay';
 import {
   CurrencyConversionAnchor,
   convertFormCurrencyValue,
@@ -179,7 +184,7 @@ export const PropertyView: React.FC<Props> = ({
   isAdmin,
   onRefreshData,
 }) => {
-  const { bi, t, translateUnit, translateError } = useI18n();
+  const { lang, bi, t, translateUnit, translateError } = useI18n();
   const effectiveIsAdmin = isAdmin ?? hasAdminAuthorization();
   const [currentScreen, setCurrentScreen] = useState<PropertyScreen>('main');
   const [saving, setSaving] = useState(false);
@@ -225,7 +230,7 @@ export const PropertyView: React.FC<Props> = ({
   const [savingEdit, setSavingEdit] = useState(false);
 
   // Form State for Agricultural Expense (sin preselección de catálogo)
-  const [expFecha, setExpFecha] = useState(new Date().toISOString().slice(0, 10));
+  const [expFecha, setExpFecha] = useState(() => getBoliviaTodayIso());
   const [expLotMode, setExpLotMode] = useState<'single' | 'multi'>('single');
   const [expLotId, setExpLotId] = useState('');
   const [expMultiLotHa, setExpMultiLotHa] = useState<Record<string, number | ''>>({});
@@ -244,7 +249,7 @@ export const PropertyView: React.FC<Props> = ({
   const [showAllocationsPanelInGasto, setShowAllocationsPanelInGasto] = useState(false);
 
   // Form State for Cosecha (production only — no price, currency, buyer, or payment terms)
-  const [harvFecha, setHarvFecha] = useState(new Date().toISOString().slice(0, 10));
+  const [harvFecha, setHarvFecha] = useState(() => getBoliviaTodayIso());
   const [harvCampanaId, setHarvCampanaId] = useState(activeCampaign?.id || '');
   const [harvLotId, setHarvLotId] = useState('');
   const [harvProducto, setHarvProducto] = useState('');
@@ -262,7 +267,7 @@ export const PropertyView: React.FC<Props> = ({
 
   // State for Assigning Price to Harvest (harvest.price)
   const [selectedHarvestForPrice, setSelectedHarvestForPrice] = useState<HarvestRecord | null>(null);
-  const [priceFecha, setPriceFecha] = useState(new Date().toISOString().slice(0, 10));
+  const [priceFecha, setPriceFecha] = useState(() => getBoliviaTodayIso());
   const [priceCampanaId, setPriceCampanaId] = useState(activeCampaign?.id || '');
   const [priceToneladas, setPriceToneladas] = useState('');
   const [priceUsdTon, setPriceUsdTon] = useState('');
@@ -285,9 +290,15 @@ export const PropertyView: React.FC<Props> = ({
   const [editHarvLotId, setEditHarvLotId] = useState('');
   const [editHarvProducto, setEditHarvProducto] = useState('');
   const [editHarvToneladas, setEditHarvToneladas] = useState('');
+  const [editHarvUnidad, setEditHarvUnidad] = useState('t');
   const [editHarvObs, setEditHarvObs] = useState('');
   const [savingEditHarvest, setSavingEditHarvest] = useState(false);
   const [editHarvestError, setEditHarvestError] = useState<string | null>(null);
+
+  // State for Deleting Harvest (harvest.delete — Admin only)
+  const [harvestToDelete, setHarvestToDelete] = useState<HarvestRecord | null>(null);
+  const [deletingHarvest, setDeletingHarvest] = useState(false);
+  const [deleteHarvestError, setDeleteHarvestError] = useState<string | null>(null);
 
   useEffect(() => {
     if (activeCampaign?.id && !harvCampanaId) {
@@ -307,7 +318,7 @@ export const PropertyView: React.FC<Props> = ({
   }, [exchangeRate?.tasaBobPerUsd]);
 
   const resetNewHarvestForm = () => {
-    setHarvFecha(new Date().toISOString().slice(0, 10));
+    setHarvFecha(getBoliviaTodayIso());
     setHarvCampanaId(activeCampaign?.id || '');
     setHarvLotId('');
     setHarvProducto('');
@@ -321,7 +332,7 @@ export const PropertyView: React.FC<Props> = ({
 
   const resetNewExpenseForm = () => {
     expCurrencyAnchorRef.current = null;
-    setExpFecha(new Date().toISOString().slice(0, 10));
+    setExpFecha(getBoliviaTodayIso());
     setExpLotMode('single');
     setExpLotId('');
     setExpMultiLotHa({});
@@ -405,11 +416,11 @@ export const PropertyView: React.FC<Props> = ({
     { enabled: true, minIntervalMs: 3000 }
   );
 
-  // Shared SWR query: all harvests list (used by Pendientes de precio "Todas" and Historial)
+  // Shared SWR query: all harvests list (used by Main counter, Historial, Lotes, and Pendientes "Todas")
   const allHarvestsTargetCamp =
-    currentScreen === 'historial'
-      ? activeCampaign?.id || 'all'
-      : pendientesCampaignId;
+    currentScreen === 'pendientes_precio'
+      ? pendientesCampaignId
+      : activeCampaign?.id || 'all';
   const allHarvestsKey = cacheKeys.harvestList(allHarvestsTargetCamp);
   const allHarvestsQuery = useSwrQuery<HarvestRecord[]>(
     allHarvestsKey,
@@ -425,8 +436,10 @@ export const PropertyView: React.FC<Props> = ({
       ),
     {
       enabled:
-        (currentScreen === 'pendientes_precio' && pendientesMode === 'todas') ||
-        currentScreen === 'historial',
+        currentScreen === 'main' ||
+        currentScreen === 'historial' ||
+        currentScreen === 'lotes' ||
+        (currentScreen === 'pendientes_precio' && pendientesMode === 'todas'),
       minIntervalMs: 2500,
     }
   );
@@ -504,6 +517,16 @@ export const PropertyView: React.FC<Props> = ({
     });
   }, []);
 
+  const removeHarvestFromCaches = useCallback((harvestId: string) => {
+    if (!harvestId) return;
+    patchQueriesByPrefix<HarvestRecord[]>('harvest.pending:', (list) =>
+      list.filter((h) => String(h.id) !== String(harvestId))
+    );
+    patchQueriesByPrefix<HarvestRecord[]>('harvest.list:', (list) =>
+      list.filter((h) => String(h.id) !== String(harvestId))
+    );
+  }, []);
+
   const propertyExpenses = (expenses || []).filter((e) => e.modulo === 'propiedad');
   const propertyIncomes = incomes || [];
   const linkedPropertyJobs = (jobs || []).filter((j) => j.tipoTrabajo === 'propiedad');
@@ -538,7 +561,22 @@ export const PropertyView: React.FC<Props> = ({
     return String(tc).replace('.', ',');
   };
 
-  // Build combined chronological movements for the Historial (incomes, direct expenses, and unpriced/partially priced harvests)
+  const formatHarvestQty = (qty: number | undefined | null, unit?: string): string => {
+    const num = Number(qty || 0);
+    const formatted = num.toLocaleString(lang === 'es' ? 'es-BO' : 'en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+    const cleanUnit = (unit || 't').trim() || 't';
+    return `${formatted} ${translateUnit(cleanUnit)}`;
+  };
+
+  // Use all harvests loaded for the active campaign (fallback to pendingHarvests filtered by campaign until allHarvests resolves)
+  const historyHarvestsSource: HarvestRecord[] = allHarvestsQuery.hasLoaded
+    ? allHarvestsList
+    : pendingHarvests.filter((h) => !activeCampaign?.id || String(h.campanaId) === String(activeCampaign.id));
+
+  // Build combined chronological records for Historial (legacy direct incomes, direct expenses, and all physical harvests — no duplicates)
   const allMovements: MovementItem[] = [
     ...propertyIncomeDirects.map((i) => ({
       id: i.id,
@@ -581,36 +619,32 @@ export const PropertyView: React.FC<Props> = ({
       icono: e.icono || (itemsConfig.find((it) => it.nombre.toLowerCase() === e.itemGasto.toLowerCase())?.icono) || 'semillas',
       creadoEn: e.creadoEn,
     })),
-    ...allHarvestsList
-      .filter((h) => h.pendiente > 0.0001)
-      .map((h) => ({
+    ...historyHarvestsSource.map((h) => {
+      const unitStr = h.unidad || 't';
+      return {
         id: `harv_${h.id}`,
         tipo: 'cosecha' as const,
         fecha: h.fecha,
         loteId: h.loteId,
         loteNombre: h.loteNombre || (lots.find((l) => String(l.id) === String(h.loteId))?.nombre) || bi('Lote', 'Lot'),
         titulo: `${bi('Cosecha', 'Harvest')} ${formatConcept(h.producto)}`,
-        detalle: h.asignadas > 0
-          ? bi(
-              `${h.toneladas} t totales · ${h.asignadas} t asignadas · ${h.pendiente} t pendientes${h.observacion ? ` • ${h.observacion}` : ''}`,
-              `${h.toneladas} t total · ${h.asignadas} t priced · ${h.pendiente} t pending${h.observacion ? ` • ${h.observacion}` : ''}`
-            )
-          : bi(
-              `${h.toneladas} t · Sin precio${h.observacion ? ` • ${h.observacion}` : ''}`,
-              `${h.toneladas} t · Unpriced${h.observacion ? ` • ${h.observacion}` : ''}`
-            ),
+        detalle: `${formatHarvestQty(h.toneladas, unitStr)}${h.observacion ? ` • ${h.observacion}` : ''}`,
         monto: 0,
         moneda: 'USD' as Currency,
         cantidad: h.toneladas,
-        unidad: 't',
+        unidad: unitStr,
         observacion: h.observacion,
-        icono: 'granos',
+        icono:
+          (itemsConfig.find((it) => it.nombre.trim().toLowerCase() === String(h.producto || '').trim().toLowerCase())?.icono) ||
+          getIconDefinition(h.producto, 'ingreso').id ||
+          'granos',
         cosechaRecord: h,
         creadoEn: h.creadoEn,
-      })),
+      };
+    }),
   ].sort(compareChronologicalDesc);
 
-  // Total movements count
+  // Total records count (matches exact number of records shown in Historial -> Todos)
   const totalMovementsCount = allMovements.length;
 
   // Helpers for multi-lot proportional expense distribution
@@ -953,7 +987,7 @@ export const PropertyView: React.FC<Props> = ({
   const handleOpenAssignPrice = (harvest: HarvestRecord) => {
     priceCurrencyAnchorRef.current = null;
     setSelectedHarvestForPrice(harvest);
-    setPriceFecha(new Date().toISOString().slice(0, 10));
+    setPriceFecha(getBoliviaTodayIso());
     setPriceCampanaId(activeCampaign?.id || harvest.campanaId || '');
     setPriceToneladas(harvest.pendiente > 0 ? String(Number(harvest.pendiente.toFixed(4))) : '');
     setPriceUsdTon('');
@@ -1085,11 +1119,12 @@ export const PropertyView: React.FC<Props> = ({
       return;
     }
     setEditingHarvest(harvest);
-    setEditHarvFecha((harvest.fecha || '').slice(0, 10) || new Date().toISOString().slice(0, 10));
+    setEditHarvFecha(toBoliviaIsoDate(harvest.fecha, true));
     setEditHarvCampanaId(harvest.campanaId || activeCampaign?.id || '');
     setEditHarvLotId(harvest.loteId || '');
     setEditHarvProducto(harvest.producto || '');
     setEditHarvToneladas(harvest.toneladas > 0 ? String(Number(harvest.toneladas.toFixed(4))) : '');
+    setEditHarvUnidad(harvest.unidad || 't');
     setEditHarvObs(harvest.observacion || '');
     setEditHarvestError(null);
   };
@@ -1105,8 +1140,11 @@ export const PropertyView: React.FC<Props> = ({
     setErrorMsg(null);
     setSuccessMsg(null);
 
-    const hasAsignaciones = (editingHarvest.asignadas || 0) > 0.0001;
+    const hasAsignaciones =
+      (editingHarvest.asignadas || 0) > 0.0001 ||
+      (Array.isArray(editingHarvest.asignaciones) && editingHarvest.asignaciones.length > 0);
     const tonsNum = parseDecimalNumber(editHarvToneladas);
+    const unitLabel = translateUnit(editHarvUnidad || editingHarvest.unidad || 't');
 
     if (!editHarvFecha) {
       setEditHarvestError(bi('La fecha de cosecha es obligatoria.', 'Harvest date is required.'));
@@ -1125,15 +1163,18 @@ export const PropertyView: React.FC<Props> = ({
       return;
     }
     if (tonsNum <= 0) {
-      setEditHarvestError(bi('Las toneladas deben ser mayores a 0.', 'Tons must be greater than 0.'));
+      setEditHarvestError(bi('La cantidad debe ser mayor a 0.', 'Quantity must be greater than 0.'));
       return;
     }
     if (hasAsignaciones && tonsNum + 0.0001 < editingHarvest.asignadas) {
-      const assignedStr = editingHarvest.asignadas.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 3 });
+      const assignedStr = editingHarvest.asignadas.toLocaleString(lang === 'es' ? 'es-BO' : 'en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 3,
+      });
       setEditHarvestError(
         bi(
-          `No puedes reducir las toneladas por debajo de las ya asignadas con precio (${assignedStr} t).`,
-          `You cannot reduce tons below the amount already assigned a price (${assignedStr} t).`
+          `No puedes reducir la cantidad por debajo de las cantidades ya comprometidas en ventas (${assignedStr} ${unitLabel}).`,
+          `You cannot reduce the quantity below the amount already committed in sales (${assignedStr} ${unitLabel}).`
         )
       );
       return;
@@ -1146,6 +1187,7 @@ export const PropertyView: React.FC<Props> = ({
         campanaId: hasAsignaciones ? editingHarvest.campanaId : editHarvCampanaId,
         loteId: hasAsignaciones ? editingHarvest.loteId : editHarvLotId,
         producto: hasAsignaciones ? editingHarvest.producto : editHarvProducto.trim(),
+        unidad: hasAsignaciones ? (editingHarvest.unidad || 't') : (editHarvUnidad || 't'),
         toneladas: tonsNum,
         observacion: editHarvObs.trim(),
       });
@@ -1156,15 +1198,12 @@ export const PropertyView: React.FC<Props> = ({
       setEditingHarvest(null);
       setSuccessMsg(
         bi(
-          'Cosecha actualizada correctamente. Las asignaciones históricas de precio se conservaron intactas.',
-          'Harvest updated successfully. Historical price assignments were kept intact.'
+          'Cosecha actualizada correctamente en Google Sheets.',
+          'Harvest updated successfully in Google Sheets.'
         )
       );
-      invalidateQueries(['harvest.']);
-      await loadPendingHarvests();
-      if (pendientesMode === 'todas' || allHarvestsQuery.hasLoaded) {
-        loadAllHarvests().catch(() => {});
-      }
+      invalidateQueries(['harvest.', 'harvestSale.', 'report.']);
+      await Promise.allSettled([loadPendingHarvests(), loadAllHarvests()]);
     } catch (err: unknown) {
       setEditHarvestError(
         err instanceof Error
@@ -1176,6 +1215,58 @@ export const PropertyView: React.FC<Props> = ({
     }
   };
 
+  const handlePromptDeleteHarvest = (harvest: HarvestRecord) => {
+    if (!effectiveIsAdmin) {
+      setErrorMsg(
+        bi(
+          'Solo el Administrador puede eliminar cosechas guardadas.',
+          'Only the Administrator can delete saved harvests.'
+        )
+      );
+      return;
+    }
+    setDeleteHarvestError(null);
+    setHarvestToDelete(harvest);
+  };
+
+  const handleConfirmDeleteHarvest = async () => {
+    if (!harvestToDelete || deletingHarvest) return;
+    if (!effectiveIsAdmin) {
+      setDeleteHarvestError(
+        bi(
+          'Solo el Administrador puede eliminar cosechas guardadas.',
+          'Only the Administrator can delete saved harvests.'
+        )
+      );
+      return;
+    }
+    setDeletingHarvest(true);
+    setDeleteHarvestError(null);
+    setErrorMsg(null);
+    try {
+      await deleteHarvest(harvestToDelete.id);
+      removeHarvestFromCaches(harvestToDelete.id);
+      setHarvestToDelete(null);
+      setExpandedMovementId(null);
+      setSuccessMsg(
+        bi(
+          'Cosecha eliminada correctamente y descontada del almacén.',
+          'Harvest deleted successfully and deducted from warehouse.'
+        )
+      );
+      invalidateQueries(['harvest.', 'harvestSale.', 'report.']);
+      await Promise.allSettled([loadPendingHarvests(), loadAllHarvests()]);
+    } catch (err: unknown) {
+      setDeleteHarvestError(
+        err instanceof Error
+          ? translateError(err.message)
+          : bi('No se pudo eliminar la cosecha.', 'Could not delete the harvest.')
+      );
+    } finally {
+      setDeletingHarvest(false);
+    }
+  };
+
   // Open Edit Modal for a manual expense or income (Admin only)
   const handleOpenEditMovement = (m: MovementItem) => {
     if (!effectiveIsAdmin) {
@@ -1184,7 +1275,7 @@ export const PropertyView: React.FC<Props> = ({
     }
     editMovCurrencyAnchorRef.current = null;
     setEditingMovement(m);
-    setEditFecha(m.fecha || new Date().toISOString().slice(0, 10));
+    setEditFecha(toBoliviaIsoDate(m.fecha, true));
     setEditLotId(m.loteId || '');
     setEditConcepto(m.titulo || '');
     setEditCantidad(typeof m.cantidad === 'number' && !isNaN(m.cantidad) ? m.cantidad : 1);
@@ -1512,8 +1603,8 @@ export const PropertyView: React.FC<Props> = ({
                     <p className="text-xs sm:text-sm text-slate-500 mt-0.5 truncate">
                       {totalMovementsCount}{' '}
                       {totalMovementsCount === 1
-                        ? bi('movimiento', 'record')
-                        : bi('movimientos', 'records')}
+                        ? bi('registro', 'record')
+                        : bi('registros', 'records')}
                     </p>
                   </div>
                 </div>
@@ -2369,10 +2460,10 @@ export const PropertyView: React.FC<Props> = ({
                 const isExpanded = expandedLotId === lot.id;
                 const lotMachineryJobs = linkedPropertyJobs.filter((j) => String(j.loteId) === String(lot.id));
                 const lotIncomes = propertyIncomeDirects.filter((i) => String(i.loteId) === String(lot.id));
-                const lotPendingHarvests = pendingHarvests.filter(
-                  (h) => String(h.loteId) === String(lot.id) && h.pendiente > 0.0001
+                const lotHarvests = historyHarvestsSource.filter(
+                  (h) => String(h.loteId) === String(lot.id)
                 );
-                const lotHarvestsAndIncomesCount = lotIncomes.length + lotPendingHarvests.length;
+                const lotHarvestsAndIncomesCount = lotIncomes.length + lotHarvests.length;
                 const lotExpensesDirect = propertyExpenseDirects.filter((e) => String(e.loteId) === String(lot.id));
 
                 return (
@@ -2526,11 +2617,7 @@ export const PropertyView: React.FC<Props> = ({
               }
             >
               {lotJobs.map((j) => {
-                const fullLabor =
-                  j.trabajoNombre ||
-                  (j.maquinariaNombre
-                    ? bi(`Labor con ${j.maquinariaNombre}`, `Job with ${j.maquinariaNombre}`)
-                    : bi('Trabajo de Maquinaria', 'Machinery Job'));
+                const jobDisp = resolveJobDisplay(j, machines, machineJobTypes, lang);
                 const unitLabel =
                   j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'h';
                 return (
@@ -2538,13 +2625,13 @@ export const PropertyView: React.FC<Props> = ({
                     key={j.id}
                     icon={
                       <div className="w-8 h-8 rounded-lg bg-[#FCECEC] border border-[#F2C6C6]/70 flex items-center justify-center">
-                        <VisualIcon name={getMachineIcon(j.maquinariaId, machines, j.icono)} size="xs" />
+                        <VisualIcon name={jobDisp.icon} size="xs" />
                       </div>
                     }
-                    title={fullLabor}
+                    title={jobDisp.title}
                     subtitle={
                       <span>
-                        {formatDateDDMMAAAA(j.fecha)} · {j.maquinariaNombre || bi('Maquinaria', 'Machinery')} · {j.cantidad}{' '}
+                        {formatDateDDMMAAAA(j.fecha)} · {jobDisp.machineName} · {j.cantidad}{' '}
                         {unitLabel}
                       </span>
                     }
@@ -2597,8 +2684,8 @@ export const PropertyView: React.FC<Props> = ({
                 getIconDefinition(i.concepto || '', 'ingreso').id,
               creadoEn: i.creadoEn,
             })),
-          ...pendingHarvests
-            .filter((h) => String(h.loteId) === String(activeLotScreenId) && h.pendiente > 0.0001)
+          ...historyHarvestsSource
+            .filter((h) => String(h.loteId) === String(activeLotScreenId))
             .map((h) => ({
               id: `harv_${h.id}`,
               tipo: 'cosecha' as const,
@@ -2606,19 +2693,16 @@ export const PropertyView: React.FC<Props> = ({
               loteId: h.loteId,
               loteNombre: h.loteNombre || activeLotForScreen?.nombre || bi('Lote', 'Lot'),
               titulo: `${bi('Cosecha', 'Harvest')} ${formatConcept(h.producto)}`,
-              detalle:
-                h.asignadas > 0
-                  ? bi(
-                      `${h.toneladas} t totales · ${h.asignadas} t asignadas · ${h.pendiente} t pendientes`,
-                      `${h.toneladas} t total · ${h.asignadas} t priced · ${h.pendiente} t pending`
-                    )
-                  : bi(`${h.toneladas} t · Sin precio`, `${h.toneladas} t · Unpriced`),
+              detalle: `${formatHarvestQty(h.toneladas, h.unidad)}${h.observacion ? ` • ${h.observacion}` : ''}`,
               monto: 0,
               moneda: 'USD' as Currency,
               cantidad: h.toneladas,
-              unidad: 't',
+              unidad: h.unidad || 't',
               observacion: h.observacion,
-              icono: getIconDefinition(h.producto, 'ingreso').id || 'granos',
+              icono:
+                (itemsConfig.find((it) => it.nombre.trim().toLowerCase() === String(h.producto || '').trim().toLowerCase())?.icono) ||
+                getIconDefinition(h.producto, 'ingreso').id ||
+                'granos',
               cosechaRecord: h,
               creadoEn: h.creadoEn,
             })),
@@ -2639,7 +2723,7 @@ export const PropertyView: React.FC<Props> = ({
                   ? `${activeLotForScreen.nombre} · ${bi('Cosechas e ingresos', 'Harvests & income')}`
                   : bi('Cosechas e ingresos', 'Harvests & income')
               }
-              countLabel={`${lotIncomeItems.length} ${bi('reg.', 'rec.')}`}
+              countLabel={`${lotIncomeItems.length} ${lotIncomeItems.length === 1 ? bi('registro', 'record') : bi('registros', 'records')}`}
               searchValue={lotDetailSearch}
               onSearchChange={setLotDetailSearch}
               searchPlaceholder={bi('Buscar producto, fecha u observación...', 'Search product, date, or note...')}
@@ -2656,20 +2740,18 @@ export const PropertyView: React.FC<Props> = ({
               {lotIncomeItems.map((m) => {
                 const isExpanded = expandedLotDetailItemId === m.id;
                 const isHarvest = m.tipo === 'cosecha';
-                const isUnpricedHarvest = isHarvest && m.cosechaRecord?.asignadas === 0;
+                const campName = isHarvest && m.cosechaRecord
+                  ? campaigns.find((c) => String(c.id) === String(m.cosechaRecord!.campanaId))?.nombre ||
+                    activeCampaign?.nombre ||
+                    '—'
+                  : '';
 
                 return (
                   <CompactListRow
                     key={`${m.tipo}-${m.id}`}
                     icon={
-                      <div
-                        className={`w-8 h-8 rounded-lg flex items-center justify-center border ${
-                          isHarvest
-                            ? 'bg-amber-50 border-amber-200 text-amber-700'
-                            : 'bg-[#EAF5EE] border-[#BFE0CD]/70 text-[#24875B]'
-                        }`}
-                      >
-                        <VisualIcon name={m.icono || 'granos'} size="xs" />
+                      <div className="w-8 h-8 rounded-lg flex items-center justify-center border bg-[#EAF5EE] border-[#BFE0CD]/70 text-[#24875B]">
+                        <VisualIcon name={m.icono || 'granos'} category="ingreso" size="xs" />
                       </div>
                     }
                     title={m.titulo}
@@ -2677,18 +2759,14 @@ export const PropertyView: React.FC<Props> = ({
                       <span>
                         {formatDateDDMMAAAA(m.fecha)} ·{' '}
                         {isHarvest
-                          ? `${m.cosechaRecord?.pendiente} t ${bi('pend.', 'pend.')} (${
-                              isUnpricedHarvest ? bi('Sin precio', 'Unpriced') : bi('Parcial', 'Partial')
-                            })`
+                          ? (activeLotForScreen?.nombre || m.loteNombre)
                           : `${m.cantidad || 0} ${translateUnit(m.unidad || '')}`.trim()}
                       </span>
                     }
                     rightPrimary={
-                      isHarvest ? (
-                        <span className="text-xs font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200/80">
-                          {isUnpricedHarvest
-                            ? bi('Sin precio', 'Unpriced')
-                            : `${m.cosechaRecord?.pendiente} t ${bi('pend.', 'pend.')}`}
+                      isHarvest && m.cosechaRecord ? (
+                        <span className="tabular-nums font-bold text-[#24875B]">
+                          {formatHarvestQty(m.cosechaRecord.toneladas, m.cosechaRecord.unidad)}
                         </span>
                       ) : (
                         <span className="tabular-nums text-[#24875B]">
@@ -2707,39 +2785,59 @@ export const PropertyView: React.FC<Props> = ({
                         <div className="space-y-2.5 text-xs">
                           <div className="divide-y divide-[#EFF2EF]">
                             <div className="py-1.5 flex items-center justify-between gap-2">
-                              <span className="text-[#5E6D64] font-medium">{bi('Toneladas totales', 'Total tons')}</span>
-                              <span className="font-semibold text-[#26352D]">{m.cosechaRecord.toneladas} t</span>
+                              <span className="text-[#5E6D64] font-medium">{bi('Producto', 'Product')}</span>
+                              <span className="font-semibold text-[#26352D] text-right">{formatConcept(m.cosechaRecord.producto)}</span>
                             </div>
                             <div className="py-1.5 flex items-center justify-between gap-2">
-                              <span className="text-[#5E6D64] font-medium">{bi('Asignadas / Pendientes', 'Priced / Pending')}</span>
-                              <span className="tabular-nums font-semibold text-[#26352D]">
-                                {m.cosechaRecord.asignadas} t {bi('asig.', 'priced')} · {m.cosechaRecord.pendiente} t {bi('pend.', 'pend.')}
+                              <span className="text-[#5E6D64] font-medium">{bi('Campaña', 'Campaign')}</span>
+                              <span className="font-semibold text-[#26352D] text-right">{campName}</span>
+                            </div>
+                            <div className="py-1.5 flex items-center justify-between gap-2">
+                              <span className="text-[#5E6D64] font-medium">{bi('Fecha', 'Date')}</span>
+                              <span className="font-semibold text-[#26352D] text-right">{formatDateDDMMAAAA(m.cosechaRecord.fecha)}</span>
+                            </div>
+                            <div className="py-1.5 flex items-center justify-between gap-2">
+                              <span className="text-[#5E6D64] font-medium">{bi('Cantidad cosechada', 'Harvested quantity')}</span>
+                              <span className="tabular-nums font-semibold text-[#24875B] text-right">
+                                {formatHarvestQty(m.cosechaRecord.toneladas, m.cosechaRecord.unidad)}
+                              </span>
+                            </div>
+                            <div className="py-1.5 flex items-center justify-between gap-2">
+                              <span className="text-[#5E6D64] font-medium">{bi('Vendida o comprometida', 'Sold or committed')}</span>
+                              <span className="tabular-nums font-semibold text-[#26352D] text-right">
+                                {formatHarvestQty(m.cosechaRecord.asignadas || 0, m.cosechaRecord.unidad)}
+                              </span>
+                            </div>
+                            <div className="py-1.5 flex items-center justify-between gap-2">
+                              <span className="text-[#5E6D64] font-medium">{bi('Cantidad disponible', 'Available quantity')}</span>
+                              <span className="tabular-nums font-semibold text-[#26352D] text-right">
+                                {formatHarvestQty(m.cosechaRecord.pendiente || 0, m.cosechaRecord.unidad)}
                               </span>
                             </div>
                             {m.cosechaRecord.observacion && (
                               <div className="py-1.5 flex items-center justify-between gap-2">
-                                <span className="text-[#5E6D64] font-medium">{bi('Observación', 'Observation')}</span>
+                                <span className="text-[#5E6D64] font-medium shrink-0">{bi('Observación', 'Observation')}</span>
                                 <span className="italic text-[#26352D] text-right">{m.cosechaRecord.observacion}</span>
                               </div>
                             )}
                           </div>
                           {effectiveIsAdmin && (
                             <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E6EBE7]">
-                              {m.cosechaRecord.pendiente > 0.0001 && (
-                                <button
-                                  type="button"
-                                  onClick={() => setCurrentScreen('pendientes_precio')}
-                                  className="px-3.5 py-1.5 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white font-semibold text-xs transition cursor-pointer min-h-[34px]"
-                                >
-                                  {t('harvestSales.title')}
-                                </button>
-                              )}
                               <button
                                 type="button"
                                 onClick={() => handleOpenEditHarvest(m.cosechaRecord!)}
-                                className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px]"
+                                className="px-3 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px] inline-flex items-center gap-1"
                               >
-                                {t('common.edit')}
+                                <Edit3 className="h-3.5 w-3.5" />
+                                <span>{t('common.edit')}</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handlePromptDeleteHarvest(m.cosechaRecord!)}
+                                className="px-3 py-1.5 rounded-xl bg-white border border-[#F2C6C6] hover:bg-[#FCECEC] text-[#C44545] font-semibold text-xs transition cursor-pointer min-h-[34px] inline-flex items-center gap-1"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                                <span>{t('common.delete')}</span>
                               </button>
                             </div>
                           )}
@@ -2989,11 +3087,7 @@ export const PropertyView: React.FC<Props> = ({
               }
             >
               {filteredLinkedJobs.map((j) => {
-                const fullLabor =
-                  j.trabajoNombre ||
-                  (j.maquinariaNombre
-                    ? bi(`Labor con ${j.maquinariaNombre}`, `Job with ${j.maquinariaNombre}`)
-                    : bi('Trabajo de Maquinaria', 'Machinery Job'));
+                const jobDisp = resolveJobDisplay(j, machines, machineJobTypes, lang);
                 const unitLabel =
                   j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'h';
                 const loteLabel = j.loteNombre
@@ -3007,15 +3101,15 @@ export const PropertyView: React.FC<Props> = ({
                     key={j.id}
                     icon={
                       <div className="w-8 h-8 rounded-lg bg-[#FCECEC] border border-[#F2C6C6]/70 flex items-center justify-center">
-                        <VisualIcon name={getMachineIcon(j.maquinariaId, machines, j.icono)} size="xs" />
+                        <VisualIcon name={jobDisp.icon} size="xs" />
                       </div>
                     }
-                    title={fullLabor}
+                    title={jobDisp.title}
                     subtitle={
                       <span>
                         {formatDateDDMMAAAA(j.fecha)} ·{' '}
                         <span className="font-semibold text-[#24875B]">{loteLabel}</span> ·{' '}
-                        {j.maquinariaNombre} · {j.cantidad} {unitLabel}
+                        {jobDisp.machineName} · {j.cantidad} {unitLabel}
                       </span>
                     }
                     rightPrimary={
@@ -3045,8 +3139,8 @@ export const PropertyView: React.FC<Props> = ({
             title={bi('Historial', 'History')}
             countLabel={
               historialFilter === 'distribuidos'
-                ? `${expenseAllocations.length} ${bi('grupos', 'groups')}`
-                : `${filteredMovements.length} ${bi('reg.', 'rec.')}`
+                ? `${expenseAllocations.length} ${expenseAllocations.length === 1 ? bi('grupo', 'group') : bi('grupos', 'groups')}`
+                : `${filteredMovements.length} ${filteredMovements.length === 1 ? bi('registro', 'record') : bi('registros', 'records')}`
             }
             searchValue={historialSearch}
             onSearchChange={setHistorialSearch}
@@ -3214,12 +3308,16 @@ export const PropertyView: React.FC<Props> = ({
               const isExpanded = expandedMovementId === m.id;
               const isIncome = m.tipo === 'ingreso';
               const isHarvest = m.tipo === 'cosecha';
-              const isUnpricedHarvest = isHarvest && m.cosechaRecord?.asignadas === 0;
               const loteLabel = m.loteNombre
                 ? m.loteNombre.toLowerCase().startsWith('lote') || m.loteNombre.toLowerCase().startsWith('lot')
                   ? m.loteNombre
                   : `${bi('Lote', 'Lot')} ${m.loteNombre}`
                 : bi('Lote', 'Lot');
+              const harvestCampaignName = isHarvest && m.cosechaRecord
+                ? campaigns.find((c) => String(c.id) === String(m.cosechaRecord!.campanaId))?.nombre ||
+                  activeCampaign?.nombre ||
+                  '—'
+                : '';
 
               return (
                 <CompactListRow
@@ -3227,10 +3325,8 @@ export const PropertyView: React.FC<Props> = ({
                   icon={
                     <div
                       className={`w-8 h-8 rounded-lg flex items-center justify-center border ${
-                        isIncome
+                        isIncome || isHarvest
                           ? 'bg-[#EAF5EE] border-[#BFE0CD]/70 text-[#24875B]'
-                          : isHarvest
-                          ? 'bg-amber-50 border-amber-200 text-amber-700'
                           : m.tipo === 'gasto_directo'
                           ? 'bg-[#FCECEC] border-[#F2C6C6]/70'
                           : 'bg-amber-50 border-amber-200/80'
@@ -3239,43 +3335,41 @@ export const PropertyView: React.FC<Props> = ({
                       <VisualIcon
                         name={
                           m.icono ||
-                          (isIncome
-                            ? 'granos'
-                            : isHarvest
+                          (isIncome || isHarvest
                             ? 'granos'
                             : m.tipo === 'gasto_directo'
                             ? 'semillas'
                             : 'tractor')
                         }
+                        category={isIncome || isHarvest ? 'ingreso' : m.tipo === 'gasto_directo' ? 'gasto' : 'maquinaria'}
                         size="xs"
                       />
                     </div>
                   }
                   title={m.titulo}
                   subtitle={
-                    <span>
-                      {formatDateDDMMAAAA(m.fecha)} ·{' '}
-                      <span className="font-semibold text-[#24875B]">{loteLabel}</span> ·{' '}
-                      {isIncome
-                        ? bi('Cosecha', 'Harvest')
-                        : isHarvest
-                        ? (isUnpricedHarvest ? bi('Sin precio', 'Unpriced') : bi('Parcial', 'Partial'))
-                        : m.tipo === 'gasto_directo'
-                        ? bi('Gasto directo', 'Direct expense')
-                        : bi('Maq. propia', 'Own mach.')}
-                    </span>
+                    isHarvest ? (
+                      <span>
+                        {formatDateDDMMAAAA(m.fecha)} ·{' '}
+                        <span className="font-semibold text-[#24875B]">{loteLabel}</span>
+                      </span>
+                    ) : (
+                      <span>
+                        {formatDateDDMMAAAA(m.fecha)} ·{' '}
+                        <span className="font-semibold text-[#24875B]">{loteLabel}</span> ·{' '}
+                        {isIncome
+                          ? bi('Ingreso directo', 'Direct income')
+                          : m.tipo === 'gasto_directo'
+                          ? bi('Gasto directo', 'Direct expense')
+                          : bi('Maq. propia', 'Own mach.')}
+                      </span>
+                    )
                   }
                   rightPrimary={
-                    isHarvest ? (
-                      isUnpricedHarvest ? (
-                        <span className="text-xs font-semibold text-amber-700 bg-amber-50 px-2.5 py-0.5 rounded-md border border-amber-200/80">
-                          {bi('Sin importe', 'Unpriced')}
-                        </span>
-                      ) : (
-                        <span className="text-xs tabular-nums text-stone-700 font-semibold">
-                          {m.cosechaRecord?.asignadas} t {bi('asig.', 'priced')} · {m.cosechaRecord?.pendiente} t {bi('pend.', 'pend.')}
-                        </span>
-                      )
+                    isHarvest && m.cosechaRecord ? (
+                      <span className="tabular-nums font-bold text-[#24875B]">
+                        {formatHarvestQty(m.cosechaRecord.toneladas, m.cosechaRecord.unidad)}
+                      </span>
                     ) : (
                       <span className={`tabular-nums ${isIncome ? 'text-[#24875B]' : 'text-[#C44545]'}`}>
                         {isIncome ? '+ ' : '- '}
@@ -3290,26 +3384,48 @@ export const PropertyView: React.FC<Props> = ({
                   isExpanded={isExpanded}
                   onClick={() => setExpandedMovementId(isExpanded ? null : m.id)}
                   expandedContent={
-                    isHarvest ? (
+                    isHarvest && m.cosechaRecord ? (
                       <div className="space-y-3 text-xs">
                         <div className="divide-y divide-[#EFF2EF]">
+                          <div className="py-1.5 flex items-center justify-between gap-2">
+                            <span className="text-[#5E6D64] font-medium">{bi('Producto', 'Product')}</span>
+                            <span className="font-semibold text-[#26352D] text-right">
+                              {formatConcept(m.cosechaRecord.producto)}
+                            </span>
+                          </div>
                           <div className="py-1.5 flex items-center justify-between gap-2">
                             <span className="text-[#5E6D64] font-medium">{bi('Lote', 'Lot')}</span>
                             <span className="font-semibold text-[#24875B] text-right">{loteLabel}</span>
                           </div>
                           <div className="py-1.5 flex items-center justify-between gap-2">
-                            <span className="text-[#5E6D64] font-medium">{bi('Toneladas totales', 'Total tons')}</span>
+                            <span className="text-[#5E6D64] font-medium">{bi('Campaña', 'Campaign')}</span>
+                            <span className="font-semibold text-[#26352D] text-right">{harvestCampaignName}</span>
+                          </div>
+                          <div className="py-1.5 flex items-center justify-between gap-2">
+                            <span className="text-[#5E6D64] font-medium">{bi('Fecha', 'Date')}</span>
                             <span className="font-semibold text-[#26352D] text-right">
-                              {m.cosechaRecord?.toneladas} t
+                              {formatDateDDMMAAAA(m.cosechaRecord.fecha)}
                             </span>
                           </div>
                           <div className="py-1.5 flex items-center justify-between gap-2">
-                            <span className="text-[#5E6D64] font-medium">{bi('Asignadas / Pendientes', 'Priced / Pending')}</span>
-                            <span className="tabular-nums font-semibold text-[#26352D] text-right">
-                              {m.cosechaRecord?.asignadas || 0} t {bi('asig.', 'priced')} · {m.cosechaRecord?.pendiente || 0} t {bi('pend.', 'pend.')}
+                            <span className="text-[#5E6D64] font-medium">{bi('Cantidad cosechada', 'Harvested quantity')}</span>
+                            <span className="tabular-nums font-semibold text-[#24875B] text-right">
+                              {formatHarvestQty(m.cosechaRecord.toneladas, m.cosechaRecord.unidad)}
                             </span>
                           </div>
-                          {m.cosechaRecord?.observacion && (
+                          <div className="py-1.5 flex items-center justify-between gap-2">
+                            <span className="text-[#5E6D64] font-medium">{bi('Cantidad vendida o comprometida', 'Sold or committed quantity')}</span>
+                            <span className="tabular-nums font-semibold text-[#26352D] text-right">
+                              {formatHarvestQty(m.cosechaRecord.asignadas || 0, m.cosechaRecord.unidad)}
+                            </span>
+                          </div>
+                          <div className="py-1.5 flex items-center justify-between gap-2">
+                            <span className="text-[#5E6D64] font-medium">{bi('Cantidad disponible', 'Available quantity')}</span>
+                            <span className="tabular-nums font-semibold text-[#26352D] text-right">
+                              {formatHarvestQty(m.cosechaRecord.pendiente || 0, m.cosechaRecord.unidad)}
+                            </span>
+                          </div>
+                          {m.cosechaRecord.observacion && (
                             <div className="py-1.5 flex items-center justify-between gap-2">
                               <span className="text-[#5E6D64] font-medium shrink-0">{bi('Observación', 'Observation')}</span>
                               <span className="font-normal text-[#26352D] text-right italic">
@@ -3318,33 +3434,35 @@ export const PropertyView: React.FC<Props> = ({
                             </div>
                           )}
                         </div>
-                        {m.cosechaRecord && (
-                          effectiveIsAdmin ? (
-                            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E6EBE7]">
-                              {m.cosechaRecord.pendiente > 0.0001 && (
-                                <button
-                                  type="button"
-                                  onClick={() => setCurrentScreen('pendientes_precio')}
-                                  className="px-3.5 py-1.5 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white font-semibold text-xs transition cursor-pointer min-h-[34px]"
-                                >
-                                  {t('harvestSales.title')}
-                                </button>
+                        {effectiveIsAdmin ? (
+                          <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E6EBE7]">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditHarvest(m.cosechaRecord!)}
+                              className="px-3 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px] inline-flex items-center gap-1"
+                            >
+                              <Edit3 className="h-3.5 w-3.5" />
+                              <span>{t('common.edit')}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handlePromptDeleteHarvest(m.cosechaRecord!)}
+                              className="px-3 py-1.5 rounded-xl bg-white border border-[#F2C6C6] hover:bg-[#FCECEC] text-[#C44545] font-semibold text-xs transition cursor-pointer min-h-[34px] inline-flex items-center gap-1"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              <span>{t('common.delete')}</span>
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1.5 pt-2 border-t border-[#E6EBE7] text-[11px] text-[#7A8780]">
+                            <Lock className="h-3.5 w-3.5 shrink-0" />
+                            <span>
+                              {bi(
+                                'Solo el Administrador puede editar o eliminar cosechas guardadas.',
+                                'Only the Administrator can edit or delete saved harvests.'
                               )}
-                              <button
-                                type="button"
-                                onClick={() => handleOpenEditHarvest(m.cosechaRecord!)}
-                                className="px-3.5 py-1.5 rounded-xl bg-white border border-[#D4DDD6] hover:bg-[#F2F5F3] text-[#26352D] font-semibold text-xs transition cursor-pointer min-h-[34px] inline-flex items-center gap-1"
-                              >
-                                <Edit3 className="h-3.5 w-3.5" />
-                                <span>{t('common.edit')}</span>
-                              </button>
-                            </div>
-                          ) : (
-                            <div className="flex items-center gap-1.5 pt-2 border-t border-[#E6EBE7] text-[11px] text-[#7A8780]">
-                              <Lock className="h-3.5 w-3.5 shrink-0" />
-                              <span>{bi('Solo el Administrador puede editar cosechas guardadas.', 'Only the Administrator can edit saved harvests.')}</span>
-                            </div>
-                          )
+                            </span>
+                          </div>
                         )}
                       </div>
                     ) : (
@@ -3917,10 +4035,87 @@ export const PropertyView: React.FC<Props> = ({
       })()}
 
       {/* ============================================================ */}
+      {/* MODAL: CONFIRMACIÓN / BLOQUEO DE ELIMINACIÓN DE COSECHA      */}
+      {/* ============================================================ */}
+      {harvestToDelete && (() => {
+        const committed = Number(harvestToDelete.asignadas || 0);
+        const hasLinkedSales =
+          committed > 0.0001 ||
+          (Array.isArray(harvestToDelete.asignaciones) && harvestToDelete.asignaciones.length > 0);
+        const lotName =
+          harvestToDelete.loteNombre ||
+          lots.find((l) => String(l.id) === String(harvestToDelete.loteId))?.nombre ||
+          bi('Lote', 'Lot');
+
+        return (
+          <ConfirmationModal
+            isOpen={true}
+            onClose={() => {
+              if (!deletingHarvest) {
+                setHarvestToDelete(null);
+                setDeleteHarvestError(null);
+              }
+            }}
+            type={hasLinkedSales ? 'warning' : 'danger'}
+            title={
+              hasLinkedSales
+                ? bi('No se puede eliminar', 'Cannot delete')
+                : bi('Eliminar cosecha', 'Delete harvest')
+            }
+            itemTitle={`${bi('Cosecha', 'Harvest')} ${formatConcept(harvestToDelete.producto)}`}
+            itemSubtitle={`${formatDateDDMMAAAA(harvestToDelete.fecha)} · ${lotName}`}
+            metrics={[
+              {
+                label: bi('Cantidad cosechada', 'Harvested quantity'),
+                value: formatHarvestQty(harvestToDelete.toneladas, harvestToDelete.unidad),
+              },
+              {
+                label: bi('Comprometida en ventas', 'Committed in sales'),
+                value: formatHarvestQty(committed, harvestToDelete.unidad),
+              },
+              ...(hasLinkedSales
+                ? [
+                    {
+                      label: bi('Disponible', 'Available'),
+                      value: formatHarvestQty(harvestToDelete.pendiente || 0, harvestToDelete.unidad),
+                    },
+                  ]
+                : []),
+            ]}
+            message={
+              hasLinkedSales
+                ? bi(
+                    `Esta cosecha tiene ${formatHarvestQty(committed, harvestToDelete.unidad)} comprometidas en ventas activas. Para eliminarla, primero debe anular las ventas vinculadas.`,
+                    `This harvest has ${formatHarvestQty(committed, harvestToDelete.unidad)} committed to active sales. To delete it, you must first cancel the linked sales.`
+                  )
+                : bi(
+                    'Se eliminará definitivamente esta cosecha y se descontará del almacén general.',
+                    'This harvest will be permanently deleted and deducted from the general warehouse.'
+                  )
+            }
+            errorMsg={deleteHarvestError}
+            singleButton={hasLinkedSales}
+            confirmText={
+              hasLinkedSales
+                ? bi('Entendido', 'Understood')
+                : deletingHarvest
+                ? t('common.deleting')
+                : t('common.delete')
+            }
+            confirmTone={hasLinkedSales ? 'success' : 'danger'}
+            isConfirming={deletingHarvest}
+            onConfirm={hasLinkedSales ? () => setHarvestToDelete(null) : handleConfirmDeleteHarvest}
+          />
+        );
+      })()}
+
+      {/* ============================================================ */}
       {/* MODAL: EDITAR COSECHA REGISTRADA (harvest.update — Admin)    */}
       {/* ============================================================ */}
       {editingHarvest && (() => {
-        const hasAsignaciones = (editingHarvest.asignadas || 0) > 0.0001;
+        const hasAsignaciones =
+          (editingHarvest.asignadas || 0) > 0.0001 ||
+          (Array.isArray(editingHarvest.asignaciones) && editingHarvest.asignaciones.length > 0);
         const tonsInput = parseDecimalNumber(editHarvToneladas);
         const newPendiente = Math.max(0, Number((tonsInput - (editingHarvest.asignadas || 0)).toFixed(4)));
         const violatesMinTons = hasAsignaciones && tonsInput > 0 && tonsInput + 0.0001 < editingHarvest.asignadas;
@@ -3964,30 +4159,30 @@ export const PropertyView: React.FC<Props> = ({
                   <div className="rounded-xl border border-[#BFE0CD] bg-[#F5FAF7] p-3 space-y-2">
                     <div className="grid grid-cols-3 divide-x divide-[#D4E6DC] bg-white rounded-lg border border-[#D4E6DC] py-2 text-center">
                       <div className="px-1">
-                        <span className="text-[10px] font-bold uppercase text-[#7A8780] block">{bi('Total', 'Total')}</span>
+                        <span className="text-[10px] font-bold uppercase text-[#7A8780] block">{bi('Cosechada', 'Harvested')}</span>
                         <span className="text-xs font-bold text-[#26352D] tabular-nums">
-                          {tonsInput > 0 ? tonsInput.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'} t
+                          {tonsInput > 0 ? formatHarvestQty(tonsInput, editHarvUnidad) : '—'}
                         </span>
                       </div>
                       <div className="px-1">
-                        <span className="text-[10px] font-bold uppercase text-[#7A8780] block">{bi('Asignadas', 'Priced')}</span>
+                        <span className="text-[10px] font-bold uppercase text-[#7A8780] block">{bi('Comprometida', 'Committed')}</span>
                         <span className="text-xs font-bold text-[#24875B] tabular-nums">
-                          {editingHarvest.asignadas.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t
+                          {formatHarvestQty(editingHarvest.asignadas, editHarvUnidad)}
                         </span>
                       </div>
                       <div className="px-1">
-                        <span className="text-[10px] font-bold uppercase text-[#7A8780] block">{bi('Pendientes', 'Pending')}</span>
-                        <span className={`text-xs font-black tabular-nums ${violatesMinTons ? 'text-red-600' : 'text-amber-700'}`}>
-                          {newPendiente.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t
+                        <span className="text-[10px] font-bold uppercase text-[#7A8780] block">{bi('Disponible', 'Available')}</span>
+                        <span className={`text-xs font-black tabular-nums ${violatesMinTons ? 'text-red-600' : 'text-[#26352D]'}`}>
+                          {formatHarvestQty(newPendiente, editHarvUnidad)}
                         </span>
                       </div>
                     </div>
                     <p className="text-[11px] text-[#1D5C3F]">
                       {bi(
-                        'Con precios asignados no se puede cambiar campaña, lote ni producto ni reducir por debajo de',
-                        'With assigned prices, you cannot change campaign, lot, or product, nor reduce below'
+                        'Con ventas o cantidades comprometidas no se puede cambiar campaña, lote, producto ni unidad, ni reducir por debajo de',
+                        'With linked sales or committed quantities, you cannot change campaign, lot, product, or unit, nor reduce below'
                       )}{' '}
-                      <strong>{editingHarvest.asignadas.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t</strong>.
+                      <strong>{formatHarvestQty(editingHarvest.asignadas, editHarvUnidad)}</strong>.
                     </p>
                   </div>
                 )}
@@ -4040,25 +4235,27 @@ export const PropertyView: React.FC<Props> = ({
                   ))}
                 </AppSelect>
 
-                {/* Producto y Toneladas */}
+                {/* Producto */}
+                <div>
+                  <label className={FORM_LABEL_CLASS}>
+                    {bi('Producto', 'Product')} <span className="text-[#C44545]">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    disabled={hasAsignaciones}
+                    value={editHarvProducto}
+                    onChange={(e) => setEditHarvProducto(e.target.value)}
+                    placeholder={bi('Soya, Maíz...', 'Soy, Corn...')}
+                    className={`${FORM_INPUT_CLASS} font-semibold`}
+                  />
+                </div>
+
+                {/* Cantidad y Unidad */}
                 <div className="grid grid-cols-2 gap-2.5 items-end">
                   <div>
                     <label className={FORM_LABEL_CLASS}>
-                      {bi('Producto', 'Product')} <span className="text-[#C44545]">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      disabled={hasAsignaciones}
-                      value={editHarvProducto}
-                      onChange={(e) => setEditHarvProducto(e.target.value)}
-                      placeholder={bi('Soya, Maíz...', 'Soy, Corn...')}
-                      className={`${FORM_INPUT_CLASS} font-semibold`}
-                    />
-                  </div>
-                  <div>
-                    <label className={FORM_LABEL_CLASS}>
-                      {bi('Toneladas (t)', 'Tons (t)')} <span className="text-[#C44545]">*</span>
+                      {bi('Cantidad', 'Quantity')} <span className="text-[#C44545]">*</span>
                     </label>
                     <input
                       type="number"
@@ -4072,6 +4269,20 @@ export const PropertyView: React.FC<Props> = ({
                       className={`${FORM_INPUT_CLASS} font-semibold tabular-nums ${
                         violatesMinTons ? 'border-red-400 focus:border-red-500 text-red-700' : ''
                       }`}
+                    />
+                  </div>
+                  <div>
+                    <label className={FORM_LABEL_CLASS}>
+                      {bi('Unidad', 'Unit')} <span className="text-[#C44545]">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      disabled={hasAsignaciones}
+                      value={editHarvUnidad}
+                      onChange={(e) => setEditHarvUnidad(e.target.value)}
+                      placeholder={bi('t, kg, qq...', 't, kg, qq...')}
+                      className={FORM_INPUT_CLASS}
                     />
                   </div>
                 </div>

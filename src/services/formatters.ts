@@ -1,5 +1,6 @@
 import type { Currency } from '../types';
 import type { AppLanguage } from './translations';
+import { toBoliviaIsoDate } from './boliviaDate';
 
 /**
  * Formats a numeric value using locale conventions:
@@ -25,6 +26,20 @@ export function formatNumberLocale(
 }
 
 /**
+ * Formats a percentage with at most 1 decimal place (never 2+ decimals).
+ * Shows integer values cleanly without trailing ",0" / ".0" (e.g., 50% or 33,3%).
+ */
+export function formatPercentMax1(
+  value: number,
+  lang: AppLanguage = 'es'
+): string {
+  const safe = Number.isFinite(value) ? value : 0;
+  const rounded = Math.round((safe + Number.EPSILON) * 10) / 10;
+  const isWhole = Math.abs(rounded - Math.round(rounded)) < 0.001;
+  return `${formatNumberLocale(rounded, lang, isWhole ? 0 : 1)}%`;
+}
+
+/**
  * Formats a monetary amount with currency prefix ('USD' or 'Bs') and 2 decimals.
  */
 export function formatMoneyLocale(
@@ -37,7 +52,8 @@ export function formatMoneyLocale(
 }
 
 /**
- * Formats a date string (ISO YYYY-MM-DD, DD/MM/YYYY, or Date timestamp) for display:
+ * Formats a date string (ISO YYYY-MM-DD, DD/MM/YYYY, or Date timestamp) for display
+ * in Bolivia operational calendar date:
  * - Spanish ('es'): DD/MM/AAAA
  * - English ('en'): MM/DD/YYYY
  */
@@ -49,20 +65,12 @@ export function formatDateLocale(
   const s = String(dateStr).trim();
   if (!s) return '—';
 
-  // ISO YYYY-MM-DD or YYYY-MM-DDTHH:mm...
-  const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (isoMatch) {
-    const [, yyyy, mm, dd] = isoMatch;
-    return lang === 'en' ? `${mm}/${dd}/${yyyy}` : `${dd}/${mm}/${yyyy}`;
-  }
-
-  // DD/MM/YYYY or DD-MM-YYYY
-  const dmyMatch = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-  if (dmyMatch) {
-    const dd = dmyMatch[1].padStart(2, '0');
-    const mm = dmyMatch[2].padStart(2, '0');
-    const yyyy = dmyMatch[3].length === 2 ? `20${dmyMatch[3]}` : dmyMatch[3];
-    return lang === 'en' ? `${mm}/${dd}/${yyyy}` : `${dd}/${mm}/${yyyy}`;
+  const iso = toBoliviaIsoDate(s, false);
+  if (iso) {
+    const [yyyy, mm, dd] = iso.split('-');
+    if (yyyy && mm && dd) {
+      return lang === 'en' ? `${mm}/${dd}/${yyyy}` : `${dd}/${mm}/${yyyy}`;
+    }
   }
 
   return s;

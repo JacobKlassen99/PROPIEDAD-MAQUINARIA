@@ -6,7 +6,7 @@ import {
   Income,
   MachineryJob,
 } from '../types';
-import { parseFlexibleDate } from './backend';
+import { toBoliviaIsoDate } from './boliviaDate';
 import { getCurrentLanguage } from './i18n';
 import { formatNumberLocale } from './formatters';
 
@@ -49,34 +49,22 @@ export function matchesCampaignRecord(
     return false;
   }
 
-  const itemTs = parseFlexibleDate(item.fecha);
-  if (!itemTs) return false;
-  const itemDateObj = new Date(itemTs);
-  const itemDayTs = new Date(
-    itemDateObj.getFullYear(),
-    itemDateObj.getMonth(),
-    itemDateObj.getDate()
-  ).getTime();
+  const itemIso = toBoliviaIsoDate(item.fecha, false);
+  if (!itemIso) return false;
 
-  const startTs = parseFlexibleDate(targetCamp.fechaInicio);
-  const endTs = parseFlexibleDate(targetCamp.fechaFin);
-  if (startTs && endTs) {
-    const startObj = new Date(startTs);
-    const endObj = new Date(endTs);
-    const startDayTs = new Date(startObj.getFullYear(), startObj.getMonth(), startObj.getDate()).getTime();
-    const endDayTs = new Date(endObj.getFullYear(), endObj.getMonth(), endObj.getDate()).getTime();
-    return itemDayTs >= startDayTs && itemDayTs <= endDayTs;
+  const startIso = toBoliviaIsoDate(targetCamp.fechaInicio, false);
+  const endIso = toBoliviaIsoDate(targetCamp.fechaFin, false);
+  if (startIso && endIso) {
+    return itemIso >= startIso && itemIso <= endIso;
   }
 
   const yearMatch = targetName.match(/\b(20\d{2})\b/);
-  if (yearMatch && itemDateObj.getFullYear() === Number(yearMatch[1])) {
+  if (yearMatch && itemIso.slice(0, 4) === yearMatch[1]) {
     return true;
   }
 
-  if (startTs && !endTs) {
-    const startObj = new Date(startTs);
-    const startDayTs = new Date(startObj.getFullYear(), startObj.getMonth(), startObj.getDate()).getTime();
-    return itemDayTs >= startDayTs;
+  if (startIso && !endIso) {
+    return itemIso >= startIso;
   }
 
   return false;

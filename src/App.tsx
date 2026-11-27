@@ -24,6 +24,12 @@ import {
 } from './services/backend';
 import { getCacheSessionGeneration } from './services/dataCache';
 import {
+  cancelAdminPreload,
+  cancelAllPreloads,
+  scheduleAdminPreload,
+  scheduleStandardPreload,
+} from './services/preloader';
+import {
   UserSession,
   Campaign,
   Machine,
@@ -111,6 +117,7 @@ export default function App() {
 
   // Clear all private in-memory UI state when logging out or switching users
   const clearAllLocalState = useCallback(() => {
+    cancelAllPreloads();
     domainSeqRef.current.catalogs += 1;
     domainSeqRef.current.customers += 1;
     domainSeqRef.current.paymentSettings += 1;
@@ -174,7 +181,9 @@ export default function App() {
       const loadPaymentSettings = scope === 'all' || scope === 'paymentSettings';
       const loadJobs = scope === 'all' || scope === 'jobs';
       const loadMovements = scope === 'all' || scope === 'jobs' || scope === 'movements';
-      const loadAssets = scope === 'all' || scope === 'assets' || scope === 'catalogs_and_assets';
+      const loadAssets =
+        hasAdminAuthorization() &&
+        (scope === 'all' || scope === 'assets' || scope === 'catalogs_and_assets');
       const loadFx = scope === 'all' || scope === 'fx';
 
       const seqCatalogs = loadCatalogs ? ++domainSeqRef.current.catalogs : 0;
@@ -209,6 +218,8 @@ export default function App() {
                 setCampaigns(list);
                 const active = list.find((c) => c.activa) || list[0] || null;
                 setActiveCampaignState(active);
+                // Progressively preload campaign-scoped operational sections (Historial, Almacén, Prorrateos)
+                scheduleStandardPreload(active?.id);
               }
               if (machsRes.status === 'fulfilled') {
                 setMachines(machsRes.value || []);
@@ -364,6 +375,9 @@ export default function App() {
       }
       loadedSessionTokenRef.current = token;
       loadData(true, 'all');
+      if (hasAdminAuthorization()) {
+        scheduleAdminPreload();
+      }
     }
   }, [session?.token, loadData, clearAllLocalState]);
 
@@ -374,12 +388,19 @@ export default function App() {
     });
     const unsubscribeAdmin = onAdminAuthChange((authorized) => {
       setIsAdmin(authorized);
+      if (authorized && getActiveSession()) {
+        loadData(true, 'assets');
+        scheduleAdminPreload();
+      } else {
+        cancelAdminPreload();
+        setAssets([]);
+      }
     });
     return () => {
       unsubscribeSession();
       unsubscribeAdmin();
     };
-  }, []);
+  }, [loadData]);
 
   // Proactive session revalidation and new-day BCB check when user re-opens or focuses the app
   useEffect(() => {
@@ -402,6 +423,7 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    cancelAllPreloads();
     await logout();
     resetAllPrivateMemoryData();
     clearAllLocalState();
@@ -420,6 +442,9 @@ export default function App() {
       'machineType.',
     ]);
     loadData(false, 'all');
+    if (hasAdminAuthorization()) {
+      scheduleAdminPreload();
+    }
   };
 
   const toggleCurrency = () => {

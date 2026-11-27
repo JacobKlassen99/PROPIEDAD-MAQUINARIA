@@ -281,7 +281,7 @@ export const ES_TRANSLATIONS = {
 
   // Reports / Finances Module
   'reports.title': 'Finanzas',
-  'reports.tab.consolidated': 'Consolidado',
+  'reports.tab.consolidated': 'General',
   'reports.tab.machinery': 'Maquinarias',
   'reports.tab.property': 'Propiedad',
   'reports.incomes': 'Ingresos',
@@ -621,7 +621,7 @@ export const EN_TRANSLATIONS: Record<TranslationKey, string> = {
 
   // Reports / Finances Module
   'reports.title': 'Finances',
-  'reports.tab.consolidated': 'Consolidated',
+  'reports.tab.consolidated': 'General',
   'reports.tab.machinery': 'Machinery',
   'reports.tab.property': 'Property',
   'reports.incomes': 'Income',
@@ -687,12 +687,12 @@ export const TRANSLATIONS: Record<AppLanguage, Record<TranslationKey, string>> =
  * Icon catalog labels in English (never modifies stored catalog names or IDs).
  */
 export const ICON_LABELS_EN: Record<string, string> = {
-  soya: 'Soybean Sale',
-  maiz: 'Corn Sale',
-  trigo: 'Wheat Sale',
-  sorgo: 'Sorghum Sale',
-  girasol: 'Sunflower Sale',
-  granos: 'Other Farm Grains',
+  soya: 'Soybean',
+  maiz: 'Corn',
+  trigo: 'Wheat',
+  sorgo: 'Sorghum',
+  girasol: 'Sunflower',
+  granos: 'Other Grains',
   'otros-ingresos': 'Other Income',
   tractor: 'Farm Tractor',
   'tractor-blue': 'Blue Tractor',
@@ -702,6 +702,7 @@ export const ICON_LABELS_EN: Record<string, string> = {
   excavadora: 'Excavator',
   motoniveladora: 'Motor Grader',
   pulverizadora: 'Self-Propelled Sprayer',
+  'drone-agricola': 'Agricultural drone',
   'otros-equipos': 'Other Equipment',
   sembradora: 'Planter / Seeder',
   romplow: 'Heavy Disk Plow (Romplow)',

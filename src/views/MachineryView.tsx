@@ -62,7 +62,10 @@ import {
   getCobroEstado,
   compareChronologicalDesc,
   getMachineIcon,
+  getBoliviaTodayIso,
+  toBoliviaIsoDate,
 } from '../services/backend';
+import { resolveJobDisplay } from '../services/jobDisplay';
 import { addDaysToIso } from '../services/interestEngine';
 import {
   convertHistoricalAmount,
@@ -138,20 +141,7 @@ type MachineryScreen =
   | 'resumen';
 
 const toYYYYMMDD = (dStr: string | undefined): string => {
-  if (!dStr) return new Date().toISOString().slice(0, 10);
-  const clean = String(dStr).trim();
-  if (/^\d{4}-\d{2}-\d{2}/.test(clean)) {
-    return clean.slice(0, 10);
-  }
-  const parts = clean.split(/[/.-]/);
-  if (parts.length === 3) {
-    if (parts[0].length === 4) {
-      return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
-    } else if (parts[2].length === 4) {
-      return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
-    }
-  }
-  return clean.slice(0, 10);
+  return toBoliviaIsoDate(dStr, true);
 };
 
 export const MachineryView: React.FC<Props> = ({
@@ -234,7 +224,7 @@ export const MachineryView: React.FC<Props> = ({
   const [jobAplicarInteres, setJobAplicarInteres] = useState(false);
   const [jobTasaInteres, setJobTasaInteres] = useState('');
   const [cantidad, setCantidad] = useState<number | ''>('');
-  const [fecha, setFecha] = useState(new Date().toISOString().slice(0, 10));
+  const [fecha, setFecha] = useState(() => getBoliviaTodayIso());
   const [tarifa, setTarifa] = useState<number | ''>('');
   const [unidad, setUnidad] = useState<'hora' | 'hectarea'>('hora');
   const [jobMoneda, setJobMoneda] = useState<Currency>('USD');
@@ -257,7 +247,7 @@ export const MachineryView: React.FC<Props> = ({
   const [expCantidad, setExpCantidad] = useState<number | ''>(1);
   const [expUnidad, setExpUnidad] = useState('');
   const [expPrecio, setExpPrecio] = useState<number | ''>('');
-  const [expFecha, setExpFecha] = useState(new Date().toISOString().slice(0, 10));
+  const [expFecha, setExpFecha] = useState(() => getBoliviaTodayIso());
   const [expMoneda, setExpMoneda] = useState<Currency>('BOB');
   const [expTc, setExpTc] = useState(
     exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0 ? String(exchangeRate.tasaBobPerUsd) : ''
@@ -301,7 +291,7 @@ export const MachineryView: React.FC<Props> = ({
   );
 
   const resetNewServiceForm = () => {
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = getBoliviaTodayIso();
     jobCurrencyAnchorRef.current = null;
     setSelectedMachineId('');
     setSelectedJobTypeId('');
@@ -332,7 +322,7 @@ export const MachineryView: React.FC<Props> = ({
     setExpCantidad(1);
     setExpUnidad('');
     setExpPrecio('');
-    setExpFecha(new Date().toISOString().slice(0, 10));
+    setExpFecha(getBoliviaTodayIso());
     setExpMoneda('BOB');
     setExpTc(
       exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
@@ -1156,7 +1146,7 @@ export const MachineryView: React.FC<Props> = ({
     editExpCurrencyAnchorRef.current = null;
     setEditingExpense(exp);
     setEditExpError(null);
-    setEditExpFecha(exp.fecha ? exp.fecha.slice(0, 10) : new Date().toISOString().slice(0, 10));
+    setEditExpFecha(toBoliviaIsoDate(exp.fecha, true));
     setEditExpMachineId(exp.maquinariaId || '');
     setEditExpItemGasto(exp.itemGasto || 'Combustible');
     setEditExpCantidad(exp.cantidad ?? 1);
@@ -1255,6 +1245,7 @@ export const MachineryView: React.FC<Props> = ({
     fecha: string;
     titulo: string;
     maquinariaNombre?: string;
+    implementoNombre?: string | null;
     destinoOCliente?: string;
     cantidadTexto?: string;
     total: number;
@@ -1295,8 +1286,7 @@ export const MachineryView: React.FC<Props> = ({
   // All machinery movements: Includes ALL jobs (propiedad + tercero) and machinery expenses
   const allMachineryMovements: MachineryMovementItem[] = [
     ...jobs.map((j) => {
-      const machineObj = j.maquinariaId ? machines.find((m) => m.id === j.maquinariaId || m.nombre.toLowerCase() === j.maquinariaId.toLowerCase()) : null;
-      const resolvedMachineName = j.maquinariaNombre || machineObj?.nombre || bi('Maquinaria', 'Machinery');
+      const jobDisp = resolveJobDisplay(j, machines, machineJobTypes, lang);
 
       const lotObj = j.loteId ? lots.find((l) => l.id === j.loteId || (l.nombre && j.loteId && l.nombre.toLowerCase() === j.loteId.toLowerCase())) : null;
       const rawLot = j.loteNombre || lotObj?.nombre || (j.loteId ? `${bi('Lote', 'Lot')} ${j.loteId}` : null);
@@ -1311,8 +1301,9 @@ export const MachineryView: React.FC<Props> = ({
         kind: 'servicio' as const,
         tipoTrabajo: j.tipoTrabajo,
         fecha: j.fecha,
-        titulo: formatConcept(j.trabajoNombre || bi('Labor de maquinaria', 'Machinery job')),
-        maquinariaNombre: resolvedMachineName,
+        titulo: jobDisp.title,
+        maquinariaNombre: jobDisp.machineName,
+        implementoNombre: jobDisp.implementName,
         destinoOCliente:
           j.tipoTrabajo === 'propiedad'
             ? formattedLot
@@ -1324,7 +1315,7 @@ export const MachineryView: React.FC<Props> = ({
         tarifaOPrecio: j.tarifa,
         unidad: j.unidad === 'hectarea' || (j.unidad as string) === 'ha' ? 'ha' : 'hora',
         observacion: j.observacion,
-        icono: getMachineIcon(j.maquinariaId, machines, j.icono),
+        icono: jobDisp.icon,
         creadoEn: j.creadoEn,
         rawJob: j,
       };
@@ -1371,6 +1362,7 @@ export const MachineryView: React.FC<Props> = ({
     return (
       m.titulo.toLowerCase().includes(term) ||
       (m.maquinariaNombre && m.maquinariaNombre.toLowerCase().includes(term)) ||
+      (m.implementoNombre && m.implementoNombre.toLowerCase().includes(term)) ||
       (m.destinoOCliente && m.destinoOCliente.toLowerCase().includes(term)) ||
       (m.observacion && m.observacion.toLowerCase().includes(term)) ||
       formattedDate.includes(term) ||
@@ -2200,6 +2192,22 @@ export const MachineryView: React.FC<Props> = ({
                             {m.maquinariaNombre || '—'}
                           </span>
                         </div>
+                        {isService && m.implementoNombre && (
+                          <div className="py-1.5 flex items-center justify-between gap-2">
+                            <span className="text-[#5E6D64] font-medium">{bi('Implemento', 'Implement')}</span>
+                            <span className="font-semibold text-[#26352D] text-right">
+                              {m.implementoNombre}
+                            </span>
+                          </div>
+                        )}
+                        {m.cantidadTexto && (
+                          <div className="py-1.5 flex items-center justify-between gap-2">
+                            <span className="text-[#5E6D64] font-medium">{bi('Cantidad', 'Quantity')}</span>
+                            <span className="font-semibold text-[#26352D] tabular-nums text-right">
+                              {m.cantidadTexto}
+                            </span>
+                          </div>
+                        )}
                         {m.tipoTrabajo === 'propiedad' ? (
                           <div className="py-1.5 flex items-center justify-between gap-2">
                             <span className="text-[#5E6D64] font-medium">{bi('Lote', 'Lot')}</span>
