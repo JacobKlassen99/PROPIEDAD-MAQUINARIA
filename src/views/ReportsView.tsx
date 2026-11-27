@@ -27,6 +27,7 @@ import {
   ExchangeRateConfig,
   HarvestRecord,
   HarvestSale,
+  ItemConfig,
 } from '../types';
 import {
   matchesCampaignRecord,
@@ -46,6 +47,7 @@ import {
 import { cacheKeys, getCachedQuery, revalidateQuery } from '../services/dataCache';
 import { fetchNormalizedHarvestSalesBundle } from '../services/preloader';
 import { computeHarvestAvailability, roundPct2, roundTons } from '../services/harvestAvailability';
+import { resolveAgriculturalConcept } from '../services/agriculturalProducts';
 import { formatNumberLocale, formatPercentMax1 } from '../services/formatters';
 import { resolveJobDisplay } from '../services/jobDisplay';
 import { CompactFilter } from '../components/CompactListUI';
@@ -82,6 +84,7 @@ interface Props {
   jobs?: MachineryJob[];
   expenses?: Expense[];
   incomes?: Income[];
+  itemsConfig?: ItemConfig[];
   currency?: Currency;
   exchangeRate?: ExchangeRateConfig;
   initialScreen?: ReportScreen;
@@ -244,6 +247,7 @@ const ReportsViewInner: React.FC<Props> = ({
   jobs = [],
   expenses = [],
   incomes = [],
+  itemsConfig = [],
   exchangeRate,
   initialScreen = 'general',
   onRootBackLabel,
@@ -286,6 +290,17 @@ const ReportsViewInner: React.FC<Props> = ({
     () => (Array.isArray(incomes) ? incomes.filter(Boolean) : []),
     [incomes]
   );
+  const safeItemsConfig = useMemo(
+    () => (Array.isArray(itemsConfig) ? itemsConfig.filter(Boolean) : []),
+    [itemsConfig]
+  );
+  const itemConfigById = useMemo(() => {
+    const map = new Map<string, ItemConfig>();
+    safeItemsConfig.forEach((it) => {
+      if (it?.id) map.set(String(it.id).trim(), it);
+    });
+    return map;
+  }, [safeItemsConfig]);
   const safeExchangeRate = useMemo(
     () =>
       exchangeRate && typeof exchangeRate === 'object'
@@ -705,8 +720,27 @@ const ReportsViewInner: React.FC<Props> = ({
       const val = toView(Number(inc.total) || 0, inc.moneda, inc.tipoCambio || inc.tc);
       entry.ingresosCosechas += val;
       entry.ingresos += val;
-      const concept = cleanConceptLabel(inc.concepto || (inc as any).rubro, bi('Venta agrícola', 'Farm sale'));
-      const key = concept.toLowerCase();
+      const rawItemId = String(inc.itemId || '').trim();
+      const matchedById = rawItemId ? itemConfigById.get(rawItemId) : undefined;
+      let concept = matchedById?.nombre || '';
+      let key = matchedById ? `cid:${matchedById.id}` : '';
+      if (!concept) {
+        const rawLabel = cleanConceptLabel(inc.concepto || (inc as any).rubro, bi('Venta agrícola', 'Farm sale'));
+        const isHarvestMovement = String(inc.trabajoId || '').trim().toUpperCase().startsWith('COSECHA:');
+        if (isHarvestMovement && safeItemsConfig.length > 0) {
+          // Strip legacy " (Cliente)" suffix if present only for unambiguous concept lookup
+          const withoutBuyer = rawLabel.replace(/\s*\([^)]*\)\s*$/, '').trim();
+          const res = resolveAgriculturalConcept({ conceptoId: rawItemId, producto: withoutBuyer }, safeItemsConfig);
+          if (res.concept) {
+            concept = res.concept.nombre;
+            key = `cid:${res.concept.id}`;
+          }
+        }
+        if (!concept) {
+          concept = rawLabel;
+          key = concept.toLowerCase();
+        }
+      }
       const prev = entry.ingresosByConcept.get(key);
       if (prev) {
         prev.amount += val;
@@ -901,6 +935,8 @@ const ReportsViewInner: React.FC<Props> = ({
     safeLots,
     safeMachines,
     safeMachineJobTypes,
+    safeItemsConfig,
+    itemConfigById,
     activeScope,
     selectedLotId,
     activeCurrency,

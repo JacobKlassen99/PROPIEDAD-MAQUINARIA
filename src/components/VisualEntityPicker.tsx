@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { ChevronDown, Search, X, Check, LandPlot, Wrench, List, Tractor } from 'lucide-react';
+import { ChevronDown, Search, X, Check, LandPlot, Wrench, List, Tractor, Sprout, Wheat, Layers } from 'lucide-react';
 import { VisualIcon } from './VisualIcon';
 import { sanitizeFieldLabel } from './AppSelect';
 import { Machine, MachineJobType, ItemConfig, Lot } from '../types';
@@ -726,12 +726,18 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
 // ==========================================
 interface IncomeItemPickerProps {
   items: ItemConfig[];
+  selectedId?: string;
   selectedName?: string;
   selectedItemName?: string;
-  onSelect?: (item: ItemConfig | { nombre: string; icono?: string; unidad?: string; precio?: number; precioPredeterminado?: number; moneda?: any }) => void;
+  onSelect?: (item: ItemConfig | { id?: string; nombre: string; icono?: string; unidad?: string; precio?: number; precioPredeterminado?: number; moneda?: any }) => void;
   onSelectItem?: (item: ItemConfig | any) => void;
   required?: boolean;
+  disabled?: boolean;
+  allowDefaultFallback?: boolean;
   label?: string;
+  placeholder?: string;
+  modalTitle?: string;
+  emptyMessage?: string;
   defaultIcon?: string;
 }
 
@@ -747,24 +753,46 @@ const DEFAULT_INCOME_ITEMS: Partial<ItemConfig>[] = [
 
 export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
   items,
+  selectedId,
   selectedName,
   selectedItemName,
   onSelect,
   onSelectItem,
   required = true,
+  disabled = false,
+  allowDefaultFallback = true,
   label,
+  placeholder,
+  modalTitle,
+  emptyMessage,
 }) => {
   const { t, bi, translateUnit } = useI18n();
   const resolvedLabel = label ?? t('picker.incomeLabel');
+  const resolvedPlaceholder = placeholder ?? t('picker.incomePlaceholder');
+  const resolvedModalTitle = modalTitle ?? resolvedPlaceholder;
+  const currentId = String(selectedId || '').trim();
   const currentName = (selectedName !== undefined ? selectedName : (selectedItemName || '')).trim();
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
 
   const effectiveItems = useMemo(() => {
-    return items.length > 0 ? items : (DEFAULT_INCOME_ITEMS as ItemConfig[]);
-  }, [items]);
+    if (items.length > 0 || !allowDefaultFallback) return items;
+    return DEFAULT_INCOME_ITEMS as ItemConfig[];
+  }, [items, allowDefaultFallback]);
 
-  const hasValue = Boolean(currentName);
+  const selectedItem = useMemo(() => {
+    if (currentId) {
+      const byId = effectiveItems.find((i) => String(i.id || '').trim() === currentId);
+      if (byId) return byId;
+    }
+    if (currentName) {
+      return effectiveItems.find((i) => i.nombre.trim().toLowerCase() === currentName.toLowerCase());
+    }
+    return undefined;
+  }, [effectiveItems, currentId, currentName]);
+
+  const displayName = selectedItem?.nombre || currentName;
+  const hasValue = Boolean(displayName);
   const styles = getTriggerClasses(required, hasValue);
   const { text: cleanLabel } = cleanOptionalLabel(resolvedLabel, required);
 
@@ -798,119 +826,156 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
       {/* Compact Single-Line Trigger (40px) */}
       <button
         type="button"
+        disabled={disabled}
         onClick={() => {
+          if (disabled) return;
           setSearch('');
           setIsOpen(true);
         }}
-        className={`w-full h-[40px] px-3 py-1.5 rounded-xl border flex items-center justify-between gap-2 text-left transition cursor-pointer focus:outline-none ${styles.button}`}
+        className={`w-full h-[40px] px-3 py-1.5 rounded-xl border flex items-center justify-between gap-2 text-left transition focus:outline-none ${
+          disabled
+            ? 'border-[#DCE2DD] bg-[#F3F5F3] text-[#7A8780] cursor-not-allowed opacity-75'
+            : `cursor-pointer ${styles.button}`
+        }`}
       >
         <div className="flex items-center gap-2 min-w-0 flex-1">
-          {(() => {
-            const incItem = effectiveItems.find((i) => i.nombre.toLowerCase() === currentName.toLowerCase());
-            return incItem && incItem.icono ? (
-              <div className="w-6 h-6 flex items-center justify-center shrink-0">
-                <VisualIcon iconId={incItem.icono} nameHint={currentName} category="ingreso" size={26} />
-              </div>
-            ) : (
-              <List className={`h-[17px] w-[17px] shrink-0 ${styles.icon}`} />
-            );
-          })()}
-          <span className={`text-sm font-semibold truncate ${styles.text}`}>
-            {currentName || t('picker.incomePlaceholder')}
+          {hasValue ? (
+            <div className="w-6 h-6 flex items-center justify-center shrink-0">
+              <VisualIcon
+                iconId={selectedItem?.icono}
+                nameHint={displayName}
+                category="ingreso"
+                size={24}
+              />
+            </div>
+          ) : (
+            <Wheat className={`h-[17px] w-[17px] shrink-0 ${disabled ? 'text-[#8A968F]' : styles.icon}`} />
+          )}
+          <span className={`text-sm font-semibold truncate ${disabled ? 'text-[#5E6D64]' : styles.text}`}>
+            {displayName || resolvedPlaceholder}
           </span>
         </div>
-        <ChevronDown className={`h-[17px] w-[17px] shrink-0 ${styles.chevron}`} />
+        <ChevronDown className={`h-[17px] w-[17px] shrink-0 ${disabled ? 'text-[#8A968F]' : styles.chevron}`} />
       </button>
 
       {/* Bottom Sheet Modal */}
       {isOpen && (
-        <div className="fixed inset-0 z-50 flex flex-col justify-end bg-stone-900/40 backdrop-blur-xs animate-fadeIn">
-          <div className="flex-1" onClick={handleClose} />
-          <div className="w-full max-w-xl mx-auto bg-white rounded-t-3xl shadow-2xl border-t border-stone-200/80 flex flex-col max-h-[85vh] animate-slideUp overflow-hidden">
-            <div className="pt-3 pb-1 cursor-pointer" onClick={handleClose}>
+        <div className="fixed inset-0 z-[70] flex flex-col justify-end sm:justify-center sm:items-center bg-stone-900/45 backdrop-blur-xs animate-fadeIn">
+          <div className="fixed inset-0" onClick={handleClose} />
+          <div className="relative z-10 w-full max-w-md mx-auto bg-white rounded-t-3xl sm:rounded-2xl shadow-2xl border-t sm:border border-stone-200/80 flex flex-col max-h-[82vh] animate-slideUp overflow-hidden">
+            <div className="pt-3 pb-1 cursor-pointer sm:hidden" onClick={handleClose}>
               <div className="w-12 h-1.5 bg-stone-300 rounded-full mx-auto" />
             </div>
 
             <div className="px-4 py-2.5 flex items-center justify-between border-b border-stone-100">
-              <div>
-                <h3 className="text-base font-bold text-stone-900">
-                  {t('picker.incomePlaceholder')}
+              <div className="min-w-0">
+                <h3 className="text-base font-bold text-stone-900 truncate">
+                  {resolvedModalTitle}
                 </h3>
                 <p className="text-xs text-stone-500">
                   {effectiveItems.length}{' '}
-                  {bi('rubros de ingresos agrícolas disponibles', 'farm income items available')}
+                  {effectiveItems.length === 1
+                    ? bi('producto agrícola activo', 'active agricultural product')
+                    : bi('productos agrícolas activos', 'active agricultural products')}
                 </p>
               </div>
               <button
                 type="button"
                 onClick={handleClose}
-                className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full cursor-pointer"
+                className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full cursor-pointer shrink-0"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
-            <div className="px-4 pt-2.5 pb-2">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-stone-400" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder={t('picker.incomeSearch')}
-                  className="w-full h-[40px] pl-9 pr-8 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 focus:bg-white focus:border-[#24875B] focus:outline-none"
-                />
-                {search && (
-                  <button
-                    type="button"
-                    onClick={() => setSearch('')}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-stone-400 hover:text-stone-700"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                )}
+            {effectiveItems.length > 5 && (
+              <div className="px-4 pt-2.5 pb-1.5">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-stone-400" />
+                  <input
+                    type="text"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder={t('picker.incomeSearch')}
+                    className="w-full h-[38px] pl-9 pr-8 rounded-xl border border-stone-200 bg-stone-50 text-sm text-stone-900 focus:bg-white focus:border-[#24875B] focus:outline-none"
+                  />
+                  {search && (
+                    <button
+                      type="button"
+                      onClick={() => setSearch('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-stone-400 hover:text-stone-700"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
 
-            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2">
-              {filteredItems.map((item) => {
-                const isSelected = currentName.toLowerCase() === item.nombre.toLowerCase();
-                return (
-                  <button
-                    key={item.id || item.nombre}
-                    type="button"
-                    onClick={() => handleChoose(item)}
-                    className={`w-full flex items-center justify-between p-3 rounded-xl border text-left transition cursor-pointer ${
-                      isSelected
-                        ? 'border-emerald-600 bg-emerald-50/90 ring-2 ring-emerald-500/20 shadow-xs'
-                        : 'border-stone-200 bg-white hover:bg-stone-50'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="p-1 rounded-lg bg-white border border-stone-200 shrink-0">
-                        <VisualIcon
-                          iconId={item.icono}
-                          nameHint={item.nombre}
-                          category="ingreso"
-                          size={38}
-                        />
+            <div className="flex-1 overflow-y-auto px-4 py-2.5 space-y-2">
+              {filteredItems.length === 0 ? (
+                <div className="rounded-xl border border-stone-200 bg-stone-50/70 px-4 py-5 text-center space-y-1">
+                  <p className="text-sm font-semibold text-stone-700">
+                    {effectiveItems.length === 0
+                      ? emptyMessage ||
+                        bi(
+                          'No hay productos agrícolas activos.',
+                          'No active agricultural products.'
+                        )
+                      : bi('Sin resultados para tu búsqueda.', 'No results for your search.')}
+                  </p>
+                  {effectiveItems.length === 0 && (
+                    <p className="text-xs text-stone-500">
+                      {bi(
+                        'Registra conceptos de ingresos agrícolas de Propiedad en Administración → Conceptos → Ingresos.',
+                        'Register Property agricultural income concepts in Administration → Concepts → Income.'
+                      )}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                filteredItems.map((item) => {
+                  const isSelected = currentId
+                    ? String(item.id || '').trim() === currentId
+                    : currentName.toLowerCase() === item.nombre.trim().toLowerCase();
+                  return (
+                    <button
+                      key={item.id || item.nombre}
+                      type="button"
+                      onClick={() => handleChoose(item)}
+                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl border text-left transition cursor-pointer ${
+                        isSelected
+                          ? 'border-[#24875B] bg-[#EAF5EE]/85 ring-2 ring-[#24875B]/15 shadow-xs'
+                          : 'border-stone-200 bg-white hover:bg-stone-50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-10 h-10 rounded-xl bg-white border border-stone-200 flex items-center justify-center shrink-0">
+                          <VisualIcon
+                            iconId={item.icono}
+                            nameHint={item.nombre}
+                            category="ingreso"
+                            size={34}
+                          />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-bold text-[#1F2D25] truncate">{item.nombre}</p>
+                          {item.unidad && (
+                            <p className="text-xs text-[#64746B] mt-0.5 truncate">
+                              {t('common.unit')}: {translateUnit(item.unidad)}
+                            </p>
+                          )}
+                        </div>
                       </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-bold text-stone-900">{item.nombre}</p>
-                        <p className="text-xs text-stone-500 mt-0.5">
-                          {item.unidad && `${t('common.unit')}: ${translateUnit(item.unidad)}`}
-                          {item.precioPredeterminado ? ` • Ref: ${item.moneda || 'USD'} ${item.precioPredeterminado}` : ''}
-                        </p>
-                      </div>
-                    </div>
-                    {isSelected && (
-                      <div className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-600 text-white shrink-0 ml-2">
-                        <Check className="h-3.5 w-3.5 stroke-[3]" />
-                      </div>
-                    )}
-                  </button>
-                );
-              })}
+                      {isSelected && (
+                        <div className="flex h-5 w-5 items-center justify-center rounded-full bg-[#24875B] text-white shrink-0 ml-2">
+                          <Check className="h-3.5 w-3.5 stroke-[3]" />
+                        </div>
+                      )}
+                    </button>
+                  );
+                })
+              )}
             </div>
 
             <div className="p-3 border-t border-stone-100 bg-stone-50 text-right">
@@ -1105,6 +1170,173 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
               >
                 {t('common.close')}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ==========================================
+// 6. VISUAL MODULE PICKER (Maquinarias / Propiedad)
+// ==========================================
+interface ModulePickerProps {
+  value: '' | 'MAQUINARIAS' | 'PROPIEDAD';
+  onChange: (value: 'MAQUINARIAS' | 'PROPIEDAD') => void;
+  required?: boolean;
+  disabled?: boolean;
+  label?: string;
+}
+
+export const VisualModulePicker: React.FC<ModulePickerProps> = ({
+  value,
+  onChange,
+  required = true,
+  disabled = false,
+  label,
+}) => {
+  const { t, bi } = useI18n();
+  const [isOpen, setIsOpen] = useState(false);
+
+  const resolvedLabel = label ?? bi('Módulo', 'Module');
+  const { text: cleanLabel } = cleanOptionalLabel(resolvedLabel, required);
+  const hasValue = value === 'MAQUINARIAS' || value === 'PROPIEDAD';
+  const styles = getTriggerClasses(required, hasValue);
+
+  const moduleOptions: Array<{
+    value: 'MAQUINARIAS' | 'PROPIEDAD';
+    label: string;
+    description: string;
+    icon: React.ReactNode;
+  }> = [
+    {
+      value: 'MAQUINARIAS',
+      label: t('nav.machinery'),
+      description: bi('Equipos, labores y servicios agrícolas', 'Equipment, operations & farm services'),
+      icon: <Tractor className="h-[18px] w-[18px]" />,
+    },
+    {
+      value: 'PROPIEDAD',
+      label: t('nav.property'),
+      description: bi('Lotes, cultivos, cosechas y producción', 'Lots, crops, harvests & production'),
+      icon: <Sprout className="h-[18px] w-[18px]" />,
+    },
+  ];
+
+  const selectedOption = moduleOptions.find((o) => o.value === value) || null;
+
+  const handleChoose = (next: 'MAQUINARIAS' | 'PROPIEDAD') => {
+    (document.activeElement as HTMLElement)?.blur();
+    onChange(next);
+    setIsOpen(false);
+  };
+
+  const handleClose = () => {
+    (document.activeElement as HTMLElement)?.blur();
+    setIsOpen(false);
+  };
+
+  return (
+    <div className="w-full min-w-0">
+      <div className="flex items-center justify-between gap-1 mb-1">
+        <label className="block text-[13px] font-semibold text-[#26352D] truncate">
+          {cleanLabel}
+          {required && <span className="text-[#C44545] ml-0.5">*</span>}
+        </label>
+      </div>
+
+      {/* Compact Single-Line Trigger (40px) — soft green when required & empty, white once selected */}
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => {
+          if (!disabled) setIsOpen(true);
+        }}
+        className={`w-full h-[40px] px-3 py-1.5 rounded-xl border flex items-center justify-between gap-2 text-left transition focus:outline-none ${
+          disabled
+            ? 'border-[#DCE2DD] bg-[#F3F5F3] text-[#7A8780] cursor-not-allowed opacity-75'
+            : `cursor-pointer ${styles.button}`
+        }`}
+      >
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          {selectedOption ? (
+            <span className={`shrink-0 flex items-center justify-center ${disabled ? 'text-[#7A8780]' : 'text-[#24875B]'}`}>
+              {selectedOption.value === 'MAQUINARIAS' ? (
+                <Tractor className="h-[17px] w-[17px]" />
+              ) : (
+                <Sprout className="h-[17px] w-[17px]" />
+              )}
+            </span>
+          ) : (
+            <Layers className={`h-[17px] w-[17px] shrink-0 ${disabled ? 'text-[#8A968F]' : styles.icon}`} />
+          )}
+          <span className={`text-sm font-semibold truncate ${disabled ? 'text-[#5E6D64]' : styles.text}`}>
+            {selectedOption ? selectedOption.label : bi('Seleccionar módulo', 'Select module')}
+          </span>
+        </div>
+        <ChevronDown className={`h-[17px] w-[17px] shrink-0 ${disabled ? 'text-[#8A968F]' : styles.chevron}`} />
+      </button>
+
+      {/* Compact Modal / Bottom Sheet */}
+      {isOpen && (
+        <div className="fixed inset-0 z-[70] flex flex-col justify-end sm:justify-center sm:items-center bg-stone-900/45 backdrop-blur-xs animate-fadeIn">
+          <div className="fixed inset-0" onClick={handleClose} />
+          <div className="relative z-10 w-full max-w-sm mx-auto bg-white rounded-t-3xl sm:rounded-2xl shadow-2xl border-t sm:border border-stone-200/80 flex flex-col animate-slideUp overflow-hidden">
+            <div className="pt-3 pb-1 cursor-pointer sm:hidden" onClick={handleClose}>
+              <div className="w-12 h-1.5 bg-stone-300 rounded-full mx-auto" />
+            </div>
+
+            <div className="px-4 py-2.5 flex items-center justify-between border-b border-stone-100">
+              <h3 className="text-base font-bold text-stone-900">
+                {bi('Seleccionar módulo', 'Select module')}
+              </h3>
+              <button
+                type="button"
+                onClick={handleClose}
+                className="p-1.5 text-stone-400 hover:text-stone-700 rounded-full cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="px-4 py-3 space-y-2">
+              {moduleOptions.map((opt) => {
+                const isSelected = value === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => handleChoose(opt.value)}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl border text-left transition cursor-pointer ${
+                      isSelected
+                        ? 'border-[#24875B] bg-[#EAF5EE]/85 ring-2 ring-[#24875B]/15 shadow-xs'
+                        : 'border-stone-200 bg-white hover:bg-stone-50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div
+                        className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
+                          isSelected
+                            ? 'bg-[#24875B] text-white border-[#24875B]'
+                            : 'bg-[#EAF5EE] text-[#24875B] border-[#CBE5D6]'
+                        }`}
+                      >
+                        {opt.icon}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-bold text-[#1F2D25] truncate">{opt.label}</p>
+                        <p className="text-xs text-[#64746B] truncate mt-0.5">{opt.description}</p>
+                      </div>
+                    </div>
+                    {isSelected && (
+                      <div className="flex h-5 w-5 items-center justify-center rounded-full bg-[#24875B] text-white shrink-0 ml-2">
+                        <Check className="h-3.5 w-3.5 stroke-[3]" />
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>

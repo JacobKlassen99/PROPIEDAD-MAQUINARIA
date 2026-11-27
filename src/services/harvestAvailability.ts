@@ -4,10 +4,12 @@ import type {
   HarvestRecord,
   HarvestSale,
   HarvestSaleDistribution,
+  ItemConfig,
   Lot,
   WarehouseLotBreakdown,
   WarehouseProductSummary,
 } from '../types';
+import { resolveAgriculturalConcept } from './agriculturalProducts';
 
 export const HARVEST_AVAILABILITY_EPSILON = 0.0001;
 
@@ -93,9 +95,17 @@ export function toCanonicalUnitQuantity(qty: number, rawUnit?: string): { quanti
   };
 }
 
-export function buildWarehouseProductKey(product?: string, rawUnit?: string): string {
-  const prodKey = normalizeProductKey(product);
+export function buildWarehouseProductKey(
+  product?: string,
+  rawUnit?: string,
+  conceptoId?: string
+): string {
   const unitInfo = normalizeHarvestUnit(rawUnit);
+  const cid = String(conceptoId || '').trim();
+  if (cid) {
+    return `cid:${cid}::${unitInfo.canonicalUnit}`;
+  }
+  const prodKey = normalizeProductKey(product);
   return `${prodKey}::${unitInfo.canonicalUnit}`;
 }
 
@@ -237,7 +247,8 @@ export function buildWarehouseSummaries(
   sales?: HarvestSale[],
   lots?: Lot[],
   campaigns?: Campaign[],
-  extraDistributions?: HarvestSaleDistribution[]
+  extraDistributions?: HarvestSaleDistribution[],
+  itemsConfig?: ItemConfig[]
 ): WarehouseProductSummary[] {
   const reconciled = computeHarvestAvailability(harvests, sales, extraDistributions);
 
@@ -254,6 +265,7 @@ export function buildWarehouseSummaries(
     string,
     {
       key: string;
+      conceptoId?: string;
       producto: string;
       unidad: string;
       totalCosechado: number;
@@ -266,14 +278,23 @@ export function buildWarehouseSummaries(
 
   for (const h of reconciled) {
     if (!h || !String(h.id || '').trim()) continue;
-    const prodDisplay = String(h.producto || 'Cosecha').trim() || 'Cosecha';
+    const rawProdDisplay = String(h.producto || 'Cosecha').trim() || 'Cosecha';
     const unitInfo = normalizeHarvestUnit(h.unidad);
-    const key = buildWarehouseProductKey(prodDisplay, unitInfo.canonicalUnit);
+    const resolved =
+      itemsConfig && itemsConfig.length > 0
+        ? resolveAgriculturalConcept({ conceptoId: h.conceptoId, producto: rawProdDisplay }, itemsConfig)
+        : { concept: null, status: 'unmatched' as const };
+    const effectiveConceptId = resolved.concept
+      ? resolved.concept.id
+      : String(h.conceptoId || '').trim() || undefined;
+    const prodDisplay = resolved.concept ? resolved.concept.nombre : rawProdDisplay;
+    const key = buildWarehouseProductKey(rawProdDisplay, unitInfo.canonicalUnit, effectiveConceptId);
 
     let group = productGroups.get(key);
     if (!group) {
       group = {
         key,
+        conceptoId: effectiveConceptId,
         producto: prodDisplay,
         unidad: unitInfo.canonicalUnit,
         totalCosechado: 0,
@@ -375,6 +396,7 @@ export function buildWarehouseSummaries(
 
     summaries.push({
       key: group.key,
+      conceptoId: group.conceptoId,
       producto: group.producto,
       unidad: group.unidad,
       totalCosechado: group.totalCosechado,

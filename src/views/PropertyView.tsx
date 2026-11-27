@@ -37,6 +37,7 @@ import {
 import { VisualIcon } from '../components/VisualIcon';
 import {
   VisualExpenseItemPicker,
+  VisualIncomeItemPicker,
   VisualLotPicker,
 } from '../components/VisualEntityPicker';
 import {
@@ -92,6 +93,11 @@ import {
 import { ConfirmationModal } from '../components/ConfirmationModal';
 import { isDirectPropertyIncome } from '../services/financialSummary';
 import { countAvailableHarvests } from '../services/harvestAvailability';
+import {
+  getActiveAgriculturalProductConcepts,
+  getHarvestProductDisplay,
+  resolveAgriculturalConcept,
+} from '../services/agriculturalProducts';
 import { resolveJobDisplay } from '../services/jobDisplay';
 import {
   CurrencyConversionAnchor,
@@ -252,8 +258,8 @@ export const PropertyView: React.FC<Props> = ({
   const [harvFecha, setHarvFecha] = useState(() => getBoliviaTodayIso());
   const [harvCampanaId, setHarvCampanaId] = useState(activeCampaign?.id || '');
   const [harvLotId, setHarvLotId] = useState('');
+  const [harvConceptoId, setHarvConceptoId] = useState('');
   const [harvProducto, setHarvProducto] = useState('');
-  const [harvUseCustomProduct, setHarvUseCustomProduct] = useState(false);
   const [harvToneladas, setHarvToneladas] = useState('');
   const [harvUnidad, setHarvUnidad] = useState('toneladas');
   const [harvObs, setHarvObs] = useState('');
@@ -288,6 +294,7 @@ export const PropertyView: React.FC<Props> = ({
   const [editHarvFecha, setEditHarvFecha] = useState('');
   const [editHarvCampanaId, setEditHarvCampanaId] = useState('');
   const [editHarvLotId, setEditHarvLotId] = useState('');
+  const [editHarvConceptoId, setEditHarvConceptoId] = useState('');
   const [editHarvProducto, setEditHarvProducto] = useState('');
   const [editHarvToneladas, setEditHarvToneladas] = useState('');
   const [editHarvUnidad, setEditHarvUnidad] = useState('t');
@@ -321,8 +328,8 @@ export const PropertyView: React.FC<Props> = ({
     setHarvFecha(getBoliviaTodayIso());
     setHarvCampanaId(activeCampaign?.id || '');
     setHarvLotId('');
+    setHarvConceptoId('');
     setHarvProducto('');
-    setHarvUseCustomProduct(false);
     setHarvToneladas('');
     setHarvUnidad('toneladas');
     setHarvObs('');
@@ -539,11 +546,9 @@ export const PropertyView: React.FC<Props> = ({
         item.tipo === 'gasto_propiedad')
   );
 
-  const propertyIncomeItems = (itemsConfig || []).filter(
-    (item) =>
-      item.activo !== false &&
-      ((item.modulo === 'PROPIEDAD' && item.clase === 'INGRESO') ||
-        item.tipo === 'ingreso_propiedad')
+  const agriculturalProductConcepts = useMemo(
+    () => getActiveAgriculturalProductConcepts(itemsConfig),
+    [itemsConfig]
   );
 
   const propertyExpenseDirects = propertyExpenses.filter((e) => !e.esTrabajoPropio && !e.trabajoId);
@@ -578,27 +583,35 @@ export const PropertyView: React.FC<Props> = ({
 
   // Build combined chronological records for Historial (legacy direct incomes, direct expenses, and all physical harvests — no duplicates)
   const allMovements: MovementItem[] = [
-    ...propertyIncomeDirects.map((i) => ({
-      id: i.id,
-      tipo: 'ingreso' as const,
-      fecha: i.fecha,
-      loteId: i.loteId,
-      loteNombre: i.loteNombre || (lots.find((l) => l.id === i.loteId)?.nombre) || bi('Lote', 'Lot'),
-      titulo: formatConcept(i.concepto),
-      detalle: `${i.cantidad} ${translateUnit(i.unidad || '')} ${i.precio ? `@ ${i.moneda === 'USD' ? 'USD' : 'Bs'} ${i.precio}` : ''} ${i.observacion ? `• ${i.observacion}` : ''}`.trim(),
-      monto: i.total,
-      moneda: (i.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
-      tipoCambio: i.tipoCambio || i.tc || exchangeRate?.tasaBobPerUsd,
-      cantidad: i.cantidad,
-      unidad: i.unidad,
-      precioUnitario: i.precio,
-      observacion: i.observacion,
-      icono:
-        i.icono ||
-        (itemsConfig.find((it) => it.nombre.toLowerCase() === i.concepto.toLowerCase())?.icono) ||
-        getIconDefinition(i.concepto, 'ingreso').id,
-      creadoEn: i.creadoEn,
-    })),
+    ...propertyIncomeDirects.map((i) => {
+      const incDisplay = getHarvestProductDisplay(
+        { conceptoId: i.itemId, producto: i.concepto },
+        itemsConfig
+      );
+      const resolvedTitle = incDisplay.concept ? incDisplay.displayName : formatConcept(i.concepto);
+      return {
+        id: i.id,
+        tipo: 'ingreso' as const,
+        fecha: i.fecha,
+        loteId: i.loteId,
+        loteNombre: i.loteNombre || (lots.find((l) => l.id === i.loteId)?.nombre) || bi('Lote', 'Lot'),
+        titulo: resolvedTitle,
+        detalle: `${i.cantidad} ${translateUnit(i.unidad || '')} ${i.precio ? `@ ${i.moneda === 'USD' ? 'USD' : 'Bs'} ${i.precio}` : ''} ${i.observacion ? `• ${i.observacion}` : ''}`.trim(),
+        monto: i.total,
+        moneda: (i.moneda === 'USD' ? 'USD' : 'BOB') as Currency,
+        tipoCambio: i.tipoCambio || i.tc || exchangeRate?.tasaBobPerUsd,
+        cantidad: i.cantidad,
+        unidad: i.unidad,
+        precioUnitario: i.precio,
+        observacion: i.observacion,
+        icono:
+          incDisplay.iconId ||
+          i.icono ||
+          (itemsConfig.find((it) => it.nombre.toLowerCase() === i.concepto.toLowerCase())?.icono) ||
+          getIconDefinition(resolvedTitle, 'ingreso').id,
+        creadoEn: i.creadoEn,
+      };
+    }),
     ...propertyExpenseDirects.map((e) => ({
       id: e.id,
       tipo: 'gasto_directo' as const,
@@ -621,13 +634,15 @@ export const PropertyView: React.FC<Props> = ({
     })),
     ...historyHarvestsSource.map((h) => {
       const unitStr = h.unidad || 't';
+      const harvDisplay = getHarvestProductDisplay(h, itemsConfig);
+      const displayProd = harvDisplay.displayName || formatConcept(h.producto);
       return {
         id: `harv_${h.id}`,
         tipo: 'cosecha' as const,
         fecha: h.fecha,
         loteId: h.loteId,
         loteNombre: h.loteNombre || (lots.find((l) => String(l.id) === String(h.loteId))?.nombre) || bi('Lote', 'Lot'),
-        titulo: `${bi('Cosecha', 'Harvest')} ${formatConcept(h.producto)}`,
+        titulo: `${bi('Cosecha', 'Harvest')} ${displayProd}`,
         detalle: `${formatHarvestQty(h.toneladas, unitStr)}${h.observacion ? ` • ${h.observacion}` : ''}`,
         monto: 0,
         moneda: 'USD' as Currency,
@@ -635,8 +650,8 @@ export const PropertyView: React.FC<Props> = ({
         unidad: unitStr,
         observacion: h.observacion,
         icono:
-          (itemsConfig.find((it) => it.nombre.trim().toLowerCase() === String(h.producto || '').trim().toLowerCase())?.icono) ||
-          getIconDefinition(h.producto, 'ingreso').id ||
+          harvDisplay.iconId ||
+          getIconDefinition(displayProd, 'ingreso').id ||
           'granos',
         cosechaRecord: h,
         creadoEn: h.creadoEn,
@@ -924,8 +939,18 @@ export const PropertyView: React.FC<Props> = ({
       setErrorMsg(bi('Selecciona el lote donde se realizó la cosecha.', 'Select the lot where the harvest took place.'));
       return;
     }
-    if (!harvProducto.trim()) {
-      setErrorMsg(bi('Ingresa el producto o concepto cosechado.', 'Enter the harvested product or concept.'));
+    const selectedConcept = agriculturalProductConcepts.find(
+      (c) =>
+        (harvConceptoId && String(c.id) === String(harvConceptoId)) ||
+        (!harvConceptoId && c.nombre.trim().toLowerCase() === harvProducto.trim().toLowerCase())
+    );
+    if (!selectedConcept) {
+      setErrorMsg(
+        bi(
+          'Selecciona un producto agrícola activo registrado en Administración → Conceptos → Ingresos.',
+          'Select an active agricultural product registered in Administration → Concepts → Income.'
+        )
+      );
       return;
     }
     const qtyNum = parseDecimalNumber(harvToneladas);
@@ -942,7 +967,8 @@ export const PropertyView: React.FC<Props> = ({
         fecha: harvFecha,
         campanaId: targetCampId,
         loteId: harvLotId,
-        producto: harvProducto.trim(),
+        conceptoId: selectedConcept.id,
+        producto: selectedConcept.nombre,
         toneladas: qtyNum,
         unidad: unitToSave,
         observacion: harvObs.trim(),
@@ -959,8 +985,8 @@ export const PropertyView: React.FC<Props> = ({
       const displayUnit = createdHarvest?.unidad || 't';
       setSuccessMsg(
         bi(
-          `Cosecha registrada en almacén (${qtyStr} ${displayUnit} de ${harvProducto.trim()}).`,
-          `Harvest added to warehouse (${qtyStr} ${displayUnit} of ${harvProducto.trim()}).`
+          `Cosecha registrada en almacén (${qtyStr} ${displayUnit} de ${selectedConcept.nombre}).`,
+          `Harvest added to warehouse (${qtyStr} ${displayUnit} of ${selectedConcept.nombre}).`
         )
       );
       resetNewHarvestForm();
@@ -1118,11 +1144,13 @@ export const PropertyView: React.FC<Props> = ({
       setErrorMsg(bi('Solo el Administrador puede editar cosechas registradas.', 'Only the Administrator can edit recorded harvests.'));
       return;
     }
+    const resolvedEditConcept = resolveAgriculturalConcept(harvest, itemsConfig);
     setEditingHarvest(harvest);
     setEditHarvFecha(toBoliviaIsoDate(harvest.fecha, true));
     setEditHarvCampanaId(harvest.campanaId || activeCampaign?.id || '');
     setEditHarvLotId(harvest.loteId || '');
-    setEditHarvProducto(harvest.producto || '');
+    setEditHarvConceptoId(resolvedEditConcept.concept?.id || harvest.conceptoId || '');
+    setEditHarvProducto(resolvedEditConcept.concept?.nombre || harvest.producto || '');
     setEditHarvToneladas(harvest.toneladas > 0 ? String(Number(harvest.toneladas.toFixed(4))) : '');
     setEditHarvUnidad(harvest.unidad || 't');
     setEditHarvObs(harvest.observacion || '');
@@ -1186,6 +1214,7 @@ export const PropertyView: React.FC<Props> = ({
         fecha: editHarvFecha,
         campanaId: hasAsignaciones ? editingHarvest.campanaId : editHarvCampanaId,
         loteId: hasAsignaciones ? editingHarvest.loteId : editHarvLotId,
+        conceptoId: hasAsignaciones ? editingHarvest.conceptoId : editHarvConceptoId || undefined,
         producto: hasAsignaciones ? editingHarvest.producto : editHarvProducto.trim(),
         unidad: hasAsignaciones ? (editingHarvest.unidad || 't') : (editHarvUnidad || 't'),
         toneladas: tonsNum,
@@ -1727,19 +1756,6 @@ export const PropertyView: React.FC<Props> = ({
       {/* FORMULARIO: REGISTRAR COSECHA (PRODUCCIÓN)                   */}
       {/* ============================================================ */}
       {currentScreen === 'ingreso' && (() => {
-        const productOptions = Array.from(
-          new Set([
-            'Soya',
-            'Maíz',
-            'Sorgo',
-            'Trigo',
-            'Girasol',
-            ...propertyIncomeItems.map((it) => it.nombre),
-          ])
-        );
-        const isProductInList = productOptions.some(
-          (p) => p.toLowerCase() === harvProducto.trim().toLowerCase()
-        );
         const standardHarvestUnits = [
           { val: 'toneladas', label: bi('Toneladas (t)', 'Tons (t)') },
           { val: 'quintales', label: bi('Quintales (qq)', 'Quintals (qq)') },
@@ -1779,57 +1795,25 @@ export const PropertyView: React.FC<Props> = ({
                 required
               />
 
-              {/* Producto o concepto */}
-              {!harvUseCustomProduct ? (
-                <AppSelect
-                  label={bi('Producto o concepto', 'Product or concept')}
-                  required
-                  icon={<Wheat className="h-[17px] w-[17px]" />}
-                  value={isProductInList ? harvProducto : ''}
-                  onChange={(e) => {
-                    if (e.target.value === '__otro__') {
-                      setHarvUseCustomProduct(true);
-                      setHarvProducto('');
-                    } else {
-                      setHarvProducto(e.target.value);
-                    }
-                  }}
-                >
-                  <option value="">{bi('Seleccionar producto', 'Select product')}</option>
-                  {productOptions.map((prod) => (
-                    <option key={prod} value={prod}>
-                      {prod}
-                    </option>
-                  ))}
-                  <option value="__otro__">{bi('Otro producto...', 'Other product...')}</option>
-                </AppSelect>
-              ) : (
-                <div>
-                  <div className="flex items-center justify-between gap-2 mb-1">
-                    <label className="text-[13px] font-semibold text-[#26352D]">
-                      {bi('Producto o concepto', 'Product or concept')} <span className="text-[#C44545]">*</span>
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setHarvUseCustomProduct(false);
-                        setHarvProducto('');
-                      }}
-                      className="text-[11px] font-semibold text-[#24875B] hover:underline cursor-pointer"
-                    >
-                      {bi('Elegir de la lista', 'Choose from list')}
-                    </button>
-                  </div>
-                  <input
-                    type="text"
-                    required
-                    value={harvProducto}
-                    onChange={(e) => setHarvProducto(e.target.value)}
-                    placeholder={bi('Escribir nombre del producto', 'Enter product name')}
-                    className={`${FORM_INPUT_CLASS} font-semibold`}
-                  />
-                </div>
-              )}
+              {/* Producto o concepto (vinculado a Administración -> Conceptos -> Ingresos de Propiedad) */}
+              <VisualIncomeItemPicker
+                items={agriculturalProductConcepts}
+                selectedId={harvConceptoId}
+                selectedName={harvProducto}
+                allowDefaultFallback={false}
+                required
+                label={bi('Producto o concepto', 'Product or concept')}
+                placeholder={bi('Seleccionar producto agrícola', 'Select agricultural product')}
+                modalTitle={bi('Seleccionar producto agrícola', 'Select agricultural product')}
+                emptyMessage={bi(
+                  'No hay productos agrícolas activos configurados.',
+                  'No active agricultural products configured.'
+                )}
+                onSelect={(item) => {
+                  setHarvConceptoId(String(item.id || '').trim());
+                  setHarvProducto(item.nombre);
+                }}
+              />
 
               {/* Fecha */}
               <div>
@@ -2686,26 +2670,30 @@ export const PropertyView: React.FC<Props> = ({
             })),
           ...historyHarvestsSource
             .filter((h) => String(h.loteId) === String(activeLotScreenId))
-            .map((h) => ({
-              id: `harv_${h.id}`,
-              tipo: 'cosecha' as const,
-              fecha: h.fecha,
-              loteId: h.loteId,
-              loteNombre: h.loteNombre || activeLotForScreen?.nombre || bi('Lote', 'Lot'),
-              titulo: `${bi('Cosecha', 'Harvest')} ${formatConcept(h.producto)}`,
-              detalle: `${formatHarvestQty(h.toneladas, h.unidad)}${h.observacion ? ` • ${h.observacion}` : ''}`,
-              monto: 0,
-              moneda: 'USD' as Currency,
-              cantidad: h.toneladas,
-              unidad: h.unidad || 't',
-              observacion: h.observacion,
-              icono:
-                (itemsConfig.find((it) => it.nombre.trim().toLowerCase() === String(h.producto || '').trim().toLowerCase())?.icono) ||
-                getIconDefinition(h.producto, 'ingreso').id ||
-                'granos',
-              cosechaRecord: h,
-              creadoEn: h.creadoEn,
-            })),
+            .map((h) => {
+              const hInfo = getHarvestProductDisplay(h, itemsConfig);
+              const displayProd = hInfo.displayName || formatConcept(h.producto);
+              return {
+                id: `harv_${h.id}`,
+                tipo: 'cosecha' as const,
+                fecha: h.fecha,
+                loteId: h.loteId,
+                loteNombre: h.loteNombre || activeLotForScreen?.nombre || bi('Lote', 'Lot'),
+                titulo: `${bi('Cosecha', 'Harvest')} ${displayProd}`,
+                detalle: `${formatHarvestQty(h.toneladas, h.unidad)}${h.observacion ? ` • ${h.observacion}` : ''}`,
+                monto: 0,
+                moneda: 'USD' as Currency,
+                cantidad: h.toneladas,
+                unidad: h.unidad || 't',
+                observacion: h.observacion,
+                icono:
+                  hInfo.iconId ||
+                  getIconDefinition(displayProd, 'ingreso').id ||
+                  'granos',
+                cosechaRecord: h,
+                creadoEn: h.creadoEn,
+              };
+            }),
         ]
           .filter((item) => {
             if (!q) return true;
@@ -4235,21 +4223,22 @@ export const PropertyView: React.FC<Props> = ({
                   ))}
                 </AppSelect>
 
-                {/* Producto */}
-                <div>
-                  <label className={FORM_LABEL_CLASS}>
-                    {bi('Producto', 'Product')} <span className="text-[#C44545]">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    disabled={hasAsignaciones}
-                    value={editHarvProducto}
-                    onChange={(e) => setEditHarvProducto(e.target.value)}
-                    placeholder={bi('Soya, Maíz...', 'Soy, Corn...')}
-                    className={`${FORM_INPUT_CLASS} font-semibold`}
-                  />
-                </div>
+                {/* Producto (vinculado a Administración -> Conceptos -> Ingresos de Propiedad) */}
+                <VisualIncomeItemPicker
+                  items={agriculturalProductConcepts}
+                  selectedId={editHarvConceptoId}
+                  selectedName={editHarvProducto}
+                  allowDefaultFallback={false}
+                  required
+                  disabled={hasAsignaciones}
+                  label={bi('Producto o concepto', 'Product or concept')}
+                  placeholder={bi('Seleccionar producto agrícola', 'Select agricultural product')}
+                  modalTitle={bi('Seleccionar producto agrícola', 'Select agricultural product')}
+                  onSelect={(item) => {
+                    setEditHarvConceptoId(String(item.id || '').trim());
+                    setEditHarvProducto(item.nombre);
+                  }}
+                />
 
                 {/* Cantidad y Unidad */}
                 <div className="grid grid-cols-2 gap-2.5 items-end">

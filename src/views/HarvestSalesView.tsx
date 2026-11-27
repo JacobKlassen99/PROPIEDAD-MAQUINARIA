@@ -37,6 +37,7 @@ import {
   computeProportionalDistribution,
   formatSaleOriginSummary,
 } from '../services/harvestAvailability';
+import { getHarvestProductDisplay } from '../services/agriculturalProducts';
 import { addDaysToIso, round2 } from '../services/interestEngine';
 import { useI18n } from '../services/i18n';
 import { VisualIcon } from '../components/VisualIcon';
@@ -228,17 +229,23 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
     return map;
   }, [campaigns]);
 
+  const resolveProductDisplay = useCallback(
+    (record: { conceptoId?: string; producto?: string }) =>
+      getHarvestProductDisplay(record, itemsConfig),
+    [itemsConfig]
+  );
+
   const resolveProductIcon = useCallback(
-    (producto: string): string => {
-      const norm = String(producto || '').trim().toLowerCase();
-      const match = itemsConfig.find(
-        (it) => String(it.nombre || '').trim().toLowerCase() === norm && it.icono
-      );
-      if (match?.icono) return match.icono;
-      if (norm.includes('soya') || norm.includes('soja') || norm.includes('soy')) return 'bean';
-      if (norm.includes('maiz') || norm.includes('maíz') || norm.includes('corn')) return 'wheat';
-      if (norm.includes('sorgo') || norm.includes('trigo') || norm.includes('girasol')) return 'sprout';
-      return 'wheat';
+    (producto: string, conceptoId?: string): string => {
+      const info = getHarvestProductDisplay({ conceptoId, producto }, itemsConfig);
+      if (info.iconId) return info.iconId;
+      const norm = String(info.displayName || producto || '').trim().toLowerCase();
+      if (norm.includes('soya') || norm.includes('soja') || norm.includes('soy')) return 'soya';
+      if (norm.includes('maiz') || norm.includes('maíz') || norm.includes('corn')) return 'maiz';
+      if (norm.includes('sorgo')) return 'sorgo';
+      if (norm.includes('trigo') || norm.includes('wheat')) return 'trigo';
+      if (norm.includes('girasol') || norm.includes('sunflower')) return 'girasol';
+      return 'granos';
     },
     [itemsConfig]
   );
@@ -275,8 +282,8 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
 
   // General Harvest Warehouse across ALL lots & ALL campaigns (prior-campaign stock stays available until sold)
   const warehouseSummaries = useMemo<WarehouseProductSummary[]>(
-    () => buildWarehouseSummaries(harvests, sales, lots, campaigns),
-    [harvests, sales, lots, campaigns]
+    () => buildWarehouseSummaries(harvests, sales, lots, campaigns, undefined, itemsConfig),
+    [harvests, sales, lots, campaigns, itemsConfig]
   );
 
   const warehouseProductsWithStock = useMemo(
@@ -315,9 +322,10 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
         .map((d) => d.loteNombre || lotMap.get(d.loteId)?.nombre || '')
         .join(' ');
       const campName = s.campanaNombre || campaignMap.get(s.campanaId)?.nombre || '';
-      return `${buyer} ${s.producto} ${origin} ${lotNames} ${campName} ${s.fecha}`.toLowerCase().includes(q);
+      const prodDisplay = resolveProductDisplay(s).displayName || s.producto;
+      return `${buyer} ${prodDisplay} ${s.producto} ${origin} ${lotNames} ${campName} ${s.fecha}`.toLowerCase().includes(q);
     });
-  }, [activeSales, search, statusFilter, resolveBuyerDisplay, lang, lotMap, campaignMap]);
+  }, [activeSales, search, statusFilter, resolveBuyerDisplay, resolveProductDisplay, lang, lotMap, campaignMap]);
 
   const selectedSale = useMemo(
     () => sales.find((s) => s.id === selectedSaleId) || null,
@@ -402,12 +410,15 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
         : isoDate
       : todayIso();
 
+    const resolvedEditProd = resolveProductDisplay(sale);
     setReturnScreenAfterForm('detail');
     setEditingSale(sale);
     setWasAlreadyComplete(alreadyComplete);
     setTermsAutoLoaded(alreadyComplete);
     setTermsBaseDate(originalBase);
-    setFormProductKey(buildWarehouseProductKey(sale.producto, sale.unidad));
+    setFormProductKey(
+      buildWarehouseProductKey(sale.producto, sale.unidad, resolvedEditProd.conceptoId || undefined)
+    );
     setFormDate(isoDate);
     setFormCantidad(String(sale.cantidad));
     setFormClienteId(sale.clienteId || '');
@@ -651,6 +662,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
         });
       } else {
         saved = await backend.createHarvestSale({
+          conceptoId: selectedFormProduct!.conceptoId,
           producto: selectedFormProduct!.producto,
           unidad: selectedFormProduct!.unidad,
           fecha: formDate,
@@ -750,7 +762,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
               <ArrowLeft className="h-4 w-4" />
             </button>
             <div className="h-9 w-9 rounded-xl bg-[#EAF5EE] text-[#1D704B] flex items-center justify-center shrink-0">
-              <VisualIcon iconId={resolveProductIcon(prod.producto)} nameHint={prod.producto} category="ingreso" size={22} />
+              <VisualIcon iconId={resolveProductIcon(prod.producto, prod.conceptoId)} nameHint={prod.producto} category="ingreso" size={22} />
             </div>
             <div className="min-w-0">
               <h2 className="text-base font-bold text-[#26352D] truncate leading-snug">{prod.producto}</h2>
@@ -858,8 +870,9 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
   // -----------------------------------------------------------
   if (screen === 'form') {
     const editQtyDelta = editingSale ? round2(parsedFormQty - editingSale.cantidad) : 0;
+    const editProdDisplay = editingSale ? resolveProductDisplay(editingSale).displayName || editingSale.producto : '';
     const headerSub = editingSale
-      ? `${editingSale.producto} · ${formatSaleOriginSummary(editingSale, lang) || editingSale.loteNombre || ''}`
+      ? `${editProdDisplay} · ${formatSaleOriginSummary(editingSale, lang) || editingSale.loteNombre || ''}`
       : selectedFormProduct
       ? `${selectedFormProduct.producto} · ${fmtNum(selectedFormProduct.totalDisponible)} ${selectedFormProduct.unidad} ${bi('disponibles', 'available')}`
       : '';
@@ -944,7 +957,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
             <div className="rounded-xl bg-[#F5F8F6] border border-[#E2E7E3] px-3 py-2.5 flex items-center justify-between gap-2 text-xs">
               <div className="min-w-0">
                 <span className="text-[#64746B] block">{bi('Producto', 'Product')}</span>
-                <span className="font-bold text-[#1F2D25]">{editingSale.producto}</span>
+                <span className="font-bold text-[#1F2D25]">{editProdDisplay}</span>
               </div>
               <div className="text-right shrink-0">
                 <span className="text-[#64746B] block">{bi('Máx. vendible', 'Max sellable')}</span>
@@ -1368,10 +1381,17 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
         <div className="rounded-2xl border border-[#E2E7E3] bg-white p-4 space-y-3">
           <div className="flex items-center gap-3 pb-3 border-b border-[#EEF2EF]">
             <div className="h-10 w-10 rounded-xl bg-[#EAF5EE] text-[#1D704B] flex items-center justify-center shrink-0">
-              <VisualIcon iconId={resolveProductIcon(selectedSale.producto)} nameHint={selectedSale.producto} category="ingreso" size={24} />
+              <VisualIcon
+                iconId={resolveProductIcon(selectedSale.producto, selectedSale.conceptoId)}
+                nameHint={resolveProductDisplay(selectedSale).displayName || selectedSale.producto}
+                category="ingreso"
+                size={24}
+              />
             </div>
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-bold text-[#1F2D25] truncate">{selectedSale.producto}</p>
+              <p className="text-sm font-bold text-[#1F2D25] truncate">
+                {resolveProductDisplay(selectedSale).displayName || selectedSale.producto}
+              </p>
               <p className="text-xs text-[#64746B] truncate">
                 {[originSummary, campName, fmtDate(selectedSale.fecha)].filter(Boolean).join(' · ')}
               </p>
@@ -1764,7 +1784,9 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
                   sale.loteNombre ||
                   lotMap.get(sale.loteId)?.nombre ||
                   '';
-                const subtitleParts = [sale.producto, origin, fmtDate(sale.fecha)].filter(Boolean);
+                const saleProdInfo = resolveProductDisplay(sale);
+                const saleProdName = saleProdInfo.displayName || sale.producto;
+                const subtitleParts = [saleProdName, origin, fmtDate(sale.fecha)].filter(Boolean);
 
                 return (
                   <button
@@ -1779,7 +1801,12 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
                   >
                     <div className="flex items-center gap-2.5 min-w-0 flex-1">
                       <div className="h-9 w-9 rounded-xl bg-[#EAF5EE] text-[#1D704B] flex items-center justify-center shrink-0">
-                        <VisualIcon iconId={resolveProductIcon(sale.producto)} nameHint={sale.producto} category="ingreso" size={22} />
+                        <VisualIcon
+                          iconId={resolveProductIcon(sale.producto, sale.conceptoId)}
+                          nameHint={saleProdName}
+                          category="ingreso"
+                          size={22}
+                        />
                       </div>
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-bold text-[#1F2D25] truncate">{buyer}</p>
@@ -1841,7 +1868,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
                   >
                     <div className="flex items-center gap-2.5 min-w-0 flex-1">
                       <div className="h-10 w-10 rounded-xl bg-[#EAF5EE] text-[#1D704B] flex items-center justify-center shrink-0">
-                        <VisualIcon iconId={resolveProductIcon(prod.producto)} nameHint={prod.producto} category="ingreso" size={24} />
+                        <VisualIcon iconId={resolveProductIcon(prod.producto, prod.conceptoId)} nameHint={prod.producto} category="ingreso" size={24} />
                       </div>
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-bold text-[#1F2D25] truncate leading-snug">{prod.producto}</p>

@@ -284,6 +284,7 @@ export interface HarvestRecord {
   campanaNombre?: string;
   loteId: string;
   loteNombre?: string;
+  conceptoId?: string;
   producto: string;
   unidad?: string;
   toneladas: number;
@@ -303,6 +304,7 @@ export interface HarvestSaleDistribution {
   loteNombre?: string;
   campanaId: string;
   campanaNombre?: string;
+  conceptoId?: string;
   producto: string;
   unidad: string;
   toneladasAsignadas: number;
@@ -333,6 +335,7 @@ export interface WarehouseLotBreakdown {
 
 export interface WarehouseProductSummary {
   key: string;
+  conceptoId?: string;
   producto: string;
   unidad: string;
   totalCosechado: number;
@@ -415,6 +418,7 @@ export interface HarvestSale {
   loteId: string;
   loteNombre?: string;
   origenResumen?: string;
+  conceptoId?: string;
   producto: string;
   cantidad: number;
   unidad: string;

@@ -43,9 +43,13 @@ import {
   SlidersHorizontal,
   UserRound,
   Image as ImageIcon,
+  LayoutGrid,
+  Sprout,
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/ConfirmationModal';
 import { NumericInput } from '../components/NumericInput';
+import { SlidingSelector } from '../components/SlidingSelector';
+import { VisualModulePicker } from '../components/VisualEntityPicker';
 import {
   Campaign,
   Machine,
@@ -2449,6 +2453,7 @@ export const AdminView: React.FC<Props> = ({
           jobs={jobs}
           expenses={expenses}
           incomes={incomes}
+          itemsConfig={itemsConfig}
           currency={currency}
           exchangeRate={exchangeRate}
           initialScreen="general"
@@ -5113,6 +5118,7 @@ export const AdminView: React.FC<Props> = ({
                   setItemsSubView('INGRESO');
                   setItemClassTab('INGRESO');
                   setFilterModulo('TODOS');
+                  setItemStatusFilter('activos');
                   setItemSearch('');
                 }}
                 className="w-full flex items-center justify-between px-4 py-4 hover:bg-[#F5F7F4] active:bg-[#EDF1EC] transition cursor-pointer text-left min-h-[70px]"
@@ -5142,6 +5148,7 @@ export const AdminView: React.FC<Props> = ({
                   setItemsSubView('GASTO');
                   setItemClassTab('GASTO');
                   setFilterModulo('TODOS');
+                  setItemStatusFilter('activos');
                   setItemSearch('');
                 }}
                 className="w-full flex items-center justify-between px-4 py-4 hover:bg-[#F5F7F4] active:bg-[#EDF1EC] transition cursor-pointer text-left min-h-[70px]"
@@ -5169,12 +5176,42 @@ export const AdminView: React.FC<Props> = ({
         }
 
         const isGastoSub = itemsSubView === 'GASTO';
+        const visibleCountText = `${filteredItems.length} ${
+          filteredItems.length === 1
+            ? bi('concepto', 'concept')
+            : bi('conceptos', 'concepts')
+        }`;
 
         return (
-          <div className="space-y-3">
-            {/* Una sola línea compacta: Cantidad | Lupa | Módulo | Estado */}
+          <div className="space-y-2.5">
+            {/* Fila 2: Selector deslizante continuo de módulo (Todos | Maquinarias | Propiedad) */}
+            <SlidingSelector<'TODOS' | 'MAQUINARIAS' | 'PROPIEDAD'>
+              value={filterModulo}
+              onChange={(val) => setFilterModulo(val)}
+              accent={isGastoSub ? 'red' : 'green'}
+              ariaLabel={bi('Filtrar conceptos por módulo', 'Filter concepts by module')}
+              options={[
+                {
+                  value: 'TODOS',
+                  label: bi('Todos', 'All'),
+                  icon: <LayoutGrid className="w-3.5 h-3.5" />,
+                },
+                {
+                  value: 'MAQUINARIAS',
+                  label: t('nav.machinery'),
+                  icon: <Tractor className="w-3.5 h-3.5" />,
+                },
+                {
+                  value: 'PROPIEDAD',
+                  label: t('nav.property'),
+                  icon: <Sprout className="w-3.5 h-3.5" />,
+                },
+              ]}
+            />
+
+            {/* Fila 3: Contador izquierda | Lupa de búsqueda | Selector de estado (Activos, Inactivos, Todos) */}
             <ListToolbar
-              countLabel={`${filteredItems.length}`}
+              countLabel={visibleCountText}
               searchValue={itemSearch}
               onSearchChange={setItemSearch}
               searchPlaceholder={
@@ -5183,33 +5220,18 @@ export const AdminView: React.FC<Props> = ({
                   : bi('Buscar concepto de ingreso...', 'Search income concept...')
               }
               filters={
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <CompactFilter
-                    value={filterModulo}
-                    onChange={(val) =>
-                      setFilterModulo(val as 'TODOS' | 'MAQUINARIAS' | 'PROPIEDAD')
-                    }
-                    ariaLabel={bi('Filtrar módulo', 'Filter module')}
-                    options={[
-                      { value: 'TODOS', label: bi('Todos', 'All') },
-                      { value: 'MAQUINARIAS', label: t('nav.machinery') },
-                      { value: 'PROPIEDAD', label: t('nav.property') },
-                    ]}
-                  />
-
-                  <CompactFilter
-                    value={itemStatusFilter}
-                    onChange={(val) =>
-                      setItemStatusFilter(val as 'activos' | 'desactivados' | 'todos')
-                    }
-                    ariaLabel={bi('Filtrar estado', 'Filter status')}
-                    options={[
-                      { value: 'activos', label: bi('Activos', 'Active') },
-                      { value: 'desactivados', label: bi('Desactivados', 'Inactive') },
-                      { value: 'todos', label: bi('Todos', 'All') },
-                    ]}
-                  />
-                </div>
+                <CompactFilter
+                  value={itemStatusFilter}
+                  onChange={(val) =>
+                    setItemStatusFilter(val as 'activos' | 'desactivados' | 'todos')
+                  }
+                  ariaLabel={bi('Filtrar estado', 'Filter status')}
+                  options={[
+                    { value: 'activos', label: bi('Activos', 'Active') },
+                    { value: 'desactivados', label: bi('Inactivos', 'Inactive') },
+                    { value: 'todos', label: bi('Todos', 'All') },
+                  ]}
+                />
               }
             />
 
@@ -5261,7 +5283,7 @@ export const AdminView: React.FC<Props> = ({
                       <span>
                         {itemMod === 'MAQUINARIAS' ? t('nav.machinery') : t('nav.property')}
                         {!isGastoSub && item.unidad ? ` · ${item.unidad}` : ''}
-                        {!isActivo ? bi(' · Desactivado', ' · Inactive') : ''}
+                        {!isActivo ? bi(' · Inactivo', ' · Inactive') : ''}
                       </span>
                     }
                   />
@@ -5312,22 +5334,15 @@ export const AdminView: React.FC<Props> = ({
                   />
                 </div>
 
-                {/* Módulo obligatorio */}
+                {/* Módulo obligatorio (selector visual personalizado con iconos) */}
                 <div>
-                  <AppSelect
+                  <VisualModulePicker
                     label={bi('Módulo', 'Module')}
                     required
-                    icon={<Tag className="h-[17px] w-[17px]" />}
                     value={itemModulo}
                     disabled={Boolean(editingItemId && editingItemHasHistory)}
-                    onChange={(e) =>
-                      setItemModulo(e.target.value as '' | 'MAQUINARIAS' | 'PROPIEDAD')
-                    }
-                  >
-                    <option value="">{bi('Seleccionar módulo', 'Select module')}</option>
-                    <option value="MAQUINARIAS">{t('nav.machinery')}</option>
-                    <option value="PROPIEDAD">{t('nav.property')}</option>
-                  </AppSelect>
+                    onChange={(val) => setItemModulo(val)}
+                  />
                   {editingItemId && editingItemHasHistory && (
                     <p className="text-[11px] text-[#5E6D64] mt-1">
                       {bi(

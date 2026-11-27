@@ -3311,6 +3311,7 @@ export function normalizeHarvestRecord(raw: any): HarvestRecord {
     campanaNombre: src.campanaNombre || src.campana ? String(src.campanaNombre || src.campana) : undefined,
     loteId: String(src.loteId || src.lote_id || ''),
     loteNombre: src.loteNombre || src.lote ? String(src.loteNombre || src.lote) : undefined,
+    conceptoId: String(src.conceptoId || src.itemId || src.concepto_id || '').trim() || undefined,
     producto: String(src.producto || src.cultivo || src.concepto || 'Cosecha').trim(),
     unidad: normalizeHarvestUnit(src.unidad ?? src.Unidad ?? 't').canonicalUnit,
     toneladas,
@@ -3346,6 +3347,7 @@ export async function createHarvest(params: {
   fecha: string;
   campanaId: string;
   loteId: string;
+  conceptoId?: string;
   producto: string;
   toneladas: number;
   unidad?: string;
@@ -3358,7 +3360,7 @@ export async function createHarvest(params: {
   if (!params.producto || !params.producto.trim()) throw new Error('Indica el producto cosechado.');
   if (tons <= 0) throw new Error('La cantidad cosechada debe ser mayor a 0.');
 
-  const payload = {
+  const payload: Record<string, any> = {
     fecha: params.fecha,
     campanaId: params.campanaId,
     loteId: params.loteId,
@@ -3368,6 +3370,9 @@ export async function createHarvest(params: {
     observacion: (params.observacion || '').trim(),
     idempotencyKey: params.idempotencyKey || `harv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
   };
+  if (params.conceptoId && params.conceptoId.trim()) {
+    payload.conceptoId = params.conceptoId.trim();
+  }
 
   const res = await callGAS<any>('harvest.create', payload, false);
   invalidateBackendDomains(['harvest.', 'harvestSale.', 'report.']);
@@ -3384,6 +3389,7 @@ export async function updateHarvest(
     fecha?: string;
     campanaId?: string;
     loteId?: string;
+    conceptoId?: string;
     producto?: string;
     toneladas?: number;
     unidad?: string;
@@ -3397,6 +3403,7 @@ export async function updateHarvest(
   if (params.fecha !== undefined) payload.fecha = params.fecha;
   if (params.campanaId !== undefined) payload.campanaId = params.campanaId;
   if (params.loteId !== undefined) payload.loteId = params.loteId;
+  if (params.conceptoId !== undefined) payload.conceptoId = params.conceptoId.trim();
   if (params.producto !== undefined) {
     const prod = params.producto.trim();
     if (!prod) throw new Error('Indica el producto cosechado.');
@@ -3820,6 +3827,7 @@ export function normalizeHarvestSaleDistribution(raw: any): HarvestSaleDistribut
     loteNombre: String(raw?.loteNombre || raw?.lote || '').trim() || undefined,
     campanaId: String(raw?.campanaId || raw?.campana_id || '').trim(),
     campanaNombre: String(raw?.campanaNombre || raw?.campana || '').trim() || undefined,
+    conceptoId: String(raw?.conceptoId || raw?.itemId || '').trim() || undefined,
     producto: String(raw?.producto || '').trim(),
     unidad: normalizeHarvestUnit(raw?.unidad || 't').canonicalUnit,
     toneladasAsignadas: parseDecimalNumber(raw?.toneladasAsignadas ?? raw?.toneladas ?? raw?.cantidad ?? 0),
@@ -3885,6 +3893,7 @@ export function normalizeHarvestSale(raw: any): HarvestSale {
     loteId: String(raw?.loteId || '').trim(),
     loteNombre: String(raw?.loteNombre || raw?.lote || '').trim(),
     origenResumen: String(raw?.origenResumen || '').trim() || undefined,
+    conceptoId: String(raw?.conceptoId || raw?.itemId || '').trim() || undefined,
     producto: String(raw?.producto || '').trim(),
     cantidad,
     unidad: normalizeHarvestUnit(raw?.unidad || 't').canonicalUnit,
@@ -3987,6 +3996,7 @@ export async function getHarvestSales(
 }
 
 export async function createHarvestSale(params: {
+  conceptoId?: string;
   producto?: string;
   unidad?: string;
   cosechaId?: string;
@@ -4021,6 +4031,9 @@ export async function createHarvestSale(params: {
     observacion: (params.observacion || '').trim(),
     idempotencyKey: params.idempotencyKey || `hs_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
   };
+  if (params.conceptoId && params.conceptoId.trim()) {
+    payload.conceptoId = params.conceptoId.trim();
+  }
   if (params.producto && params.producto.trim()) {
     payload.producto = params.producto.trim();
   }

@@ -182,6 +182,7 @@ function dispatch_(p) {
     'harvestSale.update',
     'harvestSale.cancel',
     'harvest.price',
+    'harvest.migrateProductLinks',
     'ar.summary',
     'ar.customer',
     'ar.debt.assignCustomer',
@@ -262,6 +263,9 @@ function handleAction_(action, payload, userSession, adminSession) {
       return cosechasEliminar_2026(payload, userSession);
     case 'harvest.price': return cosechasAsignarPrecio_2026(payload, userSession);
     case 'harvest.pending': return cosechasListar_2026({soloPendientes:true});
+    case 'harvest.migrateProductLinks':
+      if (!adminSession) return {ok:false,error:'Solo el administrador puede ejecutar la migración.'};
+      return migrarVinculacionProductosCosecha2026();
     case 'expense.allocate': return gastosDistribuirLotes_2026(payload, userSession);
     case 'expense.allocations': return gastosDistribucionesListar_2026(payload);
 
@@ -4587,10 +4591,10 @@ function probarCobros_2026() {
 // Cantidades en toneladas. Ingresos se reconocen al asignar precio.
 // =============================================================
 const COSECHA_CAMPOS_2026=['id','fecha','campanaId','loteId','producto','toneladas','observacion','creadoPor','creadoEn'];
-const COSECHA_EXTRA_COLS_2026=['unidad','actualizadoEn','idempotencyKey'];
+const COSECHA_EXTRA_COLS_2026=['unidad','conceptoId','actualizadoEn','idempotencyKey'];
 const PRECIO_CAMPOS_2026=['id','cosechaId','fecha','campanaId','toneladas','precioUsdTon','importeUsd','tc','movimientoId','creadoPor','creadoEn'];
 const DISTRIBUCIONES_VENTA_CAMPOS_2026=[
-  'id','ventaId','cosechaId','loteId','campanaId','producto','unidad',
+  'id','ventaId','cosechaId','loteId','campanaId','conceptoId','producto','unidad',
   'toneladasAsignadas','participacionPct','precioUnitario','importeAsignado',
   'moneda','tcHistorico','movimientoId','anulada','creadoEn','actualizadoEn'
 ];
@@ -4602,6 +4606,148 @@ function almacenNormalizarProducto_2026(producto) {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/\s+/g, ' ');
+}
+
+function almacenStripPrefijosProducto_2026(normalized) {
+  let s = String(normalized || '').trim();
+  const patterns = [
+    /^venta\s+de\s+cosecha\s+de\s+/,
+    /^venta\s+de\s+cosecha\s+/,
+    /^venta\s+cosecha\s+de\s+/,
+    /^venta\s+cosecha\s+/,
+    /^venta\s+de\s+/,
+    /^venta\s+/,
+    /^cosecha\s+de\s+/,
+    /^cosecha\s+/,
+    /^harvest\s+sale\s+of\s+/,
+    /^harvest\s+sale\s+/,
+    /^sale\s+of\s+/,
+    /^harvest\s+of\s+/,
+    /^harvest\s+/
+  ];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < patterns.length; i++) {
+      if (patterns[i].test(s)) {
+        s = s.replace(patterns[i], '').trim();
+        changed = true;
+      }
+    }
+  }
+  return s;
+}
+
+function almacenEsConceptoIngresoPropiedad_2026(item) {
+  if (!item) return false;
+  const mod = String(item.modulo || '').trim().toUpperCase();
+  const cls = String(item.clase || '').trim().toUpperCase();
+  const tipo = String(item.tipo || '').trim().toLowerCase();
+  if (mod === 'MAQUINARIAS' || tipo.indexOf('maquinaria') !== -1) return false;
+  if (cls && cls.indexOf('ING') === -1) return false;
+  const isProp = mod === 'PROPIEDAD' || tipo === 'ingreso_propiedad' || (!mod && tipo.indexOf('propiedad') !== -1);
+  const isIng = cls.indexOf('ING') !== -1 || tipo === 'ingreso_propiedad';
+  return isProp && isIng;
+}
+
+function almacenEsConceptoNoAgricola_2026(item) {
+  if (!item) return true;
+  if (String(item.id || '').trim().toUpperCase() === 'SYS_INTERES_MORA') return true;
+  const norm = almacenNormalizarProducto_2026(item.nombre);
+  if (!norm) return true;
+  const patterns = [
+    /\b(interes|intereses|mora|moratorio|interest|late\s+payment|recargo)\b/,
+    /\b(servicio|servicios|alquiler|arriendo|arrendamiento|renta|maquinaria|flete|transporte|comision|honorario|service|services|rental|lease|freight)\b/,
+    /\b(otros?\s+ingresos?|other\s+income|subsidio|reembolso|devolucion|ajuste|indemnizacion|seguro|prestamo|credito|bono|aporte|dividendo|multa|varios)\b/
+  ];
+  for (let i = 0; i < patterns.length; i++) {
+    if (patterns[i].test(norm)) return true;
+  }
+  return false;
+}
+
+function almacenEsConceptoProductoAgricola_2026(item) {
+  return almacenEsConceptoIngresoPropiedad_2026(item) && !almacenEsConceptoNoAgricola_2026(item);
+}
+
+function almacenObtenerItems_2026(itemsOpt) {
+  if (Array.isArray(itemsOpt)) return itemsOpt;
+  return findSheetIgnoreCase_('Items') ? getSheetDataAsObjects('Items') : [];
+}
+
+function almacenResolverConceptoIngreso_2026(conceptoId, productoNombre, itemsOpt) {
+  const list = almacenObtenerItems_2026(itemsOpt);
+  if (!list || list.length === 0) {
+    return { item: null, conceptoId: '', conceptoNombre: '', status: 'unmatched', candidates: [] };
+  }
+
+  const targetId = String(conceptoId || '').trim();
+  if (targetId) {
+    const byId = list.find(function (it) { return it && String(it.id || '').trim() === targetId; });
+    if (byId) {
+      return {
+        item: byId,
+        conceptoId: String(byId.id || '').trim(),
+        conceptoNombre: String(byId.nombre || '').trim(),
+        status: 'by_id',
+        candidates: [byId]
+      };
+    }
+  }
+
+  const normProd = almacenNormalizarProducto_2026(productoNombre);
+  if (!normProd) {
+    return { item: null, conceptoId: '', conceptoNombre: '', status: 'unmatched', candidates: [] };
+  }
+
+  const propIncomes = list.filter(function (it) { return almacenEsConceptoIngresoPropiedad_2026(it); });
+  const exactMatches = propIncomes.filter(function (it) { return almacenNormalizarProducto_2026(it.nombre) === normProd; });
+  if (exactMatches.length === 1) {
+    return {
+      item: exactMatches[0],
+      conceptoId: String(exactMatches[0].id || '').trim(),
+      conceptoNombre: String(exactMatches[0].nombre || '').trim(),
+      status: 'exact_name',
+      candidates: exactMatches
+    };
+  }
+  if (exactMatches.length > 1) {
+    const activeExact = exactMatches.filter(function (it) { return finParseBool_2026(it.activo, true); });
+    if (activeExact.length === 1) {
+      return {
+        item: activeExact[0],
+        conceptoId: String(activeExact[0].id || '').trim(),
+        conceptoNombre: String(activeExact[0].nombre || '').trim(),
+        status: 'exact_name',
+        candidates: activeExact
+      };
+    }
+    return { item: null, conceptoId: '', conceptoNombre: '', status: 'ambiguous', candidates: exactMatches };
+  }
+
+  const targetCore = almacenStripPrefijosProducto_2026(normProd);
+  if (!targetCore) {
+    return { item: null, conceptoId: '', conceptoNombre: '', status: 'unmatched', candidates: [] };
+  }
+
+  const agriConcepts = propIncomes.filter(function (it) { return !almacenEsConceptoNoAgricola_2026(it); });
+  const coreMatches = agriConcepts.filter(function (it) {
+    return almacenStripPrefijosProducto_2026(almacenNormalizarProducto_2026(it.nombre)) === targetCore;
+  });
+  if (coreMatches.length === 1) {
+    return {
+      item: coreMatches[0],
+      conceptoId: String(coreMatches[0].id || '').trim(),
+      conceptoNombre: String(coreMatches[0].nombre || '').trim(),
+      status: 'legacy_unambiguous',
+      candidates: coreMatches
+    };
+  }
+  if (coreMatches.length > 1) {
+    return { item: null, conceptoId: '', conceptoNombre: '', status: 'ambiguous', candidates: coreMatches };
+  }
+
+  return { item: null, conceptoId: '', conceptoNombre: '', status: 'unmatched', candidates: [] };
 }
 
 function almacenNormalizarUnidad_2026(rawUnit) {
@@ -4760,6 +4906,7 @@ function almacenCalcularDistribucionProporcional_2026(cosechasDisponibles, canti
       cosechaId: String(h.id),
       loteId: String(h.loteId || ''),
       campanaId: String(h.campanaId || ''),
+      conceptoId: String(h.conceptoId || '').trim(),
       producto: String(h.producto || ''),
       unidad: h.unidad,
       toneladasAsignadas: allocUnits[i] / SCALE
@@ -4856,7 +5003,7 @@ function cosechasResumen_2026(){
     const toneladas=almacenRedondearTons6_2026(Number(c.toneladas)||0);
     const asignadas=almacenRedondearTons6_2026(committedByHarvest[cid]||0);
     const pendiente=Math.max(0,almacenRedondearTons6_2026(toneladas-asignadas));
-    return {...c,unidad:unitInfo.canonicalUnit,toneladas,asignadas,pendiente,asignaciones,distribuciones:distsByHarvest[cid]||[]};
+    return {...c,conceptoId:String(c.conceptoId||'').trim(),unidad:unitInfo.canonicalUnit,toneladas,asignadas,pendiente,asignaciones,distribuciones:distsByHarvest[cid]||[]};
   });
 }
 function cosechasListar_2026(p){
@@ -4881,8 +5028,32 @@ function cosechasCrear_2026(p,userSession){
       if(dup) return {ok:true,result:dup,cosecha:dup};
     }
 
-    const producto=String(p.producto||'').trim();
+    const reqConceptoId=String((p&&(p.conceptoId||p.itemId))||'').trim();
+    const allItems=almacenObtenerItems_2026();
+    let conceptoId='';
+    let producto=String(p.producto||'').trim();
+
+    if(reqConceptoId){
+      const byId=allItems.find(function(it){ return it && String(it.id||'').trim()===reqConceptoId; });
+      if(!byId) throw new Error('El concepto de producto agrícola seleccionado no existe.');
+      if(!almacenEsConceptoProductoAgricola_2026(byId)){
+        throw new Error('El concepto seleccionado no corresponde a un producto agrícola de Propiedad.');
+      }
+      if(!finParseBool_2026(byId.activo,true)){
+        throw new Error('El concepto de producto agrícola seleccionado está inactivo.');
+      }
+      conceptoId=String(byId.id).trim();
+      producto=String(byId.nombre||producto).trim();
+    } else {
+      if(!producto) throw new Error('Indique el producto o concepto cosechado.');
+      const resolved=almacenResolverConceptoIngreso_2026('',producto,allItems);
+      if(resolved.item && almacenEsConceptoProductoAgricola_2026(resolved.item)){
+        conceptoId=resolved.conceptoId;
+        producto=resolved.conceptoNombre||producto;
+      }
+    }
     if(!producto) throw new Error('Indique el producto o concepto cosechado.');
+
     const rawQty=cosechasNumero_2026(p.toneladas!==undefined?p.toneladas:p.cantidad,'Cantidad cosechada');
     const unitInfo=almacenNormalizarUnidad_2026(p.unidad);
     const canonicalQty=almacenRedondearQty4_2026(rawQty*unitInfo.factor);
@@ -4896,6 +5067,7 @@ function cosechasCrear_2026(p,userSession){
       fecha:fecha,
       campanaId:String(p.campanaId),
       loteId:String(p.loteId),
+      conceptoId:conceptoId,
       producto:producto,
       unidad:unitInfo.canonicalUnit,
       toneladas:canonicalQty,
@@ -4940,15 +5112,43 @@ function cosechasActualizar_2026(p, userSession) {
     const oldFecha = normalizeConfigDateStr_(oldRow[m['fecha']]) || String(oldRow[m['fecha']] || '');
     const oldCampanaId = String(oldRow[m['campanaid']] || '').trim();
     const oldLoteId = String(oldRow[m['loteid']] || '').trim();
+    const oldConceptoId = m['conceptoid'] !== undefined ? String(oldRow[m['conceptoid']] || '').trim() : '';
     const oldProducto = String(oldRow[m['producto']] || '').trim();
     const oldUnidad = almacenNormalizarUnidad_2026(m['unidad'] !== undefined ? oldRow[m['unidad']] : 't').canonicalUnit;
     const oldToneladas = Number(oldRow[m['toneladas']]) || 0;
     const oldObservacion = String(oldRow[m['observacion']] || '');
 
+    const allItems = almacenObtenerItems_2026();
     const finalFecha = validarFechaIso_2026(data.fecha, oldFecha);
     const finalCampanaId = data.campanaId !== undefined ? String(data.campanaId).trim() : oldCampanaId;
     const finalLoteId = data.loteId !== undefined ? String(data.loteId).trim() : oldLoteId;
-    const finalProducto = data.producto !== undefined ? String(data.producto).trim() : oldProducto;
+
+    let finalConceptoId = oldConceptoId;
+    let finalProducto = data.producto !== undefined ? String(data.producto).trim() : oldProducto;
+    const reqCid = data.conceptoId !== undefined ? String(data.conceptoId || '').trim() : (data.itemId !== undefined ? String(data.itemId || '').trim() : null);
+
+    if (reqCid !== null) {
+      if (reqCid) {
+        const byId = allItems.find(function (it) { return it && String(it.id || '').trim() === reqCid; });
+        if (!byId) throw new Error('El concepto de producto agrícola seleccionado no existe.');
+        if (!almacenEsConceptoProductoAgricola_2026(byId)) {
+          throw new Error('El concepto seleccionado no corresponde a un producto agrícola de Propiedad.');
+        }
+        if (reqCid !== oldConceptoId && !finParseBool_2026(byId.activo, true)) {
+          throw new Error('El concepto de producto agrícola seleccionado está inactivo.');
+        }
+        finalConceptoId = String(byId.id).trim();
+        finalProducto = String(byId.nombre || finalProducto).trim();
+      } else {
+        finalConceptoId = '';
+      }
+    } else if (!finalConceptoId && finalProducto) {
+      const resEdit = almacenResolverConceptoIngreso_2026('', finalProducto, allItems);
+      if (resEdit.item && almacenEsConceptoProductoAgricola_2026(resEdit.item)) {
+        finalConceptoId = resEdit.conceptoId;
+      }
+    }
+
     const unitInfo = data.unidad !== undefined ? almacenNormalizarUnidad_2026(data.unidad) : almacenNormalizarUnidad_2026(oldUnidad);
     const finalUnidad = unitInfo.canonicalUnit;
     const qtyProvided = data.toneladas !== undefined ? data.toneladas : data.cantidad;
@@ -4977,7 +5177,13 @@ function cosechasActualizar_2026(p, userSession) {
     const distribuciones = summaryItem ? (summaryItem.distribuciones || []) : [];
     const hasLinkedSales = asignadas > 0.0001 || distribuciones.length > 0 || asignaciones.length > 0;
 
-    if (hasLinkedSales && (finalCampanaId !== oldCampanaId || finalLoteId !== oldLoteId || almacenNormalizarProducto_2026(finalProducto) !== almacenNormalizarProducto_2026(oldProducto) || finalUnidad !== oldUnidad)) {
+    const oldResolvedCid = almacenResolverConceptoIngreso_2026(oldConceptoId, oldProducto, allItems).conceptoId;
+    const newResolvedCid = almacenResolverConceptoIngreso_2026(finalConceptoId, finalProducto, allItems).conceptoId;
+    const productChanged = (oldResolvedCid || newResolvedCid)
+      ? (oldResolvedCid !== newResolvedCid)
+      : (almacenNormalizarProducto_2026(finalProducto) !== almacenNormalizarProducto_2026(oldProducto));
+
+    if (hasLinkedSales && (finalCampanaId !== oldCampanaId || finalLoteId !== oldLoteId || productChanged || finalUnidad !== oldUnidad)) {
       throw new Error('Una cosecha con ventas o cantidades comprometidas no puede cambiar de campaña, lote, producto o unidad.');
     }
 
@@ -4995,6 +5201,7 @@ function cosechasActualizar_2026(p, userSession) {
     newRow[m['producto']] = finalProducto;
     newRow[m['toneladas']] = finalToneladas;
     newRow[m['observacion']] = finalObservacion;
+    if (m['conceptoid'] !== undefined) newRow[m['conceptoid']] = finalConceptoId;
     if (m['unidad'] !== undefined) newRow[m['unidad']] = finalUnidad;
     if (m['actualizadoen'] !== undefined) newRow[m['actualizadoen']] = ahora;
 
@@ -5018,6 +5225,7 @@ function cosechasActualizar_2026(p, userSession) {
         fecha: finalFecha,
         campanaId: finalCampanaId,
         loteId: finalLoteId,
+        conceptoId: finalConceptoId,
         producto: finalProducto,
         unidad: finalUnidad,
         toneladas: finalToneladas,
@@ -5098,6 +5306,7 @@ function cosechasAsignarPrecio_2026(p, userSession) {
   const precio = req.precioUnitario !== undefined ? req.precioUnitario : req.precioUsdTon;
   const res = ventasCosechaCrear_2026({
     cosechaId: req.cosechaId,
+    conceptoId: req.conceptoId || req.itemId || '',
     fecha: req.fecha,
     campanaId: req.campanaId,
     cantidad: cantidad,
@@ -5311,7 +5520,7 @@ function probarUsuarios2026_(){console.log(JSON.stringify(usuariosListar2026_())
 // =============================================================
 
 const VENTA_COSECHA_EXTRA_COLS_2026 = [
-  'loteId', 'producto', 'unidad', 'clienteId', 'clienteNombre', 'compradorPendiente',
+  'loteId', 'conceptoId', 'producto', 'unidad', 'clienteId', 'clienteNombre', 'compradorPendiente',
   'precioUnitario', 'moneda', 'importeTotal', 'precioPendiente',
   'plazoDias', 'fechaVencimiento', 'fechaCompletado', 'aplicarInteres', 'tasaInteresMensual',
   'observacion', 'estado', 'anulada', 'actualizadoEn', 'idempotencyKey',
@@ -6020,6 +6229,7 @@ function ventasCosechaMapearDistribucion_2026(raw, lotesMap, campanasMap) {
     loteNombre: (lotesMap[loteId] && lotesMap[loteId].nombre) || '',
     campanaId: campanaId,
     campanaNombre: (campanasMap[campanaId] && campanasMap[campanaId].nombre) || '',
+    conceptoId: String(raw.conceptoId || '').trim(),
     producto: String(raw.producto || '').trim(),
     unidad: almacenNormalizarUnidad_2026(raw.unidad).canonicalUnit,
     toneladasAsignadas: almacenRedondearQty4_2026(Number(raw.toneladasAsignadas || 0)),
@@ -6044,6 +6254,7 @@ function ventasCosechaMapear_2026(raw, cosechasMap, lotesMap, campanasMap, clien
   const singleDist = activeDists.length === 1 ? activeDists[0] : null;
   const loteId = String(raw.loteId || (singleDist ? singleDist.loteId : '') || cosecha.loteId || '').trim();
   const campanaId = String(raw.campanaId || (singleDist ? singleDist.campanaId : '') || cosecha.campanaId || '').trim();
+  const conceptoId = String(raw.conceptoId || (activeDists[0] ? activeDists[0].conceptoId : '') || cosecha.conceptoId || '').trim();
   const producto = String(raw.producto || (activeDists[0] ? activeDists[0].producto : '') || cosecha.producto || '').trim();
   const clienteId = String(raw.clienteId || '').trim();
   const clienteObj = clienteId ? clientesMap[clienteId] : null;
@@ -6096,6 +6307,7 @@ function ventasCosechaMapear_2026(raw, cosechasMap, lotesMap, campanasMap, clien
     loteId: loteId,
     loteNombre: loteNombre,
     origenResumen: origenResumen,
+    conceptoId: conceptoId,
     producto: producto,
     cantidad: cantidad,
     toneladas: cantidad,
@@ -6285,33 +6497,49 @@ function ventasCosechaCrear_2026(p, userSession) {
     const fecha = validarFechaIso_2026(p.fecha, getBoliviaTodayStr_());
 
     const allHarvests = cosechasResumen_2026();
+    const allItems = almacenObtenerItems_2026();
     const cosechaIdReq = String((p && p.cosechaId) || '').trim();
+    const conceptoIdReq = String((p && (p.conceptoId || p.itemId)) || '').trim();
     const productoReq = String((p && p.producto) || '').trim();
     const unidadReq = almacenNormalizarUnidad_2026(p && p.unidad).canonicalUnit;
 
     let eligibleHarvests = [];
     let productoFinal = '';
+    let conceptoIdFinal = '';
+    let conceptoNombreFinal = '';
     let unidadFinal = unidadReq;
 
-    if (productoReq && !cosechaIdReq) {
-      // Modo almacén general por producto: distribuir proporcionalmente entre todas las cosechas con stock del mismo producto y unidad
+    if ((conceptoIdReq || productoReq) && !cosechaIdReq) {
+      // Modo almacén general por producto: distribuir proporcionalmente entre todas las cosechas con stock del mismo concepto/producto y unidad
+      const targetRes = almacenResolverConceptoIngreso_2026(conceptoIdReq, productoReq, allItems);
+      const targetConceptId = targetRes.conceptoId;
       const targetProdKey = almacenNormalizarProducto_2026(productoReq);
+
       eligibleHarvests = allHarvests.filter(function (h) {
-        return almacenNormalizarProducto_2026(h.producto) === targetProdKey &&
-          almacenNormalizarUnidad_2026(h.unidad).canonicalUnit === unidadReq &&
-          Number(h.pendiente || 0) > 0.0001;
+        if (almacenNormalizarUnidad_2026(h.unidad).canonicalUnit !== unidadReq) return false;
+        if (Number(h.pendiente || 0) <= 0.0001) return false;
+        const hRes = almacenResolverConceptoIngreso_2026(h.conceptoId, h.producto, allItems);
+        if (targetConceptId) {
+          return hRes.conceptoId === targetConceptId;
+        }
+        return !hRes.conceptoId && almacenNormalizarProducto_2026(h.producto) === targetProdKey;
       });
       if (eligibleHarvests.length === 0) {
-        throw new Error('No existe stock disponible en almacén para "' + productoReq + '" (' + unidadReq + ').');
+        throw new Error('No existe stock disponible en almacén para "' + (targetRes.conceptoNombre || productoReq || conceptoIdReq) + '" (' + unidadReq + ').');
       }
-      productoFinal = String(eligibleHarvests[0].producto || productoReq).trim();
+      conceptoIdFinal = targetConceptId;
+      conceptoNombreFinal = targetRes.conceptoNombre || '';
+      productoFinal = conceptoNombreFinal || String(eligibleHarvests[0].producto || productoReq).trim();
       unidadFinal = unidadReq;
     } else if (cosechaIdReq) {
       // Compatibilidad directa para venta de una cosecha específica
       const single = allHarvests.find(function (c) { return String(c.id) === cosechaIdReq; });
       if (!single) throw new Error('Cosecha no encontrada.');
       eligibleHarvests = [single];
-      productoFinal = String(single.producto || productoReq || 'Cosecha').trim();
+      const singleRes = almacenResolverConceptoIngreso_2026(conceptoIdReq || single.conceptoId, single.producto || productoReq, allItems);
+      conceptoIdFinal = singleRes.conceptoId || String(single.conceptoId || '').trim();
+      conceptoNombreFinal = singleRes.conceptoNombre || '';
+      productoFinal = conceptoNombreFinal || String(single.producto || productoReq || 'Cosecha').trim();
       unidadFinal = almacenNormalizarUnidad_2026(single.unidad).canonicalUnit;
     } else {
       throw new Error('Debe seleccionar un producto del almacén para registrar la venta.');
@@ -6380,6 +6608,7 @@ function ventasCosechaCrear_2026(p, userSession) {
       creadoPor: usuario,
       creadoEn: ahora,
       loteId: headerLoteId,
+      conceptoId: conceptoIdFinal,
       producto: productoFinal,
       unidad: unidadFinal,
       clienteId: clienteId,
@@ -6412,8 +6641,8 @@ function ventasCosechaCrear_2026(p, userSession) {
       finAppendObj_2026(shAsig, headerRowObj);
       headerRowIdx = shAsig.getLastRow();
 
-      // Paso 2: Persistir cada distribución histórica y su ingreso por lote/campaña de origen (sin duplicar)
-      const desc = 'Venta de ' + productoFinal + (clienteNombre ? ' (' + clienteNombre + ')' : '');
+      // Paso 2: Persistir cada distribución histórica y su ingreso por lote/campaña de origen (vinculado al concepto real de Ingresos)
+      const desc = conceptoNombreFinal || productoFinal;
       for (let i = 0; i < plannedDists.length; i++) {
         const d = plannedDists[i];
         let movId = '';
@@ -6426,7 +6655,7 @@ function ventasCosechaCrear_2026(p, userSession) {
             campanaId: String(d.campanaId || headerCampanaId),
             modulo: 'PROPIEDAD',
             clase: 'INGRESO',
-            itemId: '',
+            itemId: conceptoIdFinal,
             descripcion: desc,
             loteId: String(d.loteId || ''),
             maquinaId: '',
@@ -6450,6 +6679,7 @@ function ventasCosechaCrear_2026(p, userSession) {
           cosechaId: d.cosechaId,
           loteId: d.loteId,
           campanaId: d.campanaId,
+          conceptoId: conceptoIdFinal || d.conceptoId || '',
           producto: productoFinal,
           unidad: unidadFinal,
           toneladasAsignadas: d.toneladasAsignadas,
@@ -6553,6 +6783,7 @@ function ventasCosechaActualizar_2026(p, userSession) {
         cosechaId: String(r[dMap['cosechaid']] || '').trim(),
         loteId: String(r[dMap['loteid']] || '').trim(),
         campanaId: String(r[dMap['campanaid']] || '').trim(),
+        conceptoId: dMap['conceptoid'] !== undefined ? String(r[dMap['conceptoid']] || '').trim() : '',
         producto: String(r[dMap['producto']] || '').trim(),
         unidad: almacenNormalizarUnidad_2026(r[dMap['unidad']]).canonicalUnit,
         toneladasAsignadas: almacenRedondearQty4_2026(Number(r[dMap['toneladasasignadas']] || 0)),
@@ -6561,11 +6792,21 @@ function ventasCosechaActualizar_2026(p, userSession) {
       });
     }
 
+    const allItems = almacenObtenerItems_2026();
     const oldCosechaId = String(oldRow[m['cosechaid']] || '').trim();
     const oldCant = almacenRedondearQty4_2026(Number(oldRow[m['toneladas']]) || 0);
     const oldFecha = finToIsoDate_2026(oldRow[m['fecha']]) || getBoliviaTodayStr_();
     const oldCampanaId = String(oldRow[m['campanaid']] || '');
-    const oldProducto = String(oldRow[m['producto']] || (cosechasMap[oldCosechaId] && cosechasMap[oldCosechaId].producto) || '').trim();
+    const oldConceptoIdRaw = String(
+      (m['conceptoid'] !== undefined ? oldRow[m['conceptoid']] : '') ||
+      (existingDistRecords[0] ? existingDistRecords[0].conceptoId : '') ||
+      (cosechasMap[oldCosechaId] && cosechasMap[oldCosechaId].conceptoId) ||
+      ''
+    ).trim();
+    const oldProductoRaw = String(oldRow[m['producto']] || (cosechasMap[oldCosechaId] && cosechasMap[oldCosechaId].producto) || '').trim();
+    const saleConceptRes = almacenResolverConceptoIngreso_2026(oldConceptoIdRaw, oldProductoRaw, allItems);
+    const resolvedConceptoId = saleConceptRes.conceptoId || oldConceptoIdRaw;
+    const oldProducto = saleConceptRes.conceptoNombre || oldProductoRaw;
     const oldUnidad = almacenNormalizarUnidad_2026(oldRow[m['unidad']] || (cosechasMap[oldCosechaId] && cosechasMap[oldCosechaId].unidad) || 't').canonicalUnit;
     const oldClienteId = String(oldRow[m['clienteid']] || '').trim();
     const oldClienteNombre = String(oldRow[m['clientenombre']] || '').trim();
@@ -6586,6 +6827,7 @@ function ventasCosechaActualizar_2026(p, userSession) {
         cosechaId: oldCosechaId,
         loteId: String(oldRow[m['loteid']] || legacyC.loteId || '').trim(),
         campanaId: String(oldCampanaId || legacyC.campanaId || '').trim(),
+        conceptoId: resolvedConceptoId,
         producto: oldProducto,
         unidad: oldUnidad,
         toneladasAsignadas: oldCant,
@@ -6689,12 +6931,16 @@ function ventasCosechaActualizar_2026(p, userSession) {
         }
       }
     } else {
-      // Aumento de cantidad: distribuir únicamente el delta sobre stock disponible actual del producto
-      const targetProdKey = almacenNormalizarProducto_2026(oldProducto);
+      // Aumento de cantidad: distribuir únicamente el delta sobre stock disponible actual del producto/concepto
+      const targetProdKey = almacenNormalizarProducto_2026(oldProductoRaw || oldProducto);
       const availForDelta = allHarvests.filter(function (h) {
-        return almacenNormalizarProducto_2026(h.producto) === targetProdKey &&
-          almacenNormalizarUnidad_2026(h.unidad).canonicalUnit === oldUnidad &&
-          Number(h.pendiente || 0) > 0.0001;
+        if (almacenNormalizarUnidad_2026(h.unidad).canonicalUnit !== oldUnidad) return false;
+        if (Number(h.pendiente || 0) <= 0.0001) return false;
+        const hRes = almacenResolverConceptoIngreso_2026(h.conceptoId, h.producto, allItems);
+        if (resolvedConceptoId) {
+          return hRes.conceptoId === resolvedConceptoId;
+        }
+        return !hRes.conceptoId && almacenNormalizarProducto_2026(h.producto) === targetProdKey;
       });
       const deltaDists = almacenCalcularDistribucionProporcional_2026(
         availForDelta,
@@ -6721,6 +6967,7 @@ function ventasCosechaActualizar_2026(p, userSession) {
             cosechaId: dd.cosechaId,
             loteId: dd.loteId,
             campanaId: dd.campanaId,
+            conceptoId: resolvedConceptoId,
             producto: oldProducto,
             unidad: oldUnidad,
             toneladasAsignadas: dd.toneladasAsignadas,
@@ -6769,10 +7016,10 @@ function ventasCosechaActualizar_2026(p, userSession) {
     getSheetDataAsObjects('Lotes').forEach(function (l) { lotesMap[String(l.id)] = l; });
     const origenResumen = almacenResumenOrigen_2026(finalDists, lotesMap, '');
 
-    // Conciliación atómica de Movimientos para esta venta (1 ingreso por distribución con lote y campaña de origen, sin duplicados)
+    // Conciliación atómica de Movimientos para esta venta (1 ingreso por distribución con concepto real, lote y campaña de origen, sin duplicados)
     const movSheet = findSheetIgnoreCase_('Movimientos');
     let firstMovId = '';
-    const desc = 'Venta de ' + oldProducto + (finalClienteNombre ? ' (' + finalClienteNombre + ')' : '');
+    const desc = oldProducto;
 
     if (movSheet) {
       const mVals = movSheet.getDataRange().getValues();
@@ -6798,6 +7045,7 @@ function ventasCosechaActualizar_2026(p, userSession) {
             const mRow = mVals[rowNum - 1].slice();
             mRow[mMap['fecha']] = finalFecha;
             mRow[mMap['campanaid']] = String(d.campanaId || oldCampanaId);
+            if (mMap['itemid'] !== undefined) mRow[mMap['itemid']] = resolvedConceptoId;
             mRow[mMap['descripcion']] = desc;
             mRow[mMap['loteid']] = String(d.loteId || '');
             mRow[mMap['cantidad']] = d.toneladasAsignadas;
@@ -6821,7 +7069,7 @@ function ventasCosechaActualizar_2026(p, userSession) {
               campanaId: String(d.campanaId || oldCampanaId),
               modulo: 'PROPIEDAD',
               clase: 'INGRESO',
-              itemId: '',
+              itemId: resolvedConceptoId,
               descripcion: desc,
               loteId: String(d.loteId || ''),
               maquinaId: '',
@@ -6858,6 +7106,7 @@ function ventasCosechaActualizar_2026(p, userSession) {
       if (d.rowIdx && d.rowIdx >= 2) {
         keptDistRowMap[d.rowIdx] = true;
         const dRow = distValsAll[d.rowIdx - 1].slice();
+        if (dMap['conceptoid'] !== undefined) dRow[dMap['conceptoid']] = resolvedConceptoId;
         dRow[dMap['toneladasasignadas']] = d.toneladasAsignadas;
         dRow[dMap['participacionpct']] = d.participacionPct;
         dRow[dMap['preciounitario']] = d.precioUnitario;
@@ -6875,6 +7124,7 @@ function ventasCosechaActualizar_2026(p, userSession) {
           cosechaId: d.cosechaId,
           loteId: d.loteId,
           campanaId: d.campanaId,
+          conceptoId: resolvedConceptoId,
           producto: oldProducto,
           unidad: oldUnidad,
           toneladasAsignadas: d.toneladasAsignadas,
@@ -6902,6 +7152,8 @@ function ventasCosechaActualizar_2026(p, userSession) {
     const newRow = oldRow.slice();
     newRow[m['fecha']] = finalFecha;
     newRow[m['toneladas']] = finalCant;
+    if (m['conceptoid'] !== undefined) newRow[m['conceptoid']] = resolvedConceptoId;
+    if (m['producto'] !== undefined && oldProducto) newRow[m['producto']] = oldProducto;
     newRow[m['preciousdton']] = finalMoneda === 'USD' ? finalPrecio : (finalPrecioPend ? 0 : redondear2_2026(finalPrecio / finalTc));
     newRow[m['importeusd']] = finalImporteUsd;
     newRow[m['tc']] = finalTc;
@@ -9053,5 +9305,245 @@ function migrarAlmacenCosechas2026() {
     lock.releaseLock();
   }
 }
+
+/**
+ * Migración segura, no destructiva e idempotente para vincular cosechas,
+ * distribuciones, ventas de cosecha e ingresos contables históricos con sus
+ * conceptos registrados en Administración -> Conceptos -> Ingresos (PROPIEDAD).
+ *
+ * - Solo vincula cuando la coincidencia es inequívoca (por conceptoId o nombre único).
+ * - NUNCA fusiona registros ambiguos ni altera cantidades, importes, fechas, TC ni lotes.
+ * - Devuelve un reporte detallado de actualizados, ambiguos y sin coincidencia.
+ */
+function migrarVinculacionProductosCosecha2026() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const report = {
+      ok: true,
+      updatedCosechas: 0,
+      updatedDistribuciones: 0,
+      updatedVentas: 0,
+      updatedMovimientos: 0,
+      ambiguousRecords: [],
+      unmatchedRecords: []
+    };
+
+    const allItems = almacenObtenerItems_2026();
+    const itemById = {};
+    allItems.forEach(function (it) {
+      if (it && it.id) itemById[String(it.id).trim()] = it;
+    });
+
+    const cosechaConceptById = {};
+
+    // 1. Cosechas: asegurar columna conceptoId y vincular inequívocos
+    const shCos = findSheetIgnoreCase_('Cosechas');
+    if (shCos && shCos.getLastRow() >= 2) {
+      asegurarColumnasOpcionales_2026(shCos, COSECHA_EXTRA_COLS_2026);
+      const vals = shCos.getDataRange().getValues();
+      const map = getHeaderIndexMap_(vals[0]);
+      for (let i = 1; i < vals.length; i++) {
+        const cid = String(vals[i][map['id']] || '').trim();
+        if (!cid) continue;
+        const existingConceptId = map['conceptoid'] !== undefined ? String(vals[i][map['conceptoid']] || '').trim() : '';
+        const prodName = String(vals[i][map['producto']] || '').trim();
+        if (existingConceptId && itemById[existingConceptId]) {
+          cosechaConceptById[cid] = existingConceptId;
+          continue;
+        }
+        const res = almacenResolverConceptoIngreso_2026(existingConceptId, prodName, allItems);
+        if (res.item && almacenEsConceptoProductoAgricola_2026(res.item)) {
+          shCos.getRange(i + 1, map['conceptoid'] + 1).setValue(res.conceptoId);
+          cosechaConceptById[cid] = res.conceptoId;
+          report.updatedCosechas += 1;
+        } else if (res.status === 'ambiguous') {
+          report.ambiguousRecords.push({
+            entidad: 'Cosechas',
+            id: cid,
+            producto: prodName,
+            candidatos: (res.candidates || []).map(function (c) { return String(c.nombre || c.id); })
+          });
+        } else if (prodName) {
+          report.unmatchedRecords.push({
+            entidad: 'Cosechas',
+            id: cid,
+            producto: prodName
+          });
+        }
+      }
+    }
+
+    // 2. DistribucionesVenta: asegurar conceptoId y vincular inequívocos
+    const distConceptByVenta = {};
+    const shDist = findSheetIgnoreCase_('DistribucionesVenta');
+    if (shDist && shDist.getLastRow() >= 2) {
+      asegurarColumnasOpcionales_2026(shDist, DISTRIBUCIONES_VENTA_CAMPOS_2026);
+      const vals = shDist.getDataRange().getValues();
+      const map = getHeaderIndexMap_(vals[0]);
+      for (let i = 1; i < vals.length; i++) {
+        const did = String(vals[i][map['id']] || '').trim();
+        if (!did) continue;
+        const vid = String(vals[i][map['ventaid']] || '').trim();
+        const hid = String(vals[i][map['cosechaid']] || '').trim();
+        const existingConceptId = map['conceptoid'] !== undefined ? String(vals[i][map['conceptoid']] || '').trim() : '';
+        const prodName = String(vals[i][map['producto']] || '').trim();
+        let resolvedId = '';
+
+        if (existingConceptId && itemById[existingConceptId]) {
+          resolvedId = existingConceptId;
+        } else if (hid && cosechaConceptById[hid]) {
+          resolvedId = cosechaConceptById[hid];
+          shDist.getRange(i + 1, map['conceptoid'] + 1).setValue(resolvedId);
+          report.updatedDistribuciones += 1;
+        } else {
+          const res = almacenResolverConceptoIngreso_2026('', prodName, allItems);
+          if (res.item && almacenEsConceptoProductoAgricola_2026(res.item)) {
+            resolvedId = res.conceptoId;
+            shDist.getRange(i + 1, map['conceptoid'] + 1).setValue(resolvedId);
+            report.updatedDistribuciones += 1;
+          } else if (res.status === 'ambiguous') {
+            report.ambiguousRecords.push({
+              entidad: 'DistribucionesVenta',
+              id: did,
+              producto: prodName,
+              candidatos: (res.candidates || []).map(function (c) { return String(c.nombre || c.id); })
+            });
+          } else if (prodName) {
+            report.unmatchedRecords.push({
+              entidad: 'DistribucionesVenta',
+              id: did,
+              producto: prodName
+            });
+          }
+        }
+
+        if (vid && resolvedId && !finParseBool_2026(vals[i][map['anulada']], false)) {
+          if (!distConceptByVenta[vid]) distConceptByVenta[vid] = {};
+          distConceptByVenta[vid][resolvedId] = true;
+        }
+      }
+    }
+
+    // 3. AsignacionesPrecio (Ventas de cosecha): asegurar conceptoId y vincular inequívocos
+    const saleConceptById = {};
+    const shAsig = findSheetIgnoreCase_('AsignacionesPrecio');
+    if (shAsig && shAsig.getLastRow() >= 2) {
+      asegurarColumnasOpcionales_2026(shAsig, VENTA_COSECHA_EXTRA_COLS_2026);
+      const vals = shAsig.getDataRange().getValues();
+      const map = getHeaderIndexMap_(vals[0]);
+      for (let i = 1; i < vals.length; i++) {
+        const vid = String(vals[i][map['id']] || '').trim();
+        if (!vid) continue;
+        const existingConceptId = map['conceptoid'] !== undefined ? String(vals[i][map['conceptoid']] || '').trim() : '';
+        const hid = String(vals[i][map['cosechaid']] || '').trim();
+        const prodName = String(vals[i][map['producto']] || '').trim();
+
+        if (existingConceptId && itemById[existingConceptId]) {
+          saleConceptById[vid] = existingConceptId;
+          continue;
+        }
+
+        const distIds = distConceptByVenta[vid] ? Object.keys(distConceptByVenta[vid]) : [];
+        let resolvedId = '';
+        if (distIds.length === 1) {
+          resolvedId = distIds[0];
+        } else if (hid && cosechaConceptById[hid]) {
+          resolvedId = cosechaConceptById[hid];
+        } else {
+          const res = almacenResolverConceptoIngreso_2026('', prodName, allItems);
+          if (res.item && almacenEsConceptoProductoAgricola_2026(res.item)) {
+            resolvedId = res.conceptoId;
+          } else if (res.status === 'ambiguous') {
+            report.ambiguousRecords.push({
+              entidad: 'AsignacionesPrecio',
+              id: vid,
+              producto: prodName,
+              candidatos: (res.candidates || []).map(function (c) { return String(c.nombre || c.id); })
+            });
+          } else if (prodName) {
+            report.unmatchedRecords.push({
+              entidad: 'AsignacionesPrecio',
+              id: vid,
+              producto: prodName
+            });
+          }
+        }
+
+        if (resolvedId) {
+          shAsig.getRange(i + 1, map['conceptoid'] + 1).setValue(resolvedId);
+          saleConceptById[vid] = resolvedId;
+          report.updatedVentas += 1;
+        }
+      }
+    }
+
+    // 4. Movimientos de ventas de cosecha (trabajoId = 'COSECHA:<ventaId>'): vincular itemId y limpiar descripcion
+    const shMov = findSheetIgnoreCase_('Movimientos');
+    if (shMov && shMov.getLastRow() >= 2) {
+      const vals = shMov.getDataRange().getValues();
+      const map = getHeaderIndexMap_(vals[0]);
+      for (let i = 1; i < vals.length; i++) {
+        const mid = String(vals[i][map['id']] || '').trim();
+        const tid = String(vals[i][map['trabajoid']] || '').trim();
+        const mod = String(vals[i][map['modulo']] || '').trim().toUpperCase();
+        const cls = String(vals[i][map['clase']] || '').trim().toUpperCase();
+        if (mod !== 'PROPIEDAD' || cls !== 'INGRESO' || tid.indexOf('COSECHA:') !== 0) continue;
+
+        const ventaId = tid.slice('COSECHA:'.length).trim();
+        const existingItemId = String(vals[i][map['itemid']] || '').trim();
+        const existingDesc = String(vals[i][map['descripcion']] || '').trim();
+
+        let targetItem = null;
+        if (existingItemId && itemById[existingItemId]) {
+          targetItem = itemById[existingItemId];
+        } else if (ventaId && saleConceptById[ventaId] && itemById[saleConceptById[ventaId]]) {
+          targetItem = itemById[saleConceptById[ventaId]];
+        } else {
+          const strippedClient = existingDesc.replace(/\s*\([^)]*\)\s*$/, '').trim();
+          const res = almacenResolverConceptoIngreso_2026('', strippedClient, allItems);
+          if (res.item && almacenEsConceptoProductoAgricola_2026(res.item)) {
+            targetItem = res.item;
+          } else if (res.status === 'ambiguous') {
+            report.ambiguousRecords.push({
+              entidad: 'Movimientos',
+              id: mid,
+              producto: existingDesc,
+              candidatos: (res.candidates || []).map(function (c) { return String(c.nombre || c.id); })
+            });
+          } else if (existingDesc) {
+            report.unmatchedRecords.push({
+              entidad: 'Movimientos',
+              id: mid,
+              producto: existingDesc
+            });
+          }
+        }
+
+        if (targetItem) {
+          const targetId = String(targetItem.id || '').trim();
+          const targetName = String(targetItem.nombre || '').trim();
+          let changed = false;
+          if (existingItemId !== targetId) {
+            shMov.getRange(i + 1, map['itemid'] + 1).setValue(targetId);
+            changed = true;
+          }
+          if (targetName && existingDesc !== targetName) {
+            shMov.getRange(i + 1, map['descripcion'] + 1).setValue(targetName);
+            changed = true;
+          }
+          if (changed) report.updatedMovimientos += 1;
+        }
+      }
+    }
+
+    SpreadsheetApp.flush();
+    Logger.log(JSON.stringify(report));
+    return report;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 
 
