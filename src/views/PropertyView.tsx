@@ -37,7 +37,6 @@ import {
 import { VisualIcon } from '../components/VisualIcon';
 import {
   VisualExpenseItemPicker,
-  VisualIncomeItemPicker,
   VisualLotPicker,
 } from '../components/VisualEntityPicker';
 import {
@@ -71,7 +70,6 @@ import {
   createExpense,
   updateExpense,
   deleteExpense,
-  createIncome,
   updateIncome,
   deleteIncome,
   formatDateDDMMAAAA,
@@ -245,36 +243,16 @@ export const PropertyView: React.FC<Props> = ({
   const [expandedAllocationId, setExpandedAllocationId] = useState<string | null>(null);
   const [showAllocationsPanelInGasto, setShowAllocationsPanelInGasto] = useState(false);
 
-  // Form State for Agricultural Income (Direct sale with price — sin preselección de catálogo)
-  const [ingresoMode, setIngresoMode] = useState<'venta_directa' | 'sin_precio' | 'asignar_precio'>(
-    effectiveIsAdmin ? 'venta_directa' : 'sin_precio'
-  );
-
-  useEffect(() => {
-    if (!effectiveIsAdmin && ingresoMode !== 'sin_precio') {
-      setIngresoMode('sin_precio');
-    }
-  }, [effectiveIsAdmin, ingresoMode]);
-  const [incFecha, setIncFecha] = useState(new Date().toISOString().slice(0, 10));
-  const [incLotId, setIncLotId] = useState('');
-  const [incConcepto, setIncConcepto] = useState('');
-  const [incCantidad, setIncCantidad] = useState<number | ''>('');
-  const [incUnidad, setIncUnidad] = useState('toneladas');
-  const [incPrecio, setIncPrecio] = useState<number | ''>('');
-  const [incMoneda, setIncMoneda] = useState<Currency>('BOB');
-  const [incTc, setIncTc] = useState(
-    exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0 ? String(exchangeRate.tasaBobPerUsd) : ''
-  );
-  const [incObs, setIncObs] = useState('');
-
-  // Form State for Cosecha sin precio (harvest.create — sin preselección de producto ni lote)
+  // Form State for Cosecha (production only — no price, currency, buyer, or payment terms)
   const [harvFecha, setHarvFecha] = useState(new Date().toISOString().slice(0, 10));
   const [harvCampanaId, setHarvCampanaId] = useState(activeCampaign?.id || '');
   const [harvLotId, setHarvLotId] = useState('');
   const [harvProducto, setHarvProducto] = useState('');
   const [harvUseCustomProduct, setHarvUseCustomProduct] = useState(false);
   const [harvToneladas, setHarvToneladas] = useState('');
+  const [harvUnidad, setHarvUnidad] = useState('toneladas');
   const [harvObs, setHarvObs] = useState('');
+  const harvIdempotencyRef = useRef<string>(`harv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
 
   // Filters for Pending / Listed Harvests (persisted in memory; data managed via shared SWR cache below)
   const [pendientesMode, setPendientesMode] = usePersistedMemoryState<'pendientes' | 'todas'>('property.pendientes.mode', 'pendientes');
@@ -296,7 +274,6 @@ export const PropertyView: React.FC<Props> = ({
   const [priceModalError, setPriceModalError] = useState<string | null>(null);
 
   // Currency conversion anchors (prevent cumulative rounding drift on repeated USD <-> Bs toggles)
-  const incCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
   const expCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
   const editMovCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
   const priceCurrencyAnchorRef = useRef<CurrencyConversionAnchor | null>(null);
@@ -325,28 +302,9 @@ export const PropertyView: React.FC<Props> = ({
     if (exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0) {
       const rateStr = String(exchangeRate.tasaBobPerUsd);
       setPriceTc((prev) => (prev ? prev : rateStr));
-      setIncTc((prev) => (prev ? prev : rateStr));
       setExpTc((prev) => (prev ? prev : rateStr));
     }
   }, [exchangeRate?.tasaBobPerUsd]);
-
-  const resetNewIncomeForm = () => {
-    incCurrencyAnchorRef.current = null;
-    setIncFecha(new Date().toISOString().slice(0, 10));
-    setIncLotId('');
-    setIncConcepto('');
-    setIncCantidad('');
-    setIncUnidad('toneladas');
-    setIncPrecio('');
-    setIncMoneda('BOB');
-    setIncTc(
-      exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
-        ? String(exchangeRate.tasaBobPerUsd)
-        : ''
-    );
-    setIncObs('');
-    setErrorMsg(null);
-  };
 
   const resetNewHarvestForm = () => {
     setHarvFecha(new Date().toISOString().slice(0, 10));
@@ -355,7 +313,9 @@ export const PropertyView: React.FC<Props> = ({
     setHarvProducto('');
     setHarvUseCustomProduct(false);
     setHarvToneladas('');
+    setHarvUnidad('toneladas');
     setHarvObs('');
+    harvIdempotencyRef.current = `harv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     setErrorMsg(null);
   };
 
@@ -380,24 +340,6 @@ export const PropertyView: React.FC<Props> = ({
   };
 
   // Automatic USD <-> Bs conversion handlers across all property forms
-  const handleIncCurrencyChange = (nextCurr: Currency) => {
-    const res = convertFormCurrencyValue({
-      currentValue: incPrecio,
-      fromCurrency: incMoneda,
-      toCurrency: nextCurr,
-      tc: incTc,
-      anchor: incCurrencyAnchorRef.current,
-    });
-    if (res.error) {
-      setErrorMsg(translateError(res.error));
-      return;
-    }
-    if (!res.converted) return;
-    incCurrencyAnchorRef.current = res.nextAnchor;
-    setIncMoneda(res.currency);
-    setIncPrecio(res.valueNum);
-    setErrorMsg(null);
-  };
 
   const handleExpCurrencyChange = (nextCurr: Currency) => {
     const res = convertFormCurrencyValue({
@@ -932,7 +874,7 @@ export const PropertyView: React.FC<Props> = ({
     }
   };
 
-  // Submit Cosecha sin precio (harvest.create — does NOT create financial income)
+  // Submit Cosecha (production only — increases warehouse stock, creates NO financial income)
   const handleCreateHarvestSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (saving) return;
@@ -949,14 +891,16 @@ export const PropertyView: React.FC<Props> = ({
       return;
     }
     if (!harvProducto.trim()) {
-      setErrorMsg(bi('Ingresa el producto cosechado.', 'Enter the harvested product.'));
+      setErrorMsg(bi('Ingresa el producto o concepto cosechado.', 'Enter the harvested product or concept.'));
       return;
     }
-    const tonsNum = parseDecimalNumber(harvToneladas);
-    if (tonsNum <= 0) {
-      setErrorMsg(bi('Ingresa una cantidad válida de toneladas mayores a 0.', 'Enter a valid quantity of tons greater than 0.'));
+    const qtyNum = parseDecimalNumber(harvToneladas);
+    if (qtyNum <= 0) {
+      setErrorMsg(bi('Ingresa una cantidad válida mayor a 0.', 'Enter a valid quantity greater than 0.'));
       return;
     }
+
+    const unitToSave = (harvUnidad || 'toneladas').trim() || 'toneladas';
 
     setSaving(true);
     try {
@@ -965,26 +909,29 @@ export const PropertyView: React.FC<Props> = ({
         campanaId: targetCampId,
         loteId: harvLotId,
         producto: harvProducto.trim(),
-        toneladas: tonsNum,
+        toneladas: qtyNum,
+        unidad: unitToSave,
         observacion: harvObs.trim(),
+        idempotencyKey: harvIdempotencyRef.current,
       });
 
       if (createdHarvest?.id) {
         patchHarvestAcrossCaches(createdHarvest);
       }
-      const tonsStr = tonsNum.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const qtyStr = (createdHarvest?.toneladas || qtyNum).toLocaleString('es-BO', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+      const displayUnit = createdHarvest?.unidad || 't';
       setSuccessMsg(
         bi(
-          `Cosecha sin precio registrada (${tonsStr} t de ${harvProducto.trim()}). No se creó ingreso financiero todavía.`,
-          `Unpriced harvest recorded (${tonsStr} t of ${harvProducto.trim()}). No financial income was created yet.`
+          `Cosecha registrada en almacén (${qtyStr} ${displayUnit} de ${harvProducto.trim()}).`,
+          `Harvest added to warehouse (${qtyStr} ${displayUnit} of ${harvProducto.trim()}).`
         )
       );
-      setHarvLotId('');
-      setHarvProducto('');
-      setHarvUseCustomProduct(false);
-      setHarvToneladas('');
-      setHarvObs('');
-      invalidateQueries(['harvest.']);
+      resetNewHarvestForm();
+      setCurrentScreen('main');
+      invalidateQueries(['harvest.', 'harvestSale.', 'report.']);
       await loadPendingHarvests();
       if (allHarvestsQuery.hasLoaded) {
         loadAllHarvests().catch(() => {});
@@ -994,8 +941,8 @@ export const PropertyView: React.FC<Props> = ({
         err instanceof Error
           ? translateError(err.message)
           : bi(
-              'Error al registrar cosecha sin precio (harvest.create).',
-              'Error recording unpriced harvest (harvest.create).'
+              'Error al registrar cosecha (harvest.create).',
+              'Error recording harvest (harvest.create).'
             )
       );
     } finally {
@@ -1229,95 +1176,6 @@ export const PropertyView: React.FC<Props> = ({
     }
   };
 
-  const handleIncomeSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (saving) return;
-    setErrorMsg(null);
-    setSuccessMsg(null);
-
-    if (!activeCampaign) {
-      setErrorMsg(bi('Debes seleccionar o activar una campaña activa.', 'You must select or activate an active campaign.'));
-      return;
-    }
-
-    if (!incLotId) {
-      setErrorMsg(bi('Selecciona el lote de donde proviene la cosecha.', 'Select the lot where the harvest comes from.'));
-      return;
-    }
-
-    if (!incConcepto.trim()) {
-      setErrorMsg(bi('Selecciona un producto o concepto de venta.', 'Select a product or sale concept.'));
-      return;
-    }
-
-    if (!incCantidad || Number(incCantidad) <= 0) {
-      setErrorMsg(bi('Ingresa una cantidad válida mayor a 0.', 'Enter a valid quantity greater than 0.'));
-      return;
-    }
-
-    if (!incPrecio || Number(incPrecio) <= 0) {
-      setErrorMsg(bi('Ingresa el precio unitario de venta.', 'Enter the unit sale price.'));
-      return;
-    }
-
-    const tcNum = parseDecimalNumber(incTc);
-    if (tcNum <= 0) {
-      setErrorMsg(bi('Ingresa un tipo de cambio válido mayor a 0.', 'Enter a valid exchange rate greater than 0.'));
-      return;
-    }
-
-    const lotObj = lots.find((l) => l.id === incLotId);
-    const selectedItemObj = propertyIncomeItems.find(
-      (it) => it.nombre.toLowerCase() === incConcepto.toLowerCase()
-    );
-    const resolvedIcon =
-      selectedItemObj?.icono || getIconDefinition(incConcepto, 'ingreso').id;
-    const totalInc = (Number(incCantidad) || 0) * Number(incPrecio);
-
-    setSaving(true);
-    try {
-      await createIncome({
-        fecha: incFecha,
-        campanaId: activeCampaign.id,
-        modulo: 'propiedad',
-        loteId: incLotId,
-        loteNombre: lotObj?.nombre,
-        concepto: incConcepto,
-        icono: resolvedIcon,
-        cantidad: Number(incCantidad) || 0,
-        unidad: incUnidad,
-        precio: Number(incPrecio),
-        moneda: incMoneda,
-        tipoCambio: tcNum,
-        total: totalInc,
-        observacion: incObs.trim(),
-      });
-
-      setSuccessMsg(bi('Ingreso de cosecha registrado exitosamente.', 'Harvest income recorded successfully.'));
-      setIncLotId('');
-      setIncConcepto('');
-      setIncCantidad('');
-      setIncUnidad('toneladas');
-      setIncPrecio('');
-      setIncObs('');
-      setIncTc(
-        exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
-          ? String(exchangeRate.tasaBobPerUsd)
-          : ''
-      );
-      setCurrentScreen('main');
-      onRefreshData('movements');
-    } catch (err: unknown) {
-      setErrorMsg(
-        err instanceof Error
-          ? translateError(err.message)
-          : bi('Error al registrar el ingreso', 'Error recording income')
-      );
-    } finally {
-      setSaving(false);
-    }
-  };
-
   // Open Edit Modal for a manual expense or income (Admin only)
   const handleOpenEditMovement = (m: MovementItem) => {
     if (!effectiveIsAdmin) {
@@ -1461,11 +1319,6 @@ export const PropertyView: React.FC<Props> = ({
     }
   };
 
-  const incCalculatedTotal =
-    typeof incCantidad === 'number' && typeof incPrecio === 'number'
-      ? incCantidad * incPrecio
-      : 0;
-
   const expCalculatedTotal =
     typeof expCantidad === 'number' && typeof expPrecio === 'number'
       ? expCantidad * expPrecio
@@ -1528,8 +1381,7 @@ export const PropertyView: React.FC<Props> = ({
           </button>
           <div className="min-w-0 flex-1">
             <h2 className="text-lg sm:text-xl font-bold text-slate-900 truncate">
-              {currentScreen === 'ingreso' &&
-                (effectiveIsAdmin ? bi('Venta / Cosecha', 'Sale / Harvest') : bi('Cosecha', 'Harvest'))}
+              {currentScreen === 'ingreso' && bi('Registrar cosecha', 'Record harvest')}
               {currentScreen === 'gasto' && bi('Registrar gasto', 'Record expense')}
               {currentScreen === 'lotes' && bi('Mis lotes', 'My lots')}
               {currentScreen === 'maquinaria_recibida' && bi('Trabajos de maquinaria', 'Machinery jobs')}
@@ -1594,13 +1446,11 @@ export const PropertyView: React.FC<Props> = ({
             </h2>
 
             <div className="grid grid-cols-2 gap-3 w-full">
-              {/* Botón VENTA / COSECHA (Solo Cosecha para usuario normal) */}
+              {/* Botón REGISTRAR COSECHA (Solo producción agrícola) */}
               <button
                 type="button"
                 onClick={() => {
-                  resetNewIncomeForm();
                   resetNewHarvestForm();
-                  setIngresoMode(effectiveIsAdmin ? 'venta_directa' : 'sin_precio');
                   setCurrentScreen('ingreso');
                 }}
                 className="w-full px-3.5 py-3 rounded-2xl bg-[#2D7D2C] hover:bg-[#256624] active:bg-[#1D541C] text-white flex flex-col items-center justify-center gap-1 transition active:scale-[0.98] cursor-pointer select-none shadow-xs"
@@ -1608,11 +1458,11 @@ export const PropertyView: React.FC<Props> = ({
                 <div className="flex items-center justify-center gap-2">
                   <Wheat className="h-5 w-5 text-white shrink-0" strokeWidth={2.2} />
                   <span className="text-sm sm:text-base font-bold tracking-tight text-white leading-tight text-center">
-                    {effectiveIsAdmin ? bi('Venta / Cosecha', 'Sale / Harvest') : bi('Cosecha', 'Harvest')}
+                    {bi('Registrar cosecha', 'Record harvest')}
                   </span>
                 </div>
                 <span className="text-[11px] text-white/90 font-medium text-center leading-tight">
-                  {effectiveIsAdmin ? bi('Ingreso del lote', 'Lot income') : bi('Registrar cosecha', 'Record harvest')}
+                  {bi('Producción del lote', 'Lot production')}
                 </span>
               </button>
 
@@ -1783,496 +1633,192 @@ export const PropertyView: React.FC<Props> = ({
       )}
 
       {/* ============================================================ */}
-      {/* FORMULARIO: VENTA / COSECHA                                  */}
+      {/* FORMULARIO: REGISTRAR COSECHA (PRODUCCIÓN)                   */}
       {/* ============================================================ */}
-      {currentScreen === 'ingreso' && (
-        <div className="space-y-3">
-          {/* Selector de operación dentro de Venta / Cosecha (Solo visible para Admin; usuarios normales solo registran cosecha) */}
-          {effectiveIsAdmin && (
-            <div className="flex p-1 bg-[#F2F5F3] rounded-xl gap-1 border border-[#E2E7E3]">
-              <button
-                type="button"
-                onClick={() => {
-                  setErrorMsg(null);
-                  setIngresoMode('venta_directa');
-                }}
-                className={`flex-1 h-[36px] px-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
-                  ingresoMode === 'venta_directa'
-                    ? 'bg-white text-[#24875B] shadow-xs border border-[#BFE0CD]'
-                    : 'text-[#5E6D64] hover:text-[#26352D]'
-                }`}
+      {currentScreen === 'ingreso' && (() => {
+        const productOptions = Array.from(
+          new Set([
+            'Soya',
+            'Maíz',
+            'Sorgo',
+            'Trigo',
+            'Girasol',
+            ...propertyIncomeItems.map((it) => it.nombre),
+          ])
+        );
+        const isProductInList = productOptions.some(
+          (p) => p.toLowerCase() === harvProducto.trim().toLowerCase()
+        );
+        const standardHarvestUnits = [
+          { val: 'toneladas', label: bi('Toneladas (t)', 'Tons (t)') },
+          { val: 'quintales', label: bi('Quintales (qq)', 'Quintals (qq)') },
+          { val: 'kg', label: bi('Kilogramos (kg)', 'Kilograms (kg)') },
+          { val: 'bolsas', label: bi('Bolsas', 'Bags') },
+          { val: 'unidades', label: bi('Unidades', 'Units') },
+        ];
+        const hasCustomHarvUnit =
+          Boolean(harvUnidad) &&
+          !standardHarvestUnits.some((u) => u.val.toLowerCase() === harvUnidad.toLowerCase());
+
+        return (
+          <div className="rounded-2xl border border-[#E2E7E3] bg-white p-4 shadow-xs">
+            <form onSubmit={handleCreateHarvestSubmit} className="space-y-3">
+              {/* Campaña */}
+              <AppSelect
+                label={bi('Campaña', 'Campaign')}
+                required
+                icon={<Calendar className="h-[17px] w-[17px]" />}
+                value={harvCampanaId}
+                onChange={(e) => setHarvCampanaId(e.target.value)}
               >
-                {bi('Venta directa', 'Direct sale')}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setErrorMsg(null);
-                  setIngresoMode('sin_precio');
-                }}
-                className={`flex-1 h-[36px] px-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
-                  ingresoMode === 'sin_precio'
-                    ? 'bg-white text-[#24875B] shadow-xs border border-[#BFE0CD]'
-                    : 'text-[#5E6D64] hover:text-[#26352D]'
-                }`}
-              >
-                {bi('Sin precio', 'Unpriced')}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setErrorMsg(null);
-                  setCurrentScreen('pendientes_precio');
-                }}
-                className="flex-1 h-[36px] px-2 text-xs font-semibold rounded-lg transition cursor-pointer text-[#5E6D64] hover:text-[#26352D]"
-              >
-                {t('harvestSales.title')}{pendingHarvestsCount ? ` (${pendingHarvestsCount})` : ''}
-              </button>
-            </div>
-          )}
+                <option value="">{bi('Seleccionar campaña', 'Select campaign')}</option>
+                {campaigns.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.nombre} {c.activa ? `(${bi('Activa', 'Active')})` : ''}
+                  </option>
+                ))}
+              </AppSelect>
 
-          {/* MODO 1: VENTA DIRECTA CON PRECIO (Solo Admin) */}
-          {effectiveIsAdmin && ingresoMode === 'venta_directa' && (() => {
-            const standardSaleUnits = [
-              { val: 'toneladas', label: bi('Toneladas (t)', 'Tons (t)') },
-              { val: 'quintales', label: bi('Quintales (qq)', 'Quintals (qq)') },
-              { val: 'kg', label: bi('Kilos (kg)', 'Kilograms (kg)') },
-              { val: 'bolsas', label: bi('Bolsas', 'Bags') },
-            ];
-            const hasCustomSaleUnit =
-              Boolean(incUnidad) &&
-              !standardSaleUnits.some((u) => u.val.toLowerCase() === incUnidad.toLowerCase());
+              {/* Lote */}
+              <VisualLotPicker
+                lots={lots}
+                selectedLotId={harvLotId}
+                onSelect={(id) => setHarvLotId(id)}
+                label={bi('Lote', 'Lot')}
+                required
+              />
 
-            return (
-              <div className="rounded-2xl border border-[#E2E7E3] bg-white p-4 shadow-xs">
-                <form onSubmit={handleIncomeSubmit} className="space-y-3">
-                  {/* Lote */}
-                  <VisualLotPicker
-                    lots={lots}
-                    selectedLotId={incLotId}
-                    onSelect={(id) => setIncLotId(id)}
-                    label={bi('Lote', 'Lot')}
-                    required
-                  />
-
-                  {/* Concepto / Producto */}
-                  <VisualIncomeItemPicker
-                    items={propertyIncomeItems}
-                    selectedItemName={incConcepto}
-                    onSelectItem={(item) => {
-                      incCurrencyAnchorRef.current = null;
-                      setIncConcepto(item.nombre);
-                      if (item.unidad) setIncUnidad(item.unidad);
-                      if (item.precioPredeterminado || item.precio) {
-                        setIncPrecio(item.precioPredeterminado || item.precio);
-                      }
-                      if (item.moneda) {
-                        setIncMoneda(item.moneda);
-                      }
-                    }}
-                    label={bi('Producto / Concepto', 'Product / Concept')}
-                    required
-                  />
-
-                  {/* Fecha */}
-                  <div>
-                    <label className={FORM_LABEL_CLASS}>
-                      {bi('Fecha', 'Date')} <span className="text-[#C44545]">*</span>
-                    </label>
-                    <div className="relative">
-                      <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 h-[17px] w-[17px] text-[#64746B] pointer-events-none" />
-                      <input
-                        type="date"
-                        required
-                        value={incFecha}
-                        onChange={(e) => setIncFecha(e.target.value)}
-                        className={`${FORM_INPUT_CLASS} pl-9`}
-                      />
-                    </div>
-                  </div>
-
-                  {/* Cantidad y Unidad */}
-                  <div className="grid grid-cols-2 gap-2.5 items-end">
-                    <div>
-                      <label className={FORM_LABEL_CLASS}>
-                        {bi('Cantidad', 'Quantity')} <span className="text-[#C44545]">*</span>
-                      </label>
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        step="any"
-                        required
-                        min="0.01"
-                        placeholder="0.0"
-                        value={incCantidad}
-                        onChange={(e) => setIncCantidad(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                        className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
-                      />
-                    </div>
-                    <AppSelect
-                      label={bi('Unidad', 'Unit')}
-                      icon={<List className="h-[17px] w-[17px]" />}
-                      value={incUnidad}
-                      onChange={(e) => setIncUnidad(e.target.value)}
-                    >
-                      <option value="">{bi('Seleccionar unidad', 'Select unit')}</option>
-                      {standardSaleUnits.map((u) => (
-                        <option key={u.val} value={u.val}>
-                          {u.label}
-                        </option>
-                      ))}
-                      {hasCustomSaleUnit && <option value={incUnidad}>{translateUnit(incUnidad)}</option>}
-                    </AppSelect>
-                  </div>
-
-                  {/* Precio y Moneda */}
-                  <div className="grid grid-cols-2 gap-2.5 items-end">
-                    <div>
-                      <label className={FORM_LABEL_CLASS}>
-                        {bi('Precio unitario', 'Unit price')} <span className="text-[#C44545]">*</span>
-                      </label>
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        step="any"
-                        required
-                        min="0.01"
-                        placeholder="0.00"
-                        value={incPrecio}
-                        onChange={(e) => {
-                          incCurrencyAnchorRef.current = null;
-                          setIncPrecio(e.target.value === '' ? '' : parseFloat(e.target.value));
-                        }}
-                        className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
-                      />
-                    </div>
-                    <CurrencySelect
-                      label={bi('Moneda', 'Currency')}
-                      required
-                      value={incMoneda}
-                      onChange={handleIncCurrencyChange}
-                    />
-                  </div>
-
-                  {/* Tipo de cambio editable */}
-                  <div>
-                    <label className={FORM_LABEL_CLASS}>
-                      {bi('Tipo de cambio (Bs/USD)', 'Exchange rate (Bs/USD)')} <span className="text-[#C44545]">*</span>
-                    </label>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="any"
-                      required
-                      min="0.01"
-                      placeholder="6.96"
-                      value={incTc}
-                      onChange={(e) => setIncTc(e.target.value)}
-                      className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
-                    />
-                  </div>
-
-                  {/* Importe total */}
-                  <div className="bg-[#EAF5EE] px-3.5 py-2.5 rounded-xl border border-[#BFE0CD] flex items-center justify-between">
-                    <span className="text-[13px] font-bold text-[#175B3D]">{bi('Importe total', 'Total amount')}</span>
-                    <span className="text-base font-extrabold text-[#175B3D] tabular-nums">
-                      {incMoneda === 'USD' ? 'USD' : 'Bs'}{' '}
-                      {incCalculatedTotal.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </span>
-                  </div>
-
-                  {/* Observación */}
-                  <ObservationField
-                    value={incObs}
-                    onChange={setIncObs}
-                    placeholder={bi('Comprador, silo, remisión...', 'Buyer, silo, delivery note...')}
-                  />
-
-                  {/* Botones */}
-                  <div className="flex gap-2.5 pt-1">
-                    <button
-                      type="submit"
-                      disabled={saving}
-                      className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-[#24875B] h-[42px] text-sm font-bold text-white shadow-xs hover:bg-[#1D704B] active:bg-[#175B3D] transition disabled:opacity-50 cursor-pointer"
-                    >
-                      <Save className="h-4 w-4 shrink-0" />
-                      <span>{saving ? t('common.saving') : bi('Guardar ingreso', 'Save income')}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCurrentScreen('main')}
-                      className="px-4 h-[42px] rounded-xl border border-[#D4DDD6] bg-white hover:bg-[#F5F7F5] text-[#26352D] text-sm font-semibold cursor-pointer"
-                    >
-                      {t('common.cancel')}
-                    </button>
-                  </div>
-                </form>
-              </div>
-            );
-          })()}
-
-          {/* MODO 2: REGISTRAR COSECHA SIN PRECIO (harvest.create) */}
-          {ingresoMode === 'sin_precio' && (() => {
-            const productOptions = Array.from(
-              new Set([
-                'Soya',
-                'Maíz',
-                'Sorgo',
-                'Trigo',
-                'Girasol',
-                ...propertyIncomeItems.map((it) => it.nombre),
-              ])
-            );
-            const isProductInList = productOptions.some(
-              (p) => p.toLowerCase() === harvProducto.trim().toLowerCase()
-            );
-
-            return (
-              <div className="rounded-2xl border border-[#E2E7E3] bg-white p-4 shadow-xs">
-                <form onSubmit={handleCreateHarvestSubmit} className="space-y-3">
-                  {/* Campaña */}
-                  <AppSelect
-                    label={bi('Campaña', 'Campaign')}
-                    required
-                    icon={<Calendar className="h-[17px] w-[17px]" />}
-                    value={harvCampanaId}
-                    onChange={(e) => setHarvCampanaId(e.target.value)}
-                  >
-                    <option value="">{bi('Seleccionar campaña', 'Select campaign')}</option>
-                    {campaigns.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.nombre} {c.activa ? `(${bi('Activa', 'Active')})` : ''}
-                      </option>
-                    ))}
-                  </AppSelect>
-
-                  {/* Lote */}
-                  <VisualLotPicker
-                    lots={lots}
-                    selectedLotId={harvLotId}
-                    onSelect={(id) => setHarvLotId(id)}
-                    label={bi('Lote', 'Lot')}
-                    required
-                  />
-
-                  {/* Producto (selector compacto sin preselección) */}
-                  {!harvUseCustomProduct ? (
-                    <AppSelect
-                      label={bi('Producto', 'Product')}
-                      required
-                      icon={<Wheat className="h-[17px] w-[17px]" />}
-                      value={isProductInList ? harvProducto : ''}
-                      onChange={(e) => {
-                        if (e.target.value === '__otro__') {
-                          setHarvUseCustomProduct(true);
-                          setHarvProducto('');
-                        } else {
-                          setHarvProducto(e.target.value);
-                        }
-                      }}
-                    >
-                      <option value="">{bi('Seleccionar producto', 'Select product')}</option>
-                      {productOptions.map((prod) => (
-                        <option key={prod} value={prod}>
-                          {prod}
-                        </option>
-                      ))}
-                      <option value="__otro__">{bi('Otro producto...', 'Other product...')}</option>
-                    </AppSelect>
-                  ) : (
-                    <div>
-                      <div className="flex items-center justify-between gap-2 mb-1">
-                        <label className="text-[13px] font-semibold text-[#26352D]">
-                          {bi('Producto', 'Product')} <span className="text-[#C44545]">*</span>
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setHarvUseCustomProduct(false);
-                            setHarvProducto('');
-                          }}
-                          className="text-[11px] font-semibold text-[#24875B] hover:underline cursor-pointer"
-                        >
-                          {bi('Elegir de la lista', 'Choose from list')}
-                        </button>
-                      </div>
-                      <input
-                        type="text"
-                        required
-                        value={harvProducto}
-                        onChange={(e) => setHarvProducto(e.target.value)}
-                        placeholder={bi('Escribir nombre del producto', 'Enter product name')}
-                        className={`${FORM_INPUT_CLASS} font-semibold`}
-                      />
-                    </div>
-                  )}
-
-                  {/* Fecha y Toneladas */}
-                  <div className="grid grid-cols-2 gap-2.5 items-end">
-                    <div>
-                      <label className={FORM_LABEL_CLASS}>
-                        {bi('Fecha de cosecha', 'Harvest date')} <span className="text-[#C44545]">*</span>
-                      </label>
-                      <input
-                        type="date"
-                        required
-                        value={harvFecha}
-                        onChange={(e) => setHarvFecha(e.target.value)}
-                        className={FORM_INPUT_CLASS}
-                      />
-                    </div>
-                    <div>
-                      <label className={FORM_LABEL_CLASS}>
-                        {bi('Toneladas (t)', 'Tons (t)')} <span className="text-[#C44545]">*</span>
-                      </label>
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        step="any"
-                        min="0.01"
-                        required
-                        placeholder="0.00"
-                        value={harvToneladas}
-                        onChange={(e) => setHarvToneladas(e.target.value)}
-                        className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
-                      />
-                    </div>
-                  </div>
-
-                  {/* Observación */}
-                  <ObservationField
-                    value={harvObs}
-                    onChange={setHarvObs}
-                    placeholder={bi('Silo de acopio, humedad, remisión...', 'Storage silo, moisture, delivery note...')}
-                  />
-
-                  <div className="flex gap-2.5 pt-1">
-                    <button
-                      type="submit"
-                      disabled={saving}
-                      className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-[#24875B] h-[42px] text-sm font-bold text-white shadow-xs hover:bg-[#1D704B] transition disabled:opacity-50 cursor-pointer"
-                    >
-                      <Save className="h-4 w-4 shrink-0" />
-                      <span>{saving ? t('common.saving') : bi('Guardar cosecha', 'Save harvest')}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCurrentScreen('main')}
-                      className="px-4 h-[42px] rounded-xl border border-[#D4DDD6] bg-white hover:bg-[#F5F7F5] text-[#26352D] text-sm font-semibold cursor-pointer"
-                    >
-                      {t('common.cancel')}
-                    </button>
-                  </div>
-                </form>
-              </div>
-            );
-          })()}
-
-          {/* MODO 3: ASIGNAR PRECIO A COSECHA PENDIENTE (harvest.pending + harvest.price) */}
-          {ingresoMode === 'asignar_precio' && (
-            <div className="space-y-3">
-              <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-xs flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="text-sm font-bold text-stone-900">
-                      {bi('Cosechas con toneladas pendientes', 'Harvests with pending tons')} ({pendingHarvests.filter((h) => h.pendiente > 0.0001).length})
-                    </h2>
-                    {pendingHarvestsRevalidating && (
-                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#24875B]">
-                        <RefreshCw className="h-3 w-3 animate-spin" />
-                        <span>{bi('Actualizando...', 'Updating...')}</span>
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-xs text-stone-500 mt-0.5">
-                    {bi(
-                      'Incluye cosechas de campañas anteriores. Selecciona una para fijar precio total o parcial.',
-                      'Includes harvests from previous campaigns. Select one to set a full or partial price.'
-                    )}
-                  </p>
-                </div>
-              </div>
-
-              {pendingHarvestsError && (
-                <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 flex items-start justify-between gap-2.5">
-                  <div className="flex items-start gap-2 min-w-0 flex-1">
-                    <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
-                    <div className="text-xs text-red-900 space-y-0.5 min-w-0 flex-1">
-                      <p className="font-bold">
-                        {pendingHarvestsHasLoaded
-                          ? bi('No se pudo actualizar. Mostrando los últimos datos cargados.', 'Could not refresh. Showing latest loaded data.')
-                          : bi('Error al consultar cosechas pendientes', 'Error loading pending harvests')}
-                      </p>
-                      <p className="break-words text-red-800/90">{translateError(pendingHarvestsError)}</p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => loadPendingHarvests()}
-                    disabled={pendingHarvestsLoading}
-                    className="text-xs font-bold text-red-700 hover:text-red-900 underline shrink-0 cursor-pointer disabled:opacity-50"
-                  >
-                    {bi('Reintentar', 'Retry')}
-                  </button>
-                </div>
-              )}
-
-              {pendingHarvestsInitialLoading || (!pendingHarvestsHasLoaded && !pendingHarvestsError) ? (
-                <div className="rounded-2xl border border-[#E2E7E3] bg-white p-8 text-center text-xs text-[#5E6D64] flex items-center justify-center gap-2">
-                  <RefreshCw className="h-4 w-4 animate-spin text-[#24875B]" />
-                  <span>{bi('Consultando cosechas pendientes...', 'Loading pending harvests...')}</span>
-                </div>
-              ) : (
-                <CompactList
-                  isEmpty={pendingHarvests.filter((h) => h.pendiente > 0.0001).length === 0}
-                  emptyMessage={
-                    !pendingHarvestsHasLoaded && pendingHarvestsError
-                      ? bi('No se pudieron cargar las cosechas pendientes.', 'Could not load pending harvests.')
-                      : bi('No hay cosechas con toneladas pendientes de precio.', 'No harvests with pending tons to price.')
-                  }
+              {/* Producto o concepto */}
+              {!harvUseCustomProduct ? (
+                <AppSelect
+                  label={bi('Producto o concepto', 'Product or concept')}
+                  required
+                  icon={<Wheat className="h-[17px] w-[17px]" />}
+                  value={isProductInList ? harvProducto : ''}
+                  onChange={(e) => {
+                    if (e.target.value === '__otro__') {
+                      setHarvUseCustomProduct(true);
+                      setHarvProducto('');
+                    } else {
+                      setHarvProducto(e.target.value);
+                    }
+                  }}
                 >
-                  {pendingHarvests
-                    .filter((h) => h.pendiente > 0.0001)
-                    .sort(compareChronologicalDesc)
-                    .map((h) => {
-                      const lotName =
-                        h.loteNombre || lots.find((l) => String(l.id) === String(h.loteId))?.nombre || bi('Lote', 'Lot');
-                      const campName =
-                        h.campanaNombre ||
-                        campaigns.find((c) => String(c.id) === String(h.campanaId))?.nombre ||
-                        bi('Sin campaña', 'No campaign');
-                      return (
-                        <CompactListRow
-                          key={h.id}
-                          onClick={() => handleOpenAssignPrice(h)}
-                          chevron="right"
-                          icon={
-                            <div className="w-8 h-8 rounded-lg bg-[#EAF5EE] border border-[#BFE0CD]/70 flex items-center justify-center">
-                              <VisualIcon name={getIconDefinition(h.producto, 'ingreso').id || 'granos'} size="xs" />
-                            </div>
-                          }
-                          title={formatConcept(h.producto)}
-                          subtitle={
-                            <span>
-                              {formatDateDDMMAAAA(h.fecha)} ·{' '}
-                              <span className="font-semibold text-[#24875B]">{lotName}</span> · {campName}
-                            </span>
-                          }
-                          rightPrimary={
-                            <span className="tabular-nums text-amber-700">
-                              {h.pendiente.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} t
-                            </span>
-                          }
-                          rightSecondary={`${bi('Asign.:', 'Priced:')} ${h.asignadas.toLocaleString('es-BO', { minimumFractionDigits: 1, maximumFractionDigits: 2 })} / ${h.toneladas.toLocaleString('es-BO', { minimumFractionDigits: 1, maximumFractionDigits: 2 })} t`}
-                        />
-                      );
-                    })}
-                </CompactList>
+                  <option value="">{bi('Seleccionar producto', 'Select product')}</option>
+                  {productOptions.map((prod) => (
+                    <option key={prod} value={prod}>
+                      {prod}
+                    </option>
+                  ))}
+                  <option value="__otro__">{bi('Otro producto...', 'Other product...')}</option>
+                </AppSelect>
+              ) : (
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="text-[13px] font-semibold text-[#26352D]">
+                      {bi('Producto o concepto', 'Product or concept')} <span className="text-[#C44545]">*</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHarvUseCustomProduct(false);
+                        setHarvProducto('');
+                      }}
+                      className="text-[11px] font-semibold text-[#24875B] hover:underline cursor-pointer"
+                    >
+                      {bi('Elegir de la lista', 'Choose from list')}
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    required
+                    value={harvProducto}
+                    onChange={(e) => setHarvProducto(e.target.value)}
+                    placeholder={bi('Escribir nombre del producto', 'Enter product name')}
+                    className={`${FORM_INPUT_CLASS} font-semibold`}
+                  />
+                </div>
               )}
-            </div>
-          )}
-        </div>
-      )}
+
+              {/* Fecha */}
+              <div>
+                <label className={FORM_LABEL_CLASS}>
+                  {bi('Fecha', 'Date')} <span className="text-[#C44545]">*</span>
+                </label>
+                <div className="relative">
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 h-[17px] w-[17px] text-[#64746B] pointer-events-none" />
+                  <input
+                    type="date"
+                    required
+                    value={harvFecha}
+                    onChange={(e) => setHarvFecha(e.target.value)}
+                    className={`${FORM_INPUT_CLASS} pl-9`}
+                  />
+                </div>
+              </div>
+
+              {/* Cantidad y Unidad (toneladas por defecto) */}
+              <div className="grid grid-cols-2 gap-2.5 items-end">
+                <div className="min-w-0">
+                  <label className={`${FORM_LABEL_CLASS} whitespace-nowrap truncate`}>
+                    {bi('Cantidad', 'Quantity')} <span className="text-[#C44545]">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    min="0.01"
+                    required
+                    placeholder="0.00"
+                    value={harvToneladas}
+                    onChange={(e) => setHarvToneladas(e.target.value)}
+                    className={`${FORM_INPUT_CLASS} font-semibold tabular-nums`}
+                  />
+                </div>
+                <AppSelect
+                  label={bi('Unidad', 'Unit')}
+                  required
+                  icon={<List className="h-[17px] w-[17px]" />}
+                  value={harvUnidad}
+                  onChange={(e) => setHarvUnidad(e.target.value)}
+                >
+                  {standardHarvestUnits.map((u) => (
+                    <option key={u.val} value={u.val}>
+                      {u.label}
+                    </option>
+                  ))}
+                  {hasCustomHarvUnit && <option value={harvUnidad}>{translateUnit(harvUnidad)}</option>}
+                </AppSelect>
+              </div>
+
+              {/* Observación con opción de dictado */}
+              <ObservationField
+                value={harvObs}
+                onChange={setHarvObs}
+                placeholder={bi('Silo de acopio, humedad, remisión...', 'Storage silo, moisture, delivery note...')}
+              />
+
+              <div className="flex gap-2.5 pt-1">
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-[#24875B] h-[42px] text-sm font-bold text-white shadow-xs hover:bg-[#1D704B] transition disabled:opacity-50 cursor-pointer"
+                >
+                  <Save className="h-4 w-4 shrink-0" />
+                  <span>{saving ? t('common.saving') : bi('Guardar cosecha', 'Save harvest')}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCurrentScreen('main')}
+                  className="px-4 h-[42px] rounded-xl border border-[#D4DDD6] bg-white hover:bg-[#F5F7F5] text-[#26352D] text-sm font-semibold cursor-pointer"
+                >
+                  {t('common.cancel')}
+                </button>
+              </div>
+            </form>
+          </div>
+        );
+      })()}
 
       {/* ============================================================ */}
       {/* FORMULARIO: REGISTRAR GASTO AGRÍCOLA                         */}

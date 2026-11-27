@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import {
   Printer,
@@ -20,6 +20,8 @@ import {
   Income,
   Currency,
   ExchangeRateConfig,
+  HarvestRecord,
+  HarvestSale,
 } from '../types';
 import {
   matchesCampaignRecord,
@@ -30,7 +32,9 @@ import {
   convertHistoricalAmount,
   formatCurrencyAmount,
 } from '../services/financialSummary';
-import { formatDateDDMMAAAA, getBoliviaDateString } from '../services/backend';
+import { formatDateDDMMAAAA, getBoliviaDateString, getHarvestSales } from '../services/backend';
+import { cacheKeys, getCachedQuery, setCachedQuery } from '../services/dataCache';
+import { computeHarvestAvailability, roundPct2, roundTons } from '../services/harvestAvailability';
 import { formatNumberLocale } from '../services/formatters';
 import { CompactFilter } from '../components/CompactListUI';
 import { Switch } from '../components/Switch';
@@ -196,6 +200,10 @@ interface LotDetailedResult {
   lotId: string;
   lotName: string;
   hectares: number;
+  toneladasCosechadas: number;
+  toneladasVendidas: number;
+  toneladasDisponibles: number;
+  porcentajeVendido: number;
   ingresosCosechas: number;
   ingresosIntereses: number;
   ingresos: number;
@@ -302,6 +310,37 @@ const ReportsViewInner: React.FC<Props> = ({
   const [showReconciliation, setShowReconciliation] = useState<boolean>(false);
   const [expandedReportLotId, setExpandedReportLotId] = useState<string | null>(null);
 
+  // Load harvests & sale distributions (via shared SWR cache) for per-lot physical production & sales metrics
+  const cachedHarvestBundle = getCachedQuery<{ sales: HarvestSale[]; harvests: HarvestRecord[] }>(
+    cacheKeys.harvestSalesList('all')
+  );
+  const [warehouseHarvests, setWarehouseHarvests] = useState<HarvestRecord[]>(
+    () =>
+      cachedHarvestBundle?.data
+        ? computeHarvestAvailability(cachedHarvestBundle.data.harvests, cachedHarvestBundle.data.sales)
+        : []
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    getHarvestSales({ includeAnuladas: false }, true)
+      .then((bundle) => {
+        if (cancelled) return;
+        const reconciled = computeHarvestAvailability(bundle.harvests, bundle.sales);
+        setCachedQuery(cacheKeys.harvestSalesList('all'), {
+          sales: bundle.sales,
+          harvests: reconciled,
+        });
+        setWarehouseHarvests(reconciled);
+      })
+      .catch(() => {
+        // Non-blocking: financial results from Movimientos still render accurately
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [safeIncomes.length, safeCampaigns.length]);
+
   const effectiveCampaignId = useMemo(() => {
     if (selectedCampaignId === 'all') return 'all';
     if (safeCampaigns.some((c) => String(c.id) === String(selectedCampaignId))) {
@@ -358,6 +397,15 @@ const ReportsViewInner: React.FC<Props> = ({
         ? safeIncomes.filter((i) => matchesCampaignRecord(i, currentCampaign))
         : safeIncomes,
     [safeIncomes, currentCampaign]
+  );
+
+  // Source-campaign harvests (prior-campaign harvests sold later remain attributed to their source campaign)
+  const campaignHarvests = useMemo(
+    () =>
+      currentCampaign
+        ? warehouseHarvests.filter((h) => matchesCampaignRecord(h, currentCampaign))
+        : warehouseHarvests,
+    [warehouseHarvests, currentCampaign]
   );
 
   // Name resolvers
@@ -573,6 +621,9 @@ const ReportsViewInner: React.FC<Props> = ({
         lotId: string;
         lotName: string;
         hectares: number;
+        toneladasCosechadas: number;
+        toneladasVendidas: number;
+        toneladasDisponibles: number;
         ingresosCosechas: number;
         ingresosIntereses: number;
         ingresos: number;
@@ -592,6 +643,9 @@ const ReportsViewInner: React.FC<Props> = ({
           lotId: info.id,
           lotName: info.name,
           hectares: info.ha,
+          toneladasCosechadas: 0,
+          toneladasVendidas: 0,
+          toneladasDisponibles: 0,
           ingresosCosechas: 0,
           ingresosIntereses: 0,
           ingresos: 0,
@@ -609,6 +663,14 @@ const ReportsViewInner: React.FC<Props> = ({
     // Pre-populate registered lots so sorting and filtering work consistently
     safeLots.forEach((l) => {
       ensureLot(String(l.id), l.nombre);
+    });
+
+    // Aggregate physical production & distribution-reconciled sold/available quantities per source lot
+    campaignHarvests.forEach((h) => {
+      const entry = ensureLot(h.loteId, h.loteNombre);
+      entry.toneladasCosechadas = roundTons(entry.toneladasCosechadas + (Number(h.toneladas) || 0));
+      entry.toneladasVendidas = roundTons(entry.toneladasVendidas + (Number(h.asignadas) || 0));
+      entry.toneladasDisponibles = roundTons(entry.toneladasDisponibles + (Number(h.pendiente) || 0));
     });
 
     directIncomes.forEach((inc) => {
@@ -681,9 +743,9 @@ const ReportsViewInner: React.FC<Props> = ({
         if (isFilteredByLot) {
           return String(entry.lotId) === String(selectedLotId);
         }
-        // When showing all lots, include every registered lot or any uncategorized bucket that has movements
         const isRegistered = safeLots.some((l) => String(l.id) === String(entry.lotId));
         const hasActivity =
+          entry.toneladasCosechadas > 0.0001 ||
           entry.ingresos > 0.004 ||
           entry.gastosDirectos > 0.004 ||
           entry.gastosMaquinaria > 0.004;
@@ -695,10 +757,18 @@ const ReportsViewInner: React.FC<Props> = ({
         const ingresoPorHa = entry.hectares > 0 ? entry.ingresos / entry.hectares : null;
         const gastoPorHa = entry.hectares > 0 ? gastosTotales / entry.hectares : null;
         const utilidadPorHa = entry.hectares > 0 ? resultadoNeto / entry.hectares : null;
+        const porcentajeVendido =
+          entry.toneladasCosechadas > 0.0001
+            ? Math.min(100, roundPct2((entry.toneladasVendidas / entry.toneladasCosechadas) * 100))
+            : 0;
         return {
           lotId: entry.lotId,
           lotName: entry.lotName,
           hectares: entry.hectares,
+          toneladasCosechadas: entry.toneladasCosechadas,
+          toneladasVendidas: entry.toneladasVendidas,
+          toneladasDisponibles: entry.toneladasDisponibles,
+          porcentajeVendido,
           ingresosCosechas: entry.ingresosCosechas,
           ingresosIntereses: entry.ingresosIntereses,
           ingresos: entry.ingresos,
@@ -721,11 +791,18 @@ const ReportsViewInner: React.FC<Props> = ({
         };
       })
       .sort((a, b) => {
-        // Put "General / Sin lote" at the bottom; sort real lots naturally by name/number
         if (a.lotId === 'sin_lote') return 1;
         if (b.lotId === 'sin_lote') return -1;
         return naturalCompare(a.lotName, b.lotName);
       });
+
+    const totalToneladasCosechadas = roundTons(allLotResults.reduce((sum, l) => sum + l.toneladasCosechadas, 0));
+    const totalToneladasVendidas = roundTons(allLotResults.reduce((sum, l) => sum + l.toneladasVendidas, 0));
+    const totalToneladasDisponibles = roundTons(allLotResults.reduce((sum, l) => sum + l.toneladasDisponibles, 0));
+    const totalPorcentajeVendido =
+      totalToneladasCosechadas > 0.0001
+        ? Math.min(100, roundPct2((totalToneladasVendidas / totalToneladasCosechadas) * 100))
+        : 0;
 
     const totalIngresosCosechas = allLotResults.reduce((sum, l) => sum + l.ingresosCosechas, 0);
     const totalIngresosIntereses = allLotResults.reduce((sum, l) => sum + l.ingresosIntereses, 0);
@@ -767,6 +844,10 @@ const ReportsViewInner: React.FC<Props> = ({
       isFilteredByLot,
       selectedLotName: isFilteredByLot ? getLotInfo(selectedLotId).name : null,
       lotResults: allLotResults,
+      totalToneladasCosechadas,
+      totalToneladasVendidas,
+      totalToneladasDisponibles,
+      totalPorcentajeVendido,
       totalIngresosCosechas,
       totalIngresosIntereses,
       totalIngresos,
@@ -789,6 +870,7 @@ const ReportsViewInner: React.FC<Props> = ({
     campaignIncomes,
     campaignExpenses,
     campaignJobs,
+    campaignHarvests,
     safeLots,
     activeScope,
     selectedLotId,
@@ -1074,6 +1156,10 @@ const ReportsViewInner: React.FC<Props> = ({
         rows.push([
           t('common.lot'),
           bi('Superficie (ha)', 'Area (ha)'),
+          bi('Cosechado (t)', 'Harvested (t)'),
+          bi('Vendido (t)', 'Sold (t)'),
+          bi('% vendido', '% sold'),
+          bi('Disponible (t)', 'Available (t)'),
           `${t('reports.incomes')} (${currencyLabel})`,
           `${bi('Gastos directos', 'Direct expenses')} (${currencyLabel})`,
           `${bi('Maquinaria recibida', 'Machinery received')} (${currencyLabel})`,
@@ -1087,6 +1173,10 @@ const ReportsViewInner: React.FC<Props> = ({
           rows.push([
             lot.lotName,
             Number(lot.hectares.toFixed(2)),
+            Number(lot.toneladasCosechadas.toFixed(2)),
+            Number(lot.toneladasVendidas.toFixed(2)),
+            Number(lot.porcentajeVendido.toFixed(1)),
+            Number(lot.toneladasDisponibles.toFixed(2)),
             Number(lot.ingresos.toFixed(2)),
             Number(lot.gastosDirectos.toFixed(2)),
             Number(lot.gastosMaquinaria.toFixed(2)),
@@ -1100,6 +1190,10 @@ const ReportsViewInner: React.FC<Props> = ({
         rows.push([
           'TOTAL',
           Number(propertyData.totalHectares.toFixed(2)),
+          Number(propertyData.totalToneladasCosechadas.toFixed(2)),
+          Number(propertyData.totalToneladasVendidas.toFixed(2)),
+          Number(propertyData.totalPorcentajeVendido.toFixed(1)),
+          Number(propertyData.totalToneladasDisponibles.toFixed(2)),
           Number(propertyData.totalIngresos.toFixed(2)),
           Number(propertyData.totalGastosDirectos.toFixed(2)),
           Number(propertyData.totalGastosMaquinaria.toFixed(2)),
@@ -1701,6 +1795,11 @@ const ReportsViewInner: React.FC<Props> = ({
                                 <span className="text-[#C44545] font-semibold">
                                   {bi('Gas', 'Exp')}: {fmt(lot.gastosTotales)}
                                 </span>
+                                {lot.toneladasCosechadas > 0.0001 && (
+                                  <span className="text-[#5E6D64] font-medium">
+                                    · {formatNumberEs(lot.toneladasVendidas, 1)}/{formatNumberEs(lot.toneladasCosechadas, 1)} t ({formatNumberEs(lot.porcentajeVendido, 0)}%)
+                                  </span>
+                                )}
                               </div>
                             </div>
 
@@ -1727,6 +1826,37 @@ const ReportsViewInner: React.FC<Props> = ({
                               isLotExpanded ? 'block' : 'hidden print:block'
                             } px-4 pb-3 pt-2 bg-[#FAFBF8] border-t border-[#EFF2EF] space-y-2.5 text-xs`}
                           >
+                            {lot.toneladasCosechadas > 0.0001 && (
+                              <div className="rounded-xl bg-white border border-[#E2E7E3] p-2.5 space-y-2">
+                                <div className="flex items-center justify-between text-[11px] font-bold text-[#26352D]">
+                                  <span>{bi('Producción y ventas', 'Production & sales')}</span>
+                                  <span className="text-[#1D704B] tabular-nums">
+                                    {formatNumberEs(lot.porcentajeVendido, 1)}% {bi('vendido', 'sold')}
+                                  </span>
+                                </div>
+                                <div className="h-1.5 w-full rounded-full bg-[#E8EFEA] overflow-hidden">
+                                  <div
+                                    className="h-full rounded-full bg-[#24875B]"
+                                    style={{ width: `${Math.min(100, Math.max(0, lot.porcentajeVendido))}%` }}
+                                  />
+                                </div>
+                                <div className="grid grid-cols-3 gap-2 text-center tabular-nums">
+                                  <div>
+                                    <span className="block text-[10px] text-[#5E6D64]">{bi('Cosechado', 'Harvested')}</span>
+                                    <strong className="text-[#26352D]">{formatNumberEs(lot.toneladasCosechadas, 2)} t</strong>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-[#5E6D64]">{bi('Vendido', 'Sold')}</span>
+                                    <strong className="text-[#26352D]">{formatNumberEs(lot.toneladasVendidas, 2)} t</strong>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-[#5E6D64]">{bi('Disponible', 'Available')}</span>
+                                    <strong className="text-[#1D704B]">{formatNumberEs(lot.toneladasDisponibles, 2)} t</strong>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
                             {(lot.ingresoPorHa !== null ||
                               lot.gastoPorHa !== null ||
                               lot.utilidadPorHa !== null) && (

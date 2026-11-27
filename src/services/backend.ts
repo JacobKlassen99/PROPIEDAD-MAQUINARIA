@@ -24,6 +24,7 @@ import {
   Customer,
   PaymentSettings,
   HarvestSale,
+  HarvestSaleDistribution,
   HarvestSaleStatus,
   ArDebt,
   ArDebtApplicationItem,
@@ -39,7 +40,7 @@ import {
   invalidateQueries,
   resetAllCache,
 } from './dataCache';
-import { computeHarvestAvailability } from './harvestAvailability';
+import { computeHarvestAvailability, normalizeHarvestUnit } from './harvestAvailability';
 
 /**
  * Backend Communication Service for MAQUINARIAS Y PROPIEDAD
@@ -684,12 +685,12 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
       throw new BackendError(rawErrMsg, kind, { status: response.status, code });
     }
 
-    // Preserve sibling fields (e.g. `harvests`) when an endpoint returns an array in `result`
+    // Preserve sibling fields (e.g. `harvests`, `distributions`) when an endpoint returns an array in `result`
     // alongside another distinct top-level collection (such as `harvestSale.list`).
     const preserveMultiCollectionEnvelope =
       action === 'harvestSale.list' &&
       Array.isArray(data.result) &&
-      (Array.isArray(data.harvests) || Array.isArray(data.cosechas));
+      (Array.isArray(data.harvests) || Array.isArray(data.cosechas) || Array.isArray(data.distributions));
     const result =
       data.result !== undefined
         ? preserveMultiCollectionEnvelope
@@ -3342,6 +3343,7 @@ export function normalizeHarvestRecord(raw: any): HarvestRecord {
     loteId: String(src.loteId || src.lote_id || ''),
     loteNombre: src.loteNombre || src.lote ? String(src.loteNombre || src.lote) : undefined,
     producto: String(src.producto || src.cultivo || src.concepto || 'Cosecha').trim(),
+    unidad: normalizeHarvestUnit(src.unidad ?? src.Unidad ?? 't').canonicalUnit,
     toneladas,
     asignadas,
     pendiente,
@@ -3377,13 +3379,15 @@ export async function createHarvest(params: {
   loteId: string;
   producto: string;
   toneladas: number;
+  unidad?: string;
   observacion?: string;
+  idempotencyKey?: string;
 }): Promise<HarvestRecord> {
   const tons = parseDecimalNumber(params.toneladas);
   if (!params.campanaId) throw new Error('Selecciona la campaña de la cosecha.');
   if (!params.loteId) throw new Error('Selecciona el lote de la cosecha.');
   if (!params.producto || !params.producto.trim()) throw new Error('Indica el producto cosechado.');
-  if (tons <= 0) throw new Error('Las toneladas cosechadas deben ser mayores a 0.');
+  if (tons <= 0) throw new Error('La cantidad cosechada debe ser mayor a 0.');
 
   const payload = {
     fecha: params.fecha,
@@ -3391,11 +3395,13 @@ export async function createHarvest(params: {
     loteId: params.loteId,
     producto: params.producto.trim(),
     toneladas: tons,
+    unidad: normalizeHarvestUnit(params.unidad || 'toneladas').canonicalUnit,
     observacion: (params.observacion || '').trim(),
+    idempotencyKey: params.idempotencyKey || `harv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
   };
 
   const res = await callGAS<any>('harvest.create', payload, false);
-  invalidateBackendDomains(['harvest.']);
+  invalidateBackendDomains(['harvest.', 'harvestSale.', 'report.']);
   const rawRecord = res?.cosecha || (res?.result && !Array.isArray(res.result) ? res.result : res);
   return normalizeHarvestRecord({
     ...payload,
@@ -3411,6 +3417,7 @@ export async function updateHarvest(
     loteId?: string;
     producto?: string;
     toneladas?: number;
+    unidad?: string;
     observacion?: string;
   }
 ): Promise<HarvestRecord> {
@@ -3428,20 +3435,31 @@ export async function updateHarvest(
   }
   if (params.toneladas !== undefined) {
     const tons = parseDecimalNumber(params.toneladas);
-    if (tons <= 0) throw new Error('Las toneladas cosechadas deben ser mayores a 0.');
+    if (tons <= 0) throw new Error('La cantidad cosechada debe ser mayor a 0.');
     payload.toneladas = tons;
+  }
+  if (params.unidad !== undefined) {
+    payload.unidad = normalizeHarvestUnit(params.unidad).canonicalUnit;
   }
   if (params.observacion !== undefined) {
     payload.observacion = params.observacion.trim();
   }
 
   const res = await callGAS<any>('harvest.update', payload, false);
-  invalidateBackendDomains(['harvest.']);
+  invalidateBackendDomains(['harvest.', 'harvestSale.', 'report.']);
   const rawRecord = res?.cosecha || (res?.result && !Array.isArray(res.result) ? res.result : res);
   return normalizeHarvestRecord({
     ...payload,
     ...(rawRecord && typeof rawRecord === 'object' ? rawRecord : {}),
   });
+}
+
+export async function deleteHarvest(id: string): Promise<void> {
+  if (!id || !id.trim()) {
+    throw new Error('Falta el identificador de la cosecha a eliminar.');
+  }
+  await callGAS<any>('harvest.delete', { id: id.trim() }, false);
+  invalidateBackendDomains(['harvest.', 'harvestSale.', 'report.']);
 }
 
 export async function assignHarvestPrice(params: {
@@ -3850,6 +3868,32 @@ export function computeHarvestSaleStatus(
   return 'VENTA_COMPLETA';
 }
 
+export function normalizeHarvestSaleDistribution(raw: any): HarvestSaleDistribution {
+  const rawMoneda = String(raw?.moneda || 'USD').toUpperCase();
+  const moneda: Currency = rawMoneda === 'USD' || rawMoneda === 'U$D' ? 'USD' : 'BOB';
+  return {
+    id: String(raw?.id || raw?.ID || '').trim(),
+    ventaId: String(raw?.ventaId || raw?.venta_id || '').trim(),
+    cosechaId: String(raw?.cosechaId || raw?.cosecha_id || '').trim(),
+    loteId: String(raw?.loteId || raw?.lote_id || '').trim(),
+    loteNombre: String(raw?.loteNombre || raw?.lote || '').trim() || undefined,
+    campanaId: String(raw?.campanaId || raw?.campana_id || '').trim(),
+    campanaNombre: String(raw?.campanaNombre || raw?.campana || '').trim() || undefined,
+    producto: String(raw?.producto || '').trim(),
+    unidad: normalizeHarvestUnit(raw?.unidad || 't').canonicalUnit,
+    toneladasAsignadas: parseDecimalNumber(raw?.toneladasAsignadas ?? raw?.toneladas ?? raw?.cantidad ?? 0),
+    participacionPct: parseDecimalNumber(raw?.participacionPct ?? raw?.porcentaje ?? 0),
+    precioUnitario: parseDecimalNumber(raw?.precioUnitario ?? 0),
+    importeAsignado: parseDecimalNumber(raw?.importeAsignado ?? raw?.importe ?? 0),
+    moneda,
+    tcHistorico: parseDecimalNumber(raw?.tcHistorico ?? raw?.tc ?? 6.96),
+    movimientoId: String(raw?.movimientoId || '').trim() || undefined,
+    anulada: parseBoolFlag(raw?.anulada, false),
+    creadoEn: raw?.creadoEn ? String(raw.creadoEn) : undefined,
+    actualizadoEn: raw?.actualizadoEn ? String(raw.actualizadoEn) : undefined,
+  };
+}
+
 export function normalizeHarvestSale(raw: any): HarvestSale {
   const rawMoneda = String(raw?.moneda || 'USD').toUpperCase();
   const moneda: Currency = rawMoneda === 'USD' || rawMoneda === 'U$D' ? 'USD' : 'BOB';
@@ -3887,6 +3931,9 @@ export function normalizeHarvestSale(raw: any): HarvestSale {
       : undefined;
   const rawAplicarInteres = isComplete ? parseBoolFlag(raw?.aplicarInteres, false) : false;
   const rawTasa = rawAplicarInteres ? parseDecimalNumber(raw?.tasaInteresMensual ?? 0) : 0;
+  const rawDists = Array.isArray(raw?.distribuciones)
+    ? raw.distribuciones.map(normalizeHarvestSaleDistribution)
+    : undefined;
 
   return {
     id: String(raw?.id || raw?.ID || '').trim(),
@@ -3896,9 +3943,10 @@ export function normalizeHarvestSale(raw: any): HarvestSale {
     campanaNombre: String(raw?.campanaNombre || raw?.campana || '').trim(),
     loteId: String(raw?.loteId || '').trim(),
     loteNombre: String(raw?.loteNombre || raw?.lote || '').trim(),
+    origenResumen: String(raw?.origenResumen || '').trim() || undefined,
     producto: String(raw?.producto || '').trim(),
     cantidad,
-    unidad: String(raw?.unidad || 't').trim() || 't',
+    unidad: normalizeHarvestUnit(raw?.unidad || 't').canonicalUnit,
     clienteId: clienteId || undefined,
     clienteNombre: clienteNombre || undefined,
     compradorPendiente,
@@ -3918,6 +3966,7 @@ export function normalizeHarvestSale(raw: any): HarvestSale {
     estadoComprador: compradorPendiente ? 'PENDIENTE' : 'ASIGNADO',
     estadoPrecio: precioPendiente ? 'PENDIENTE' : 'ASIGNADO',
     anulada: parseBoolFlag(raw?.anulada, false),
+    distribuciones: rawDists,
     creadoPor: raw?.creadoPor ? String(raw.creadoPor) : undefined,
     creadoEn: raw?.creadoEn ? String(raw.creadoEn) : undefined,
     actualizadoEn: raw?.actualizadoEn ? String(raw.actualizadoEn) : undefined,
@@ -3963,9 +4012,18 @@ export async function getHarvestSales(
     }
 
     const salesNormalized = salesRaw.map(normalizeHarvestSale).filter((s) => Boolean(s.id));
-    // Reconcile availability centrally so PropertyView and HarvestSalesView always agree
-    // (harvested tons minus all non-cancelled sales, including pending buyer/price sales).
-    const reconciledHarvests = computeHarvestAvailability(harvestsNormalized, salesNormalized);
+    const rawDistributions = Array.isArray(res?.distributions)
+      ? res.distributions
+      : Array.isArray(res?.result?.distributions)
+      ? res.result.distributions
+      : [];
+    const distributionsNormalized = rawDistributions.map(normalizeHarvestSaleDistribution);
+    // Reconcile availability centrally using distributions (with legacy fallback)
+    const reconciledHarvests = computeHarvestAvailability(
+      harvestsNormalized,
+      salesNormalized,
+      distributionsNormalized.length > 0 ? distributionsNormalized : undefined
+    );
 
     return {
       sales: salesNormalized,
@@ -3988,7 +4046,9 @@ export async function getHarvestSales(
 }
 
 export async function createHarvestSale(params: {
-  cosechaId: string;
+  producto?: string;
+  unidad?: string;
+  cosechaId?: string;
   fecha: string;
   cantidad: number;
   clienteId?: string;
@@ -4004,8 +4064,7 @@ export async function createHarvestSale(params: {
   observacion?: string;
   idempotencyKey?: string;
 }): Promise<HarvestSale> {
-  const payload = {
-    cosechaId: params.cosechaId,
+  const payload: Record<string, any> = {
     fecha: params.fecha,
     cantidad: parseDecimalNumber(params.cantidad),
     clienteId: params.compradorPendiente ? '' : (params.clienteId || '').trim(),
@@ -4021,6 +4080,15 @@ export async function createHarvestSale(params: {
     observacion: (params.observacion || '').trim(),
     idempotencyKey: params.idempotencyKey || `hs_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
   };
+  if (params.producto && params.producto.trim()) {
+    payload.producto = params.producto.trim();
+  }
+  if (params.unidad && params.unidad.trim()) {
+    payload.unidad = normalizeHarvestUnit(params.unidad).canonicalUnit;
+  }
+  if (params.cosechaId && params.cosechaId.trim()) {
+    payload.cosechaId = params.cosechaId.trim();
+  }
   const res = await callGAS<any>('harvestSale.create', payload, false);
   invalidateBackendDomains(['harvestSale.', 'harvest.', 'movement.', 'ar.', 'report.']);
   const created = res?.sale || res?.venta || res?.result || res;

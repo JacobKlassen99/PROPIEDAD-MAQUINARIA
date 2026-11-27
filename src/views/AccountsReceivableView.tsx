@@ -100,7 +100,7 @@ export const AccountsReceivableView: React.FC<AccountsReceivableViewProps> = ({
   const [detailError, setDetailError] = useState<string | null>(null);
 
   const [search, setSearch] = useState('');
-  const [showZeroBalanceCustomers, setShowZeroBalanceCustomers] = useState(false);
+  const [customerFilter, setCustomerFilter] = useState<'with_debt' | 'without_debt' | 'all'>('with_debt');
 
   // Assign customer to unassigned debt
   const [assigningDebt, setAssigningDebt] = useState<ArDebt | null>(null);
@@ -221,13 +221,40 @@ export const AccountsReceivableView: React.FC<AccountsReceivableViewProps> = ({
     loadCustomerDetail(clienteId, false);
   };
 
+  // Merge AR summary customers with all active registered customers locally (no extra backend requests)
+  const mergedCustomerSummaries = useMemo<ArCustomerSummary[]>(() => {
+    const byId = new Map<string, ArCustomerSummary>();
+    (summaryData?.customers || []).forEach((c) => {
+      if (c && c.clienteId) byId.set(String(c.clienteId), c);
+    });
+    (customers || []).forEach((cust) => {
+      if (!cust || !cust.id || cust.activo === false) return;
+      const cid = String(cust.id);
+      if (!byId.has(cid)) {
+        byId.set(cid, {
+          clienteId: cid,
+          clienteNombre: cust.nombre,
+          telefono: cust.telefono || '',
+          direccion: cust.direccion || '',
+          activo: true,
+          registrosPendientes: 0,
+          registrosVencidos: 0,
+          usd: { capitalPendiente: 0, interesAcumulado: 0, totalPendiente: 0 },
+          bob: { capitalPendiente: 0, interesAcumulado: 0, totalPendiente: 0 },
+          deudas: [],
+        });
+      }
+    });
+    return Array.from(byId.values());
+  }, [summaryData, customers]);
+
   const filteredCustomerSummaries = useMemo(() => {
-    const list = summaryData?.customers || [];
     const q = search.trim().toLowerCase();
-    return list
+    return mergedCustomerSummaries
       .filter((c) => {
         const hasDebt = c.usd.totalPendiente > 0.005 || c.bob.totalPendiente > 0.005 || c.registrosPendientes > 0;
-        if (!showZeroBalanceCustomers && !hasDebt) return false;
+        if (customerFilter === 'with_debt' && !hasDebt) return false;
+        if (customerFilter === 'without_debt' && hasDebt) return false;
         if (!q) return true;
         return `${c.clienteNombre} ${c.telefono || ''}`.toLowerCase().includes(q);
       })
@@ -235,7 +262,7 @@ export const AccountsReceivableView: React.FC<AccountsReceivableViewProps> = ({
         if (b.registrosVencidos !== a.registrosVencidos) return b.registrosVencidos - a.registrosVencidos;
         return a.clienteNombre.localeCompare(b.clienteNombre, 'es', { sensitivity: 'base' });
       });
-  }, [summaryData, search, showZeroBalanceCustomers]);
+  }, [mergedCustomerSummaries, search, customerFilter]);
 
   const pendingDebts = useMemo(
     () =>
@@ -1620,7 +1647,7 @@ export const AccountsReceivableView: React.FC<AccountsReceivableViewProps> = ({
             </div>
           )}
 
-          {/* Search + True Switch for "Mostrar clientes sin deuda" */}
+          {/* Search + Continuous 3-Option Horizontal Sliding Filter Bar */}
           <div className="space-y-2.5">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-[#7A8780]" />
@@ -1633,13 +1660,46 @@ export const AccountsReceivableView: React.FC<AccountsReceivableViewProps> = ({
               />
             </div>
 
-            <div className="rounded-xl border border-[#E2E7E3] bg-white px-3.5 py-2">
-              <Switch<boolean>
-                inline
-                label={bi('Mostrar clientes sin deuda', 'Show customers without debt')}
-                value={showZeroBalanceCustomers}
-                onChange={setShowZeroBalanceCustomers}
+            <div
+              role="tablist"
+              aria-label={bi('Filtrar clientes por estado de deuda', 'Filter customers by debt status')}
+              className="relative grid grid-cols-3 rounded-xl bg-[#EDF1EE] p-0.5 border border-[#DDE4DF] overflow-hidden select-none"
+            >
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute top-0.5 bottom-0.5 left-0.5 w-[calc((100%-4px)/3)] rounded-[10px] bg-[#24875B] shadow-xs transition-transform duration-200 ease-out"
+                style={{
+                  transform:
+                    customerFilter === 'with_debt'
+                      ? 'translateX(0%)'
+                      : customerFilter === 'without_debt'
+                      ? 'translateX(100%)'
+                      : 'translateX(200%)',
+                }}
               />
+              {(
+                [
+                  { id: 'with_debt', label: bi('Con deuda', 'With debt') },
+                  { id: 'without_debt', label: bi('Sin deuda', 'No debt') },
+                  { id: 'all', label: bi('Todos', 'All') },
+                ] as const
+              ).map((opt) => {
+                const active = customerFilter === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => setCustomerFilter(opt.id)}
+                    className={`relative z-10 h-9 w-full px-2 text-xs font-bold transition-colors duration-200 cursor-pointer whitespace-nowrap truncate ${
+                      active ? 'text-white' : 'text-[#44544C] hover:text-[#1F2D25]'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -1648,6 +1708,10 @@ export const AccountsReceivableView: React.FC<AccountsReceivableViewProps> = ({
             <div className="rounded-2xl border border-[#E2E7E3] bg-white px-4 py-8 text-center text-sm font-medium text-[#5E6D64]">
               {search.trim()
                 ? bi('No se encontraron clientes con ese nombre.', 'No customers match that search.')
+                : customerFilter === 'without_debt'
+                ? bi('No hay clientes sin deuda', 'No customers without debt')
+                : customerFilter === 'all'
+                ? bi('No hay clientes registrados.', 'No registered customers.')
                 : bi('No hay clientes con saldo pendiente.', 'No customers with pending balance.')}
             </div>
           ) : (

@@ -7,7 +7,9 @@ import {
   buildDebitNoteSecondaryMeta,
   buildPaymentReceiptSecondaryMeta,
   computeDebitNoteSummary,
+  computePaymentReceiptLineDisplay,
   computePaymentReceiptSummary,
+  formatDebitNoteDueCell,
   formatDocumentAmount,
   getCurrencyShortLabel,
   parseDocumentConcept,
@@ -231,7 +233,7 @@ export const DocumentPreviewScreen: React.FC<DocumentPreviewScreenProps> = ({
       )}
 
       {/* Letter Portrait Administrative Sheet */}
-      <div className="print-doc-root max-w-[780px] mx-auto bg-white rounded-2xl border border-[#E2E7E3] shadow-sm px-4 py-5 sm:px-8 sm:py-7 text-[#111827] font-sans">
+      <div className="print-doc-root max-w-[820px] mx-auto bg-white rounded-2xl border border-[#E2E7E3] shadow-sm px-4 py-5 sm:px-7 sm:py-6 text-[#111827] font-sans">
         {/* Document Header */}
         <div className="flex items-start justify-between gap-4 pb-3.5 border-b border-[#D1D5DB]">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -309,31 +311,44 @@ export const DocumentPreviewScreen: React.FC<DocumentPreviewScreenProps> = ({
           )}
         </div>
 
-        {/* DEBIT NOTE TABLE */}
+        {/* DEBIT NOTE TABLE — 8 columns with independent Vencimiento & Interés */}
         {isDebit && debitNote && debitSummary && (
           <>
             <div className="overflow-x-auto -mx-1 px-1">
-              <table className="w-full border-collapse text-xs">
+              <table className="w-full border-collapse text-[11.5px]">
                 <thead>
                   <tr className="bg-[#F3F4F6] text-[#374151] border-t border-b border-[#D1D5DB]">
-                    <th className="py-2 px-2 text-left font-semibold whitespace-nowrap w-[86px]">
+                    <th className="py-2 px-1.5 text-left font-semibold whitespace-nowrap">
                       {bi('Fecha', 'Date')}
                     </th>
-                    <th className="py-2 px-2 text-left font-semibold">
-                      {bi('Concepto / Descripción', 'Concept / Description')}
+                    <th className="py-2 px-1.5 text-left font-semibold">
+                      {bi('Concepto', 'Concept')}
                     </th>
-                    <th className="py-2 px-2 text-right font-semibold whitespace-nowrap">
-                      {bi('Cantidad', 'Quantity')}
+                    <th className="py-2 px-1.5 text-right font-semibold whitespace-nowrap">
+                      {bi('Cantidad', 'Qty')}
                     </th>
-                    <th className="py-2 px-2 text-right font-semibold whitespace-nowrap">
+                    <th className="py-2 px-1.5 text-right font-semibold whitespace-nowrap">
                       {debitCurrLabel
                         ? bi(`Precio unit. (${debitCurrLabel})`, `Unit price (${debitCurrLabel})`)
                         : bi('Precio unit.', 'Unit price')}
                     </th>
-                    <th className="py-2 px-2 text-right font-semibold whitespace-nowrap">
+                    <th className="py-2 px-1.5 text-left font-semibold whitespace-nowrap">
+                      {bi('Vencimiento', 'Due date')}
+                    </th>
+                    <th className="py-2 px-1.5 text-right font-semibold whitespace-nowrap">
                       {debitCurrLabel
-                        ? bi(`Importe pendiente (${debitCurrLabel})`, `Pending amount (${debitCurrLabel})`)
-                        : bi('Importe pendiente', 'Pending amount')}
+                        ? bi(`Capital pend. (${debitCurrLabel})`, `Pending prin. (${debitCurrLabel})`)
+                        : bi('Capital pend.', 'Pending prin.')}
+                    </th>
+                    <th className="py-2 px-1.5 text-right font-semibold whitespace-nowrap">
+                      {debitCurrLabel
+                        ? bi(`Interés (${debitCurrLabel})`, `Interest (${debitCurrLabel})`)
+                        : bi('Interés', 'Interest')}
+                    </th>
+                    <th className="py-2 px-1.5 text-right font-semibold whitespace-nowrap">
+                      {debitCurrLabel
+                        ? bi(`Total (${debitCurrLabel})`, `Total (${debitCurrLabel})`)
+                        : bi('Total', 'Total')}
                     </th>
                   </tr>
                 </thead>
@@ -341,32 +356,33 @@ export const DocumentPreviewScreen: React.FC<DocumentPreviewScreenProps> = ({
                   {debitNote.items.map((item, idx) => {
                     const parsed = parseDocumentConcept(item);
                     const metaLines = buildDebitNoteSecondaryMeta(item, lang);
+                    const dueDisplay = formatDebitNoteDueCell(item, lang);
                     const hasRowInterest = item.interes > 0.005;
                     return (
                       <tr
                         key={`${item.deudaTipo}_${item.deudaId}_${idx}`}
                         className="border-b border-[#E5E7EB] align-top"
                       >
-                        <td className="py-2.5 px-2 text-[#374151] whitespace-nowrap tabular-nums">
+                        <td className="py-2 px-1.5 text-[#374151] whitespace-nowrap tabular-nums">
                           {item.fecha ? formatDateLocale(item.fecha, lang) : '—'}
                         </td>
-                        <td className="py-2.5 px-2">
+                        <td className="py-2 px-1.5 min-w-[140px]">
                           <div className="font-semibold text-[#111827] leading-snug">
                             {parsed.primary}
                           </div>
                           {metaLines.map((line, mIdx) => (
                             <div
                               key={mIdx}
-                              className="text-[11px] text-[#6B7280] leading-snug mt-0.5"
+                              className="text-[10.5px] text-[#6B7280] leading-snug mt-0.5"
                             >
                               {line}
                             </div>
                           ))}
                         </td>
-                        <td className="py-2.5 px-2 text-right text-[#374151] whitespace-nowrap tabular-nums">
+                        <td className="py-2 px-1.5 text-right text-[#374151] whitespace-nowrap tabular-nums">
                           {formatNumberLocale(item.cantidad, lang, 2)} {item.unidad}
                         </td>
-                        <td className="py-2.5 px-2 text-right text-[#374151] whitespace-nowrap tabular-nums">
+                        <td className="py-2 px-1.5 text-right text-[#374151] whitespace-nowrap tabular-nums">
                           {formatDocumentAmount(
                             item.precioUnitario,
                             item.moneda,
@@ -374,20 +390,38 @@ export const DocumentPreviewScreen: React.FC<DocumentPreviewScreenProps> = ({
                             lang
                           )}
                         </td>
-                        <td className="py-2.5 px-2 text-right whitespace-nowrap tabular-nums">
-                          <div className="font-semibold text-[#111827]">
-                            {formatDocumentAmount(
-                              item.saldoPendiente,
-                              item.moneda,
-                              debitSummary.singleCurrency,
-                              lang
-                            )}
-                          </div>
-                          {hasRowInterest && (
-                            <div className="text-[10.5px] text-[#6B7280] mt-0.5">
-                              + {formatDocumentAmount(item.interes, item.moneda, debitSummary.singleCurrency, lang)}{' '}
-                              {bi('int.', 'int.')}
+                        <td className="py-2 px-1.5 text-left whitespace-nowrap tabular-nums">
+                          <div className="text-[#374151]">{dueDisplay.dueDateText}</div>
+                          {dueDisplay.overdueText && (
+                            <div className="text-[10px] text-[#9A3412] font-medium mt-0.5">
+                              {dueDisplay.overdueText}
                             </div>
+                          )}
+                        </td>
+                        <td className="py-2 px-1.5 text-right text-[#374151] whitespace-nowrap tabular-nums">
+                          {formatDocumentAmount(
+                            item.saldoPendiente,
+                            item.moneda,
+                            debitSummary.singleCurrency,
+                            lang
+                          )}
+                        </td>
+                        <td className="py-2 px-1.5 text-right text-[#4B5563] whitespace-nowrap tabular-nums">
+                          {hasRowInterest
+                            ? formatDocumentAmount(
+                                item.interes,
+                                item.moneda,
+                                debitSummary.singleCurrency,
+                                lang
+                              )
+                            : '—'}
+                        </td>
+                        <td className="py-2 px-1.5 text-right font-semibold text-[#111827] whitespace-nowrap tabular-nums">
+                          {formatDocumentAmount(
+                            item.totalPorCobrar,
+                            item.moneda,
+                            debitSummary.singleCurrency,
+                            lang
                           )}
                         </td>
                       </tr>
@@ -447,30 +481,36 @@ export const DocumentPreviewScreen: React.FC<DocumentPreviewScreenProps> = ({
           </>
         )}
 
-        {/* PAYMENT RECEIPT TABLE */}
+        {/* PAYMENT RECEIPT TABLE — 7 columns with independent Pagado Bs column */}
         {isReceipt && paymentReceipt && receiptSummary && (
           <>
             <div className="overflow-x-auto -mx-1 px-1">
-              <table className="w-full border-collapse text-xs">
+              <table className="w-full border-collapse text-[11.5px]">
                 <thead>
                   <tr className="bg-[#F3F4F6] text-[#374151] border-t border-b border-[#D1D5DB]">
-                    <th className="py-2 px-2 text-left font-semibold whitespace-nowrap w-[86px]">
+                    <th className="py-2 px-1.5 text-left font-semibold whitespace-nowrap">
                       {bi('Fecha', 'Date')}
                     </th>
-                    <th className="py-2 px-2 text-left font-semibold">
-                      {bi('Concepto / Descripción', 'Concept / Description')}
+                    <th className="py-2 px-1.5 text-left font-semibold">
+                      {bi('Concepto', 'Concept')}
                     </th>
-                    <th className="py-2 px-2 text-right font-semibold whitespace-nowrap">
+                    <th className="py-2 px-1.5 text-right font-semibold whitespace-nowrap">
                       {receiptCurrLabel
                         ? bi(`Saldo ant. (${receiptCurrLabel})`, `Prev. bal. (${receiptCurrLabel})`)
                         : bi('Saldo ant.', 'Prev. bal.')}
                     </th>
-                    <th className="py-2 px-2 text-right font-semibold whitespace-nowrap">
+                    <th className="py-2 px-1.5 text-right font-semibold whitespace-nowrap">
                       {receiptCurrLabel
-                        ? bi(`Cobrado (${receiptCurrLabel})`, `Paid (${receiptCurrLabel})`)
-                        : bi('Cobrado', 'Paid')}
+                        ? bi(`Interés (${receiptCurrLabel})`, `Interest (${receiptCurrLabel})`)
+                        : bi('Interés', 'Interest')}
                     </th>
-                    <th className="py-2 px-2 text-right font-semibold whitespace-nowrap">
+                    <th className="py-2 px-1.5 text-right font-semibold whitespace-nowrap">
+                      {bi('Pagado USD', 'Paid USD')}
+                    </th>
+                    <th className="py-2 px-1.5 text-right font-semibold whitespace-nowrap">
+                      {bi('Pagado Bs', 'Paid Bs')}
+                    </th>
+                    <th className="py-2 px-1.5 text-right font-semibold whitespace-nowrap">
                       {receiptCurrLabel
                         ? bi(`Saldo rest. (${receiptCurrLabel})`, `Remaining (${receiptCurrLabel})`)
                         : bi('Saldo rest.', 'Remaining')}
@@ -482,28 +522,33 @@ export const DocumentPreviewScreen: React.FC<DocumentPreviewScreenProps> = ({
                     const parsed = parseDocumentConcept(item);
                     const metaLines = buildPaymentReceiptSecondaryMeta(item, lang);
                     const hasRowInterest = item.interesPagado > 0.005;
+                    const lineDisp = computePaymentReceiptLineDisplay(
+                      item,
+                      paymentReceipt.tcAplicado
+                    );
+
                     return (
                       <tr
                         key={`${item.deudaTipo}_${item.deudaId}_${idx}`}
                         className="border-b border-[#E5E7EB] align-top"
                       >
-                        <td className="py-2.5 px-2 text-[#374151] whitespace-nowrap tabular-nums">
+                        <td className="py-2 px-1.5 text-[#374151] whitespace-nowrap tabular-nums">
                           {item.fechaDeuda ? formatDateLocale(item.fechaDeuda, lang) : '—'}
                         </td>
-                        <td className="py-2.5 px-2">
+                        <td className="py-2 px-1.5 min-w-[140px]">
                           <div className="font-semibold text-[#111827] leading-snug">
                             {parsed.primary}
                           </div>
                           {metaLines.map((line, mIdx) => (
                             <div
                               key={mIdx}
-                              className="text-[11px] text-[#6B7280] leading-snug mt-0.5"
+                              className="text-[10.5px] text-[#6B7280] leading-snug mt-0.5"
                             >
                               {line}
                             </div>
                           ))}
                         </td>
-                        <td className="py-2.5 px-2 text-right text-[#4B5563] whitespace-nowrap tabular-nums">
+                        <td className="py-2 px-1.5 text-right text-[#4B5563] whitespace-nowrap tabular-nums">
                           {formatDocumentAmount(
                             item.importeAnterior,
                             item.monedaDeuda,
@@ -511,35 +556,61 @@ export const DocumentPreviewScreen: React.FC<DocumentPreviewScreenProps> = ({
                             lang
                           )}
                         </td>
-                        <td className="py-2.5 px-2 text-right whitespace-nowrap tabular-nums">
-                          <div className="font-semibold text-[#111827]">
-                            {formatDocumentAmount(
-                              item.totalPagado,
-                              item.monedaDeuda,
-                              receiptSummary.singleCurrency,
-                              lang
-                            )}
-                          </div>
-                          {hasRowInterest && (
-                            <div className="text-[10.5px] text-[#6B7280] mt-0.5">
-                              {bi('Cap.', 'Prin.')}{' '}
-                              {formatDocumentAmount(
-                                item.capitalPagado,
-                                item.monedaDeuda,
-                                receiptSummary.singleCurrency,
-                                lang
-                              )}{' '}
-                              · {bi('Int.', 'Int.')}{' '}
-                              {formatDocumentAmount(
+                        <td className="py-2 px-1.5 text-right text-[#4B5563] whitespace-nowrap tabular-nums">
+                          {hasRowInterest
+                            ? formatDocumentAmount(
                                 item.interesPagado,
                                 item.monedaDeuda,
                                 receiptSummary.singleCurrency,
                                 lang
+                              )
+                            : '—'}
+                        </td>
+                        <td className="py-2 px-1.5 text-right whitespace-nowrap tabular-nums">
+                          {lineDisp.paidUsd ? (
+                            <>
+                              <div
+                                className={
+                                  lineDisp.paidUsd.isActualReceived
+                                    ? 'font-semibold text-[#111827]'
+                                    : 'font-medium text-[#374151]'
+                                }
+                              >
+                                {formatNumberLocale(lineDisp.paidUsd.value, lang, 2)}
+                              </div>
+                              {lineDisp.paidUsd.isEquivalentApplied && (
+                                <div className="text-[9.5px] text-[#6B7280] mt-0.5">
+                                  {bi('Equiv. aplicado', 'Applied equiv.')}
+                                </div>
                               )}
-                            </div>
+                            </>
+                          ) : (
+                            <span className="text-[#9CA3AF]">—</span>
                           )}
                         </td>
-                        <td className="py-2.5 px-2 text-right text-[#374151] whitespace-nowrap tabular-nums">
+                        <td className="py-2 px-1.5 text-right whitespace-nowrap tabular-nums">
+                          {lineDisp.paidBs ? (
+                            <>
+                              <div
+                                className={
+                                  lineDisp.paidBs.isActualReceived
+                                    ? 'font-semibold text-[#111827]'
+                                    : 'font-medium text-[#374151]'
+                                }
+                              >
+                                {formatNumberLocale(lineDisp.paidBs.value, lang, 2)}
+                              </div>
+                              {lineDisp.paidBs.isEquivalentApplied && (
+                                <div className="text-[9.5px] text-[#6B7280] mt-0.5">
+                                  {bi('Equiv. aplicado', 'Applied equiv.')}
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-[#9CA3AF]">—</span>
+                          )}
+                        </td>
+                        <td className="py-2 px-1.5 text-right text-[#374151] whitespace-nowrap tabular-nums">
                           {formatDocumentAmount(
                             item.saldoRestante,
                             item.monedaDeuda,
@@ -554,19 +625,21 @@ export const DocumentPreviewScreen: React.FC<DocumentPreviewScreenProps> = ({
               </table>
             </div>
 
-            {/* PAYMENT RECEIPT TOTALS (Right-Aligned, Separated per Currency) */}
+            {/* PAYMENT RECEIPT TOTALS (Right-Aligned, Separated per Currency — Never summing USD + Bs) */}
             <div className="print-doc-totals mt-4 flex justify-end">
-              <div className="w-full sm:w-[310px] space-y-3">
+              <div className="w-full sm:w-[320px] space-y-3">
                 {receiptSummary.blocks.map((block) => {
                   const isMixed = receiptSummary.blocks.length > 1;
                   const cLabel = getCurrencyShortLabel(block.currency);
+                  const isConvertedBlock =
+                    receiptSummary.hasCrossCurrency && block.currency !== paymentReceipt.monedaPago;
                   return (
                     <div key={block.currency} className="space-y-1 text-xs">
                       <div className="flex items-center justify-between gap-4 px-2.5 py-0.5 text-[#4B5563]">
                         <span>
                           {isMixed
-                            ? bi(`Capital cobrado (${cLabel})`, `Principal paid (${cLabel})`)
-                            : bi('Capital cobrado', 'Principal paid')}
+                            ? bi(`Capital aplicado (${cLabel})`, `Principal applied (${cLabel})`)
+                            : bi('Capital aplicado', 'Principal applied')}
                         </span>
                         <span className="font-semibold text-[#111827] tabular-nums whitespace-nowrap">
                           {formatMoneyLocale(block.capital, block.currency, lang)}
@@ -587,12 +660,14 @@ export const DocumentPreviewScreen: React.FC<DocumentPreviewScreenProps> = ({
                       )}
 
                       <div className="flex items-center justify-between gap-4 rounded-md bg-[#F3F4F6] px-2.5 py-2 mt-1 border-t border-[#D1D5DB]">
-                        <span className="text-[12.5px] font-bold tracking-wide text-[#111827] uppercase">
-                          {isMixed
+                        <span className="text-[12px] font-bold tracking-wide text-[#111827] uppercase">
+                          {isConvertedBlock
+                            ? bi(`Equivalente aplicado (${cLabel})`, `Equivalent applied (${cLabel})`)
+                            : isMixed
                             ? bi(`Total cobrado (${cLabel})`, `Total paid (${cLabel})`)
                             : bi('Total cobrado', 'Total paid')}
                         </span>
-                        <span className="text-[14px] font-bold text-[#111827] tabular-nums whitespace-nowrap">
+                        <span className="text-[13.5px] font-bold text-[#111827] tabular-nums whitespace-nowrap">
                           {formatMoneyLocale(block.total, block.currency, lang)}
                         </span>
                       </div>
@@ -614,12 +689,17 @@ export const DocumentPreviewScreen: React.FC<DocumentPreviewScreenProps> = ({
                 })}
 
                 {receiptSummary.hasCrossCurrency && (
-                  <div className="px-2.5 pt-1.5 border-t border-[#E5E7EB] flex items-center justify-between gap-3 text-[11px] text-[#4B5563] tabular-nums">
-                    <span>
-                      {bi('Importe recibido', 'Amount received')} ({bi('TC', 'FX')}{' '}
-                      {formatNumberLocale(paymentReceipt.tcAplicado, lang, 2)})
-                    </span>
-                    <span className="font-semibold text-[#111827] whitespace-nowrap">
+                  <div className="rounded-md bg-[#EAF5EE] border border-[#24875B]/25 px-2.5 py-2 flex items-center justify-between gap-3 text-xs tabular-nums">
+                    <div>
+                      <div className="font-bold text-[#16553A] uppercase tracking-wide text-[11px]">
+                        {bi('Importe recibido', 'Amount received')}
+                      </div>
+                      <div className="text-[10.5px] text-[#3A6B53]">
+                        {bi('TC aplicado', 'Applied FX')}:{' '}
+                        {formatNumberLocale(paymentReceipt.tcAplicado, lang, 2)}
+                      </div>
+                    </div>
+                    <span className="text-[14px] font-bold text-[#16553A] whitespace-nowrap">
                       {formatMoneyLocale(
                         paymentReceipt.importeOriginalPagado,
                         paymentReceipt.monedaPago,

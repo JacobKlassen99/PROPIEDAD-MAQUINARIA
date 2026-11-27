@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Edit2,
   Loader2,
+  Package,
   Plus,
   RefreshCw,
   Search,
@@ -22,13 +23,19 @@ import type {
   ItemConfig,
   Lot,
   PaymentSettings,
+  WarehouseProductSummary,
 } from '../types';
 import * as backend from '../services/backend';
 import { cacheKeys, getCachedQuery, setCachedQuery } from '../services/dataCache';
 import { usePersistedMemoryState } from '../hooks/useSwrQuery';
 import {
+  HARVEST_AVAILABILITY_EPSILON,
+  buildWarehouseProductKey,
+  buildWarehouseSummaries,
   computeHarvestAvailability,
+  computeProportionalDistribution,
   filterAvailableHarvests,
+  formatSaleOriginSummary,
 } from '../services/harvestAvailability';
 import { addDaysToIso, round2 } from '../services/interestEngine';
 import { useI18n } from '../services/i18n';
@@ -52,8 +59,8 @@ interface HarvestSalesViewProps {
   onDataMutated?: () => Promise<void> | void;
 }
 
-type SaleScreen = 'list' | 'detail' | 'form';
-type ListTab = 'sales' | 'harvests';
+type SaleScreen = 'list' | 'warehouse_detail' | 'detail' | 'form';
+type ListTab = 'sales' | 'warehouse';
 
 function todayIso(): string {
   const d = new Date();
@@ -72,6 +79,10 @@ function toInputIso(dateStr?: string): string {
     return `${yyyy}-${mm}-${dd}`;
   }
   return todayIso();
+}
+
+function makeSaleIdempotencyKey(): string {
+  return `hs_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 }
 
 export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
@@ -109,15 +120,19 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [screen, setScreen] = useState<SaleScreen>('list');
-  const [listTab, setListTab] = usePersistedMemoryState<ListTab>('harvestSales.listTab', 'sales');
+  const [rawListTab, setRawListTab] = usePersistedMemoryState<string>('harvestSales.listTab', 'sales');
+  const listTab: ListTab = rawListTab === 'warehouse' || rawListTab === 'harvests' ? 'warehouse' : 'sales';
+  const setListTab = useCallback((tab: ListTab) => setRawListTab(tab), [setRawListTab]);
+
   const [search, setSearch] = usePersistedMemoryState<string>('harvestSales.search', '');
   const [statusFilter, setStatusFilter] = usePersistedMemoryState<HarvestSaleStatus | 'ALL'>('harvestSales.statusFilter', 'ALL');
   const [campaignFilter, setCampaignFilter] = usePersistedMemoryState<string>('harvestSales.campaignFilter', 'all');
   const [selectedSaleId, setSelectedSaleId] = useState<string | null>(null);
+  const [selectedProductKey, setSelectedProductKey] = useState<string | null>(null);
 
-  // Create / Edit Form state
+  // Create / Edit Form state (warehouse product mode)
   const [editingSale, setEditingSale] = useState<HarvestSale | null>(null);
-  const [formHarvestId, setFormHarvestId] = useState('');
+  const [formProductKey, setFormProductKey] = useState('');
   const [formDate, setFormDate] = useState(todayIso);
   const [formCantidad, setFormCantidad] = useState('');
   const [formClienteId, setFormClienteId] = useState('');
@@ -136,6 +151,8 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
   const [wasAlreadyComplete, setWasAlreadyComplete] = useState(false);
   const [termsAutoLoaded, setTermsAutoLoaded] = useState(false);
   const [termsBaseDate, setTermsBaseDate] = useState<string>(todayIso);
+  const [returnScreenAfterForm, setReturnScreenAfterForm] = useState<'list' | 'warehouse_detail' | 'detail'>('list');
+  const idempotencyKeyRef = useRef<string>(makeSaleIdempotencyKey());
 
   const [saving, setSaving] = useState(false);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
@@ -178,8 +195,8 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
       const errMsg =
         err?.message ||
         bi(
-          'No se pudieron cargar las ventas y cosechas disponibles. Verifica tu conexión e intenta nuevamente.',
-          'Could not load sales and available harvests. Check your connection and try again.'
+          'No se pudieron cargar las ventas y el almacén de cosechas. Verifica tu conexión e intenta nuevamente.',
+          'Could not load sales and harvest warehouse. Check your connection and try again.'
         );
       setLoadError(errMsg);
     } finally {
@@ -192,7 +209,6 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
     loadData(false);
   }, [loadData]);
 
-  // Reset invalid persisted campaign filter if that campaign no longer exists
   useEffect(() => {
     if (
       campaignFilter !== 'all' &&
@@ -266,10 +282,34 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
     [t]
   );
 
+  // General Harvest Warehouse across ALL lots & ALL campaigns (prior-campaign stock stays available until sold)
+  const warehouseSummaries = useMemo<WarehouseProductSummary[]>(
+    () => buildWarehouseSummaries(harvests, sales, lots, campaigns),
+    [harvests, sales, lots, campaigns]
+  );
+
+  const warehouseProductsWithStock = useMemo(
+    () => warehouseSummaries.filter((p) => p.totalDisponible > HARVEST_AVAILABILITY_EPSILON),
+    [warehouseSummaries]
+  );
+
+  const selectedWarehouseProduct = useMemo(
+    () => warehouseSummaries.find((p) => p.key === selectedProductKey) || null,
+    [warehouseSummaries, selectedProductKey]
+  );
+
   const activeSales = useMemo(() => {
     const targetCamp = campaignFilter && campaignFilter !== 'all' ? String(campaignFilter).trim() : '';
     return sales
-      .filter((s) => !s.anulada && (!targetCamp || String(s.campanaId || '').trim() === targetCamp))
+      .filter((s) => {
+        if (s.anulada) return false;
+        if (!targetCamp) return true;
+        if (String(s.campanaId || '').trim() === targetCamp) return true;
+        if (Array.isArray(s.distribuciones) && s.distribuciones.length > 0) {
+          return s.distribuciones.some((d) => !d.anulada && String(d.campanaId || '').trim() === targetCamp);
+        }
+        return false;
+      })
       .sort((a, b) => backend.compareChronologicalDesc(a, b));
   }, [sales, campaignFilter]);
 
@@ -279,19 +319,14 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
       if (statusFilter !== 'ALL' && s.estado !== statusFilter) return false;
       if (!q) return true;
       const buyer = resolveBuyerDisplay(s);
-      const lotName = s.loteNombre || lotMap.get(s.loteId)?.nombre || '';
+      const origin = formatSaleOriginSummary(s, lang);
+      const lotNames = (s.distribuciones || [])
+        .map((d) => d.loteNombre || lotMap.get(d.loteId)?.nombre || '')
+        .join(' ');
       const campName = s.campanaNombre || campaignMap.get(s.campanaId)?.nombre || '';
-      return `${buyer} ${s.producto} ${lotName} ${campName} ${s.fecha}`.toLowerCase().includes(q);
+      return `${buyer} ${s.producto} ${origin} ${lotNames} ${campName} ${s.fecha}`.toLowerCase().includes(q);
     });
-  }, [activeSales, search, statusFilter, resolveBuyerDisplay, lotMap, campaignMap]);
-
-  const availableHarvests = useMemo(
-    () =>
-      filterAvailableHarvests(harvests, campaignFilter).sort((a, b) =>
-        backend.compareChronologicalDesc(a, b)
-      ),
-    [harvests, campaignFilter]
-  );
+  }, [activeSales, search, statusFilter, resolveBuyerDisplay, lang, lotMap, campaignMap]);
 
   const selectedSale = useMemo(
     () => sales.find((s) => s.id === selectedSaleId) || null,
@@ -303,9 +338,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
   const isPriceDefined = !formPrecioPendiente && Number.isFinite(parsedFormPrice) && parsedFormPrice > 0;
   const canShowPaymentTerms = isBuyerDefined && isPriceDefined;
 
-  // Automatically preload default payment settings ONCE when a sale becomes complete
-  // (both buyer selected from catalog AND valid price defined), starting the term from
-  // the completion date (never from harvest date or initial pending registration date).
+  // Auto-load default payment terms ONCE when a sale becomes complete (catalog buyer + valid price)
   useEffect(() => {
     if (screen !== 'form') return;
     if (!canShowPaymentTerms || termsAutoLoaded || wasAlreadyComplete) return;
@@ -330,26 +363,30 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
     setTermsAutoLoaded(true);
   }, [screen, canShowPaymentTerms, termsAutoLoaded, wasAlreadyComplete, editingSale, formDate, paymentSettings]);
 
-  const openCreateFormForHarvest = (harvest?: HarvestRecord) => {
-    const targetHarvest = harvest || availableHarvests[0] || null;
+  const openCreateFormForProduct = (productKey?: string, returnTo: 'list' | 'warehouse_detail' = 'list') => {
+    const targetProduct =
+      (productKey ? warehouseProductsWithStock.find((p) => p.key === productKey) : null) ||
+      warehouseProductsWithStock[0] ||
+      null;
     const defaultTc =
       exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0 ? exchangeRate.tasaBobPerUsd : 6.96;
     const today = todayIso();
 
+    idempotencyKeyRef.current = makeSaleIdempotencyKey();
+    setReturnScreenAfterForm(returnTo);
     setEditingSale(null);
     setWasAlreadyComplete(false);
     setTermsAutoLoaded(false);
     setTermsBaseDate(today);
-    setFormHarvestId(targetHarvest?.id || '');
+    setFormProductKey(targetProduct?.key || '');
     setFormDate(today);
-    setFormCantidad(targetHarvest ? String(round2(targetHarvest.pendiente)) : '');
+    setFormCantidad('');
     setFormClienteId('');
     setFormCompradorPendiente(true);
     setFormPrecioPendiente(false);
     setFormPrecioUnitario('');
     setFormMoneda('USD');
     setFormTc(String(defaultTc));
-    // Start with empty payment terms until both buyer and price are defined
     setFormPlazoDias('');
     setFormFechaVencimiento('');
     setFormAplicarInteres(false);
@@ -374,11 +411,12 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
         : isoDate
       : todayIso();
 
+    setReturnScreenAfterForm('detail');
     setEditingSale(sale);
     setWasAlreadyComplete(alreadyComplete);
     setTermsAutoLoaded(alreadyComplete);
     setTermsBaseDate(originalBase);
-    setFormHarvestId(sale.cosechaId);
+    setFormProductKey(buildWarehouseProductKey(sale.producto, sale.unidad));
     setFormDate(isoDate);
     setFormCantidad(String(sale.cantidad));
     setFormClienteId(sale.clienteId || '');
@@ -388,13 +426,11 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
     setFormMoneda(sale.moneda || 'USD');
     setFormTc(String(sale.tc > 0 ? sale.tc : exchangeRate?.tasaBobPerUsd || 6.96));
     if (alreadyComplete) {
-      // Preserve original payment terms and dates without resetting the term
       setFormPlazoDias(sale.plazoDias !== undefined && sale.plazoDias !== null ? String(sale.plazoDias) : '');
       setFormFechaVencimiento(isoDue);
       setFormAplicarInteres(Boolean(sale.aplicarInteres));
       setFormTasaInteres(sale.tasaInteresMensual > 0 ? String(sale.tasaInteresMensual) : '');
     } else {
-      // Pending sales do not carry payment terms until completed
       setFormPlazoDias('');
       setFormFechaVencimiento('');
       setFormAplicarInteres(false);
@@ -431,35 +467,117 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
     }
   };
 
-  const selectedFormHarvest = useMemo(
-    () => harvests.find((h) => h.id === formHarvestId) || null,
-    [harvests, formHarvestId]
+  const selectedFormProduct = useMemo(
+    () => warehouseSummaries.find((p) => p.key === formProductKey) || null,
+    [warehouseSummaries, formProductKey]
   );
+
+  const formUnitLabel = editingSale?.unidad || selectedFormProduct?.unidad || 't';
 
   const maxAllowedTons = useMemo(() => {
     if (editingSale) {
-      const h = harvests.find((x) => x.id === editingSale.cosechaId);
-      return round2((h?.pendiente || 0) + editingSale.cantidad);
+      const currentAvail = selectedFormProduct?.totalDisponible || 0;
+      return round2(currentAvail + editingSale.cantidad);
     }
-    return round2(selectedFormHarvest?.pendiente || 0);
-  }, [editingSale, harvests, selectedFormHarvest]);
+    return round2(selectedFormProduct?.totalDisponible || 0);
+  }, [editingSale, selectedFormProduct]);
+
+  const parsedFormQty = useMemo(() => {
+    const v = Number(String(formCantidad).replace(',', '.'));
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  }, [formCantidad]);
 
   const formLiveTotal = useMemo(() => {
     if (formPrecioPendiente) return 0;
-    const qty = Number(String(formCantidad).replace(',', '.'));
     const price = Number(String(formPrecioUnitario).replace(',', '.'));
-    if (!Number.isFinite(qty) || !Number.isFinite(price) || qty <= 0 || price <= 0) return 0;
-    return round2(qty * price);
-  }, [formPrecioPendiente, formCantidad, formPrecioUnitario]);
+    if (!Number.isFinite(parsedFormQty) || !Number.isFinite(price) || parsedFormQty <= 0 || price <= 0) return 0;
+    return round2(parsedFormQty * price);
+  }, [formPrecioPendiente, parsedFormQty, formPrecioUnitario]);
+
+  // Live proportional distribution preview (for new sales or delta on quantity increase during edit)
+  const distributionPreview = useMemo(() => {
+    if (!selectedFormProduct) return { rows: [], error: null as string | null };
+    const price = formPrecioPendiente ? 0 : Number(String(formPrecioUnitario).replace(',', '.')) || 0;
+    const tc = Number(String(formTc).replace(',', '.')) || 6.96;
+
+    if (!editingSale) {
+      if (parsedFormQty <= 0) return { rows: [], error: null };
+      if (parsedFormQty > selectedFormProduct.totalDisponible + 0.0005) {
+        return {
+          rows: [],
+          error: bi(
+            `Supera el stock disponible (${fmtNum(selectedFormProduct.totalDisponible)} ${formUnitLabel}).`,
+            `Exceeds available stock (${fmtNum(selectedFormProduct.totalDisponible)} ${formUnitLabel}).`
+          ),
+        };
+      }
+      try {
+        const rows = computeProportionalDistribution(selectedFormProduct.cosechasDisponibles, parsedFormQty, {
+          precioPendiente: formPrecioPendiente || price <= 0,
+          precioUnitario: price,
+          moneda: formMoneda,
+          tc,
+          lots,
+          campaigns,
+        });
+        return { rows, error: null };
+      } catch (e: any) {
+        return { rows: [], error: e?.message || null };
+      }
+    }
+
+    // Editing sale: if increasing quantity, preview distribution of the delta
+    const delta = parsedFormQty - editingSale.cantidad;
+    if (delta > HARVEST_AVAILABILITY_EPSILON) {
+      if (delta > selectedFormProduct.totalDisponible + 0.0005) {
+        return {
+          rows: [],
+          error: bi(
+            `El incremento (+${fmtNum(delta)} ${formUnitLabel}) supera el stock disponible (${fmtNum(selectedFormProduct.totalDisponible)} ${formUnitLabel}).`,
+            `Increase (+${fmtNum(delta)} ${formUnitLabel}) exceeds available stock (${fmtNum(selectedFormProduct.totalDisponible)} ${formUnitLabel}).`
+          ),
+        };
+      }
+      try {
+        const rows = computeProportionalDistribution(selectedFormProduct.cosechasDisponibles, delta, {
+          precioPendiente: formPrecioPendiente || price <= 0,
+          precioUnitario: price,
+          moneda: formMoneda,
+          tc,
+          lots,
+          campaigns,
+        });
+        return { rows, error: null };
+      } catch (e: any) {
+        return { rows: [], error: e?.message || null };
+      }
+    }
+
+    return { rows: [], error: null };
+  }, [
+    selectedFormProduct,
+    editingSale,
+    parsedFormQty,
+    formPrecioPendiente,
+    formPrecioUnitario,
+    formMoneda,
+    formTc,
+    lots,
+    campaigns,
+    formUnitLabel,
+    fmtNum,
+    bi,
+  ]);
 
   const handleSaveSale = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (saving) return;
     setNotice(null);
 
-    if (!editingSale && !formHarvestId) {
+    if (!editingSale && !selectedFormProduct) {
       setNotice({
         type: 'err',
-        text: bi('Selecciona una cosecha con toneladas disponibles.', 'Select a harvest with available tons.'),
+        text: bi('Selecciona un producto con stock disponible en almacén.', 'Select a product with available warehouse stock.'),
       });
       return;
     }
@@ -468,16 +586,16 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
     if (!Number.isFinite(qty) || qty <= 0) {
       setNotice({
         type: 'err',
-        text: bi('Ingresa una cantidad de toneladas mayor a 0.', 'Enter a tons quantity greater than 0.'),
+        text: bi('Ingresa una cantidad mayor a 0.', 'Enter a quantity greater than 0.'),
       });
       return;
     }
-    if (maxAllowedTons > 0 && qty > maxAllowedTons + 0.005) {
+    if (qty > maxAllowedTons + 0.0005) {
       setNotice({
         type: 'err',
         text: bi(
-          `La cantidad supera las toneladas disponibles (${fmtNum(maxAllowedTons)} t).`,
-          `Quantity exceeds available tons (${fmtNum(maxAllowedTons)} t).`
+          `La cantidad supera el stock disponible en almacén (${fmtNum(maxAllowedTons)} ${formUnitLabel}).`,
+          `Quantity exceeds available warehouse stock (${fmtNum(maxAllowedTons)} ${formUnitLabel}).`
         ),
       });
       return;
@@ -488,7 +606,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
       setNotice({
         type: 'err',
         text: bi(
-          'Ingresa un precio unitario mayor a 0 o marca «Precio pendiente».',
+          'Ingresa un precio por tonelada mayor a 0 o marca «Precio pendiente».',
           'Enter a unit price greater than 0 or mark "Pending price".'
         ),
       });
@@ -542,7 +660,8 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
         });
       } else {
         saved = await backend.createHarvestSale({
-          cosechaId: formHarvestId,
+          producto: selectedFormProduct!.producto,
+          unidad: selectedFormProduct!.unidad,
           fecha: formDate,
           cantidad: qty,
           clienteId: formCompradorPendiente ? '' : formClienteId,
@@ -556,8 +675,11 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
           aplicarInteres: effectiveAplicarInteres,
           tasaInteresMensual: tasaNum,
           observacion: formObs.trim(),
+          idempotencyKey: idempotencyKeyRef.current,
         });
       }
+
+      idempotencyKeyRef.current = makeSaleIdempotencyKey();
 
       await Promise.all([
         loadData(true),
@@ -568,7 +690,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
         type: 'ok',
         text: editingSale
           ? bi('Venta de cosecha actualizada correctamente.', 'Harvest sale updated successfully.')
-          : bi('Venta de cosecha registrada correctamente.', 'Harvest sale registered successfully.'),
+          : bi('Venta registrada y distribuida proporcionalmente en el almacén.', 'Sale recorded and proportionally distributed from warehouse.'),
       });
       setSelectedSaleId(saved.id);
       setEditingSale(null);
@@ -598,8 +720,8 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
       setNotice({
         type: 'ok',
         text: bi(
-          'Venta anulada y toneladas devueltas al saldo disponible de la cosecha.',
-          'Sale cancelled and tons returned to harvest available balance.'
+          'Venta anulada y toneladas devueltas a sus cosechas de origen.',
+          'Sale cancelled and tons returned to source harvests.'
         ),
       });
       setSelectedSaleId(null);
@@ -615,13 +737,140 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
   };
 
   // -----------------------------------------------------------
-  // SCREEN: CREATE / EDIT HARVEST SALE (INDEPENDENT SCREEN)
+  // SCREEN: WAREHOUSE PRODUCT DETAIL (BY LOT & CAMPAIGN)
+  // -----------------------------------------------------------
+  if (screen === 'warehouse_detail' && selectedWarehouseProduct) {
+    const prod = selectedWarehouseProduct;
+    const hasStock = prod.totalDisponible > HARVEST_AVAILABILITY_EPSILON;
+
+    return (
+      <div className="space-y-3.5">
+        <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#E7ECE8]">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              type="button"
+              onClick={() => {
+                setScreen('list');
+                setSelectedProductKey(null);
+              }}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#DCE2DD] bg-white text-[#26352D] hover:bg-[#F5F7F4] transition cursor-pointer"
+              aria-label={t('common.back')}
+            >
+              <ArrowLeft className="h-4 w-4" />
+            </button>
+            <div className="h-9 w-9 rounded-xl bg-[#EAF5EE] text-[#1D704B] flex items-center justify-center shrink-0">
+              <VisualIcon iconId={resolveProductIcon(prod.producto)} nameHint={prod.producto} category="ingreso" size={22} />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-base font-bold text-[#26352D] truncate leading-snug">{prod.producto}</h2>
+              <p className="text-xs text-[#64746B] truncate">
+                {bi('Almacén de cosechas', 'Harvest warehouse')} · {prod.lotesCount}{' '}
+                {prod.lotesCount === 1 ? bi('lote', 'lot') : bi('lotes', 'lots')}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            disabled={!effectiveIsAdmin || !hasStock}
+            onClick={() => openCreateFormForProduct(prod.key, 'warehouse_detail')}
+            className="h-9 px-3.5 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white text-xs font-bold inline-flex items-center gap-1.5 transition cursor-pointer shrink-0 disabled:opacity-45"
+          >
+            <span>{bi('Vender', 'Sell')}</span>
+          </button>
+        </div>
+
+        {/* 3-metric summary: Total cosechado, Total vendido, Total disponible */}
+        <div className="grid grid-cols-3 gap-2">
+          <div className="rounded-xl border border-[#E2E7E3] bg-white px-3 py-2.5">
+            <p className="text-[11px] font-medium text-[#64746B] truncate">{bi('Cosechado', 'Harvested')}</p>
+            <p className="text-sm font-extrabold text-[#1F2D25] tabular-nums mt-0.5 whitespace-nowrap">
+              {fmtNum(prod.totalCosechado)} {prod.unidad}
+            </p>
+          </div>
+          <div className="rounded-xl border border-[#E2E7E3] bg-white px-3 py-2.5">
+            <p className="text-[11px] font-medium text-[#64746B] truncate">{bi('Vendido', 'Sold')}</p>
+            <p className="text-sm font-extrabold text-[#1F2D25] tabular-nums mt-0.5 whitespace-nowrap">
+              {fmtNum(prod.totalVendido)} {prod.unidad}
+            </p>
+          </div>
+          <div className="rounded-xl border border-[#BFE0CD] bg-[#EAF5EE] px-3 py-2.5">
+            <p className="text-[11px] font-semibold text-[#1D5C3F] truncate">{bi('Disponible', 'Available')}</p>
+            <p className="text-sm font-extrabold text-[#175B3D] tabular-nums mt-0.5 whitespace-nowrap">
+              {fmtNum(prod.totalDisponible)} {prod.unidad}
+            </p>
+          </div>
+        </div>
+
+        {/* Breakdown by lot & campaign */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between px-0.5">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-[#5E6D64]">
+              {bi('Desglose por lote y campaña', 'Breakdown by lot & campaign')}
+            </h3>
+            <span className="text-[11px] font-semibold text-[#5E6D64] tabular-nums">
+              {fmtNum(prod.porcentajeVendido, 1)}% {bi('vendido', 'sold')}
+            </span>
+          </div>
+
+          <div className="rounded-2xl border border-[#E2E7E3] bg-white divide-y divide-[#EEF2EF] overflow-hidden">
+            {prod.lotes.map((row) => {
+              const barPct = Math.min(100, Math.max(0, row.porcentajeVendido));
+              return (
+                <div key={row.key} className="p-3.5 space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-[#1F2D25] truncate leading-snug">{row.loteNombre}</p>
+                      <p className="text-xs text-[#64746B] truncate">{row.campanaNombre}</p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="text-xs font-extrabold text-[#1D704B] tabular-nums whitespace-nowrap">
+                        {fmtNum(row.disponible)} {prod.unidad} {bi('disp.', 'avail.')}
+                      </p>
+                      <p className="text-[11px] font-semibold text-[#5E6D64] tabular-nums whitespace-nowrap">
+                        {fmtNum(row.porcentajeVendido, 1)}% {bi('vendido', 'sold')}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Green horizontal progress bar (% vendido = sold / harvested * 100) */}
+                  <div className="h-2 w-full rounded-full bg-[#E8EFEA] overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-[#24875B] transition-all duration-300"
+                      style={{ width: `${barPct}%` }}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-[#5E6D64] tabular-nums flex-wrap">
+                    <span>
+                      {bi('Cosechado:', 'Harvested:')} <strong className="text-[#1F2D25]">{fmtNum(row.cosechado)} {prod.unidad}</strong>
+                      {' · '}
+                      {bi('Vendido:', 'Sold:')} <strong className="text-[#1F2D25]">{fmtNum(row.vendido)} {prod.unidad}</strong>
+                    </span>
+                    {row.disponible > HARVEST_AVAILABILITY_EPSILON && (
+                      <span className="text-[#1D704B] font-semibold">
+                        {fmtNum(row.participacionStockPct, 1)}% {bi('del stock actual', 'of current stock')}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // -----------------------------------------------------------
+  // SCREEN: CREATE / EDIT HARVEST SALE (FROM WAREHOUSE)
   // -----------------------------------------------------------
   if (screen === 'form') {
-    const harvestInfo = editingSale
-      ? `${editingSale.producto} · ${editingSale.loteNombre || lotMap.get(editingSale.loteId)?.nombre || ''} · ${editingSale.campanaNombre || campaignMap.get(editingSale.campanaId)?.nombre || ''}`
-      : selectedFormHarvest
-      ? `${selectedFormHarvest.producto} · ${selectedFormHarvest.loteNombre || lotMap.get(selectedFormHarvest.loteId)?.nombre || ''}`
+    const editQtyDelta = editingSale ? round2(parsedFormQty - editingSale.cantidad) : 0;
+    const headerSub = editingSale
+      ? `${editingSale.producto} · ${formatSaleOriginSummary(editingSale, lang) || editingSale.loteNombre || ''}`
+      : selectedFormProduct
+      ? `${selectedFormProduct.producto} · ${fmtNum(selectedFormProduct.totalDisponible)} ${selectedFormProduct.unidad} ${bi('disponibles', 'available')}`
       : '';
 
     return (
@@ -630,7 +879,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
           <button
             type="button"
             onClick={() => {
-              setScreen(editingSale ? 'detail' : 'list');
+              setScreen(returnScreenAfterForm);
               setNotice(null);
             }}
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#DCE2DD] bg-white text-[#26352D] hover:bg-[#F5F7F4] transition cursor-pointer"
@@ -642,7 +891,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
             <h2 className="text-base font-bold text-[#26352D] leading-snug">
               {editingSale ? t('harvestSales.editSale') : t('harvestSales.newSale')}
             </h2>
-            {harvestInfo && <p className="text-xs text-[#64746B] truncate">{harvestInfo}</p>}
+            {headerSub && <p className="text-xs text-[#64746B] truncate">{headerSub}</p>}
           </div>
         </div>
 
@@ -664,39 +913,106 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
         )}
 
         <form onSubmit={handleSaveSale} className="rounded-2xl border border-[#E2E7E3] bg-white p-4 space-y-3.5">
-          {/* Cosecha de origen (solo al crear) */}
-          {!editingSale && (
-            <div>
-              <label className="block text-[13px] font-semibold text-[#26352D] mb-1">
-                {bi('Cosecha de origen', 'Source harvest')}
+          {/* 1. Producto desde Almacén (solo al crear) */}
+          {!editingSale ? (
+            <div className="space-y-1.5">
+              <label className="block text-[13px] font-semibold text-[#26352D]">
+                {bi('Producto en almacén', 'Warehouse product')}
                 <span className="text-[#C44545] ml-0.5">*</span>
               </label>
               <select
-                value={formHarvestId}
+                value={formProductKey}
                 onChange={(e) => {
-                  const id = e.target.value;
-                  setFormHarvestId(id);
-                  const h = availableHarvests.find((x) => x.id === id);
-                  if (h) setFormCantidad(String(round2(h.pendiente)));
+                  setFormProductKey(e.target.value);
+                  setFormCantidad('');
                 }}
                 required
                 className="w-full h-[40px] rounded-xl border border-[#CFD8D2] bg-white px-3 text-sm font-semibold text-[#1F2D25] focus:border-[#24875B] focus:outline-none"
               >
-                <option value="">{bi('Seleccionar cosecha...', 'Select harvest...')}</option>
-                {availableHarvests.map((h) => {
-                  const lotLabel = h.loteNombre || lotMap.get(h.loteId)?.nombre || '';
-                  const primary = [h.producto, lotLabel].filter(Boolean).join(' · ');
-                  return (
-                    <option key={h.id} value={h.id}>
-                      {`${primary} — ${fmtNum(h.pendiente)} t ${bi('disp.', 'avail.')}`}
-                    </option>
-                  );
-                })}
+                <option value="">{bi('Seleccionar producto...', 'Select product...')}</option>
+                {warehouseProductsWithStock.map((prod) => (
+                  <option key={prod.key} value={prod.key}>
+                    {`${prod.producto} — ${fmtNum(prod.totalDisponible)} ${prod.unidad} (${prod.lotesDisponiblesCount} ${
+                      prod.lotesDisponiblesCount === 1 ? bi('lote', 'lot') : bi('lotes', 'lots')
+                    })`}
+                  </option>
+                ))}
               </select>
+              {selectedFormProduct && (
+                <div className="flex items-center justify-between rounded-xl bg-[#EAF5EE] border border-[#BFE0CD] px-3 py-2 text-xs">
+                  <span className="font-semibold text-[#1D5C3F]">
+                    {bi('Disponible en almacén', 'Available in warehouse')}
+                  </span>
+                  <span className="font-extrabold text-[#175B3D] tabular-nums">
+                    {fmtNum(selectedFormProduct.totalDisponible)} {selectedFormProduct.unidad}
+                  </span>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="rounded-xl bg-[#F5F8F6] border border-[#E2E7E3] px-3 py-2.5 flex items-center justify-between gap-2 text-xs">
+              <div className="min-w-0">
+                <span className="text-[#64746B] block">{bi('Producto', 'Product')}</span>
+                <span className="font-bold text-[#1F2D25]">{editingSale.producto}</span>
+              </div>
+              <div className="text-right shrink-0">
+                <span className="text-[#64746B] block">{bi('Máx. vendible', 'Max sellable')}</span>
+                <span className="font-bold text-[#1D704B] tabular-nums">
+                  {fmtNum(maxAllowedTons)} {formUnitLabel}
+                </span>
+              </div>
             </div>
           )}
 
-          {/* 1. Comprador */}
+          {/* 2. Cantidad a vender y Fecha */}
+          <div className="space-y-1">
+            <div className="grid grid-cols-2 gap-2.5 items-end">
+              <div className="min-w-0">
+                <label className="block text-[13px] font-semibold text-[#26352D] mb-1 whitespace-nowrap truncate">
+                  {bi(`Cantidad (${formUnitLabel})`, `Quantity (${formUnitLabel})`)}
+                  <span className="text-[#C44545] ml-0.5">*</span>
+                </label>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="any"
+                  min="0.0001"
+                  max={maxAllowedTons > 0 ? maxAllowedTons : undefined}
+                  value={formCantidad}
+                  onChange={(e) => setFormCantidad(e.target.value)}
+                  placeholder="0.00"
+                  required
+                  className="w-full h-[40px] rounded-xl border border-[#CFD8D2] bg-white px-3 text-sm font-semibold text-[#1F2D25] tabular-nums focus:border-[#24875B] focus:outline-none"
+                />
+              </div>
+
+              <div className="min-w-0">
+                <label className="block text-[13px] font-semibold text-[#26352D] mb-1 whitespace-nowrap truncate">
+                  {t('common.date')}
+                  <span className="text-[#C44545] ml-0.5">*</span>
+                </label>
+                <input
+                  type="date"
+                  value={formDate}
+                  onChange={(e) => {
+                    const nextDate = e.target.value;
+                    setFormDate(nextDate);
+                    if (!editingSale && canShowPaymentTerms && formPlazoDias.trim() !== '' && !isNaN(Number(formPlazoDias))) {
+                      setTermsBaseDate(nextDate);
+                      setFormFechaVencimiento(addDaysToIso(nextDate, Math.round(Number(formPlazoDias))));
+                    }
+                  }}
+                  required
+                  className="w-full h-[40px] rounded-xl border border-[#CFD8D2] bg-white px-2.5 text-sm font-medium text-[#1F2D25] tabular-nums focus:border-[#24875B] focus:outline-none"
+                />
+              </div>
+            </div>
+            {distributionPreview.error && (
+              <p className="text-[11px] font-semibold text-[#C44545]">{distributionPreview.error}</p>
+            )}
+          </div>
+
+          {/* 3. Comprador */}
           <CustomerPicker
             label={bi('Comprador', 'Buyer')}
             customers={customers}
@@ -723,57 +1039,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
             required
           />
 
-          {/* 2. Cantidad (t) y Fecha en la misma fila compacta */}
-          <div className="space-y-1">
-            <div className="grid grid-cols-2 gap-2.5 items-end">
-              <div className="min-w-0">
-                <label className="block text-[13px] font-semibold text-[#26352D] mb-1 whitespace-nowrap truncate">
-                  {bi('Cantidad (t)', 'Quantity (t)')}
-                  <span className="text-[#C44545] ml-0.5">*</span>
-                </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  max={maxAllowedTons > 0 ? maxAllowedTons : undefined}
-                  value={formCantidad}
-                  onChange={(e) => setFormCantidad(e.target.value)}
-                  required
-                  className="w-full h-[40px] rounded-xl border border-[#CFD8D2] bg-white px-3 text-sm font-semibold text-[#1F2D25] tabular-nums focus:border-[#24875B] focus:outline-none"
-                />
-              </div>
-
-              <div className="min-w-0">
-                <label className="block text-[13px] font-semibold text-[#26352D] mb-1 whitespace-nowrap truncate">
-                  {t('common.date')}
-                  <span className="text-[#C44545] ml-0.5">*</span>
-                </label>
-                <input
-                  type="date"
-                  value={formDate}
-                  onChange={(e) => {
-                    const nextDate = e.target.value;
-                    setFormDate(nextDate);
-                    // Only recalculate due date from formDate on a brand-new complete sale;
-                    // never reset terms on an already-completed sale or when completing a pending sale.
-                    if (!editingSale && canShowPaymentTerms && formPlazoDias.trim() !== '' && !isNaN(Number(formPlazoDias))) {
-                      setTermsBaseDate(nextDate);
-                      setFormFechaVencimiento(addDaysToIso(nextDate, Math.round(Number(formPlazoDias))));
-                    }
-                  }}
-                  required
-                  className="w-full h-[40px] rounded-xl border border-[#CFD8D2] bg-white px-2.5 text-sm font-medium text-[#1F2D25] tabular-nums focus:border-[#24875B] focus:outline-none"
-                />
-              </div>
-            </div>
-            {maxAllowedTons > 0 && (
-              <p className="text-[11px] text-[#64746B] tabular-nums">
-                {bi('Disponible:', 'Available:')} <span className="font-semibold text-[#1D704B]">{fmtNum(maxAllowedTons)} t</span>
-              </p>
-            )}
-          </div>
-
-          {/* 3. Casilla «Precio pendiente» (controla únicamente los campos de precio) */}
+          {/* 4. Casilla «Precio pendiente» */}
           <div className="pt-0.5">
             <label className="inline-flex items-center gap-2.5 cursor-pointer select-none min-h-[36px]">
               <input
@@ -798,10 +1064,9 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
             </label>
           </div>
 
-          {/* 4, 5, 6. Moneda (USD / Bs), Precio / t y TC alineados, e Importe total */}
+          {/* 5. Moneda (USD / Bs), Precio / t y TC alineados, e Importe total */}
           {!formPrecioPendiente && (
             <div className="space-y-3 rounded-xl border border-[#E7ECE8] bg-[#F9FBF9] p-3">
-              {/* 4. Moneda (USD / Bs) */}
               <Switch<Currency>
                 label={t('common.currency')}
                 value={formMoneda}
@@ -810,15 +1075,15 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
                 rightOption={{ value: 'BOB', label: 'Bs' }}
               />
 
-              {/* 5. Precio / t y TC en la misma fila, títulos e inputs perfectamente alineados */}
               <div className="grid grid-cols-2 gap-2.5 items-end">
                 <div className="min-w-0">
                   <label className="block text-[13px] font-semibold text-[#26352D] mb-1 whitespace-nowrap truncate">
-                    {bi('Precio / t', 'Price / t')}
+                    {bi(`Precio / ${formUnitLabel}`, `Price / ${formUnitLabel}`)}
                     <span className="text-[#C44545] ml-0.5">*</span>
                   </label>
                   <input
                     type="number"
+                    inputMode="decimal"
                     step="0.01"
                     min="0.01"
                     value={formPrecioUnitario}
@@ -836,6 +1101,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
                   </label>
                   <input
                     type="number"
+                    inputMode="decimal"
                     step="0.01"
                     min="0.01"
                     value={formTc}
@@ -846,7 +1112,6 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
                 </div>
               </div>
 
-              {/* 6. Importe total de la venta */}
               <div className="flex items-center justify-between gap-2 pt-2.5 border-t border-[#E2E7E3]">
                 <span className="text-xs font-semibold text-[#4B5A52]">
                   {bi('Importe total', 'Total amount')}
@@ -858,7 +1123,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
             </div>
           )}
 
-          {/* 7. Condiciones de cobro (ÚNICAMENTE cuando comprador del catálogo Y precio estén definidos) */}
+          {/* 6. Condiciones de cobro (ÚNICAMENTE cuando comprador del catálogo Y precio estén definidos) */}
           {canShowPaymentTerms && (
             <div className="rounded-xl border border-[#E7ECE8] bg-[#F9FBF9] p-3 space-y-3">
               <div className="flex items-center justify-between gap-2">
@@ -929,6 +1194,87 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
             </div>
           )}
 
+          {/* 7. Vista previa compacta de distribución proporcional automática */}
+          {!editingSale && distributionPreview.rows.length > 0 && (
+            <div className="rounded-xl border border-[#D4E6DC] bg-[#F5FBF7] p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-bold text-[#1D5C3F]">
+                  {bi('Distribución proporcional automática', 'Automatic proportional distribution')}
+                </p>
+                <span className="text-[11px] font-semibold text-[#24875B] tabular-nums">
+                  {distributionPreview.rows.length}{' '}
+                  {distributionPreview.rows.length === 1 ? bi('origen', 'source') : bi('orígenes', 'sources')}
+                </span>
+              </div>
+              <div className="divide-y divide-[#DFECE4]">
+                {distributionPreview.rows.map((r) => (
+                  <div key={r.cosechaId} className="py-1.5 flex items-center justify-between gap-2 text-xs">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-[#1F2D25] truncate">{r.loteNombre}</p>
+                      <p className="text-[11px] text-[#5E6D64] truncate">
+                        {r.campanaNombre} · {fmtNum(r.participacionPct, 1)}%
+                      </p>
+                    </div>
+                    <div className="text-right shrink-0 tabular-nums">
+                      <p className="font-bold text-[#1F2D25] whitespace-nowrap">
+                        {fmtNum(r.toneladasAsignadas)} {r.unidad}
+                      </p>
+                      {!formPrecioPendiente && r.importeAsignado > 0 && (
+                        <p className="text-[11px] font-semibold text-[#1D704B] whitespace-nowrap">
+                          {fmtMoney(r.importeAsignado, r.moneda)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Nota de distribución al editar */}
+          {editingSale && (
+            <div className="rounded-xl border border-[#E2E7E3] bg-[#F8FAF8] px-3 py-2.5 text-xs text-[#4B5A52] space-y-1.5">
+              {Math.abs(editQtyDelta) <= HARVEST_AVAILABILITY_EPSILON ? (
+                <p>
+                  {bi(
+                    'La distribución física entre lotes de origen se conservará intacta; solo se actualizarán los datos comerciales y montos.',
+                    'The physical distribution across source lots will remain unchanged; only commercial terms and amounts will update.'
+                  )}
+                </p>
+              ) : editQtyDelta < 0 ? (
+                <p>
+                  {bi(
+                    `La reducción (${fmtNum(Math.abs(editQtyDelta))} ${formUnitLabel}) se devolverá proporcionalmente a las cosechas de origen de esta venta.`,
+                    `The reduction (${fmtNum(Math.abs(editQtyDelta))} ${formUnitLabel}) will be returned proportionally to this sale's source harvests.`
+                  )}
+                </p>
+              ) : (
+                <>
+                  <p>
+                    {bi(
+                      `Se conservará la distribución original (${fmtNum(editingSale.cantidad)} ${formUnitLabel}) y el incremento (+${fmtNum(editQtyDelta)} ${formUnitLabel}) se distribuirá proporcionalmente sobre el stock disponible actual:`,
+                      `Original allocation (${fmtNum(editingSale.cantidad)} ${formUnitLabel}) will be preserved and only the increase (+${fmtNum(editQtyDelta)} ${formUnitLabel}) will be proportionally distributed over current available stock:`
+                    )}
+                  </p>
+                  {distributionPreview.rows.length > 0 && (
+                    <div className="divide-y divide-[#E4EAE6] pt-1">
+                      {distributionPreview.rows.map((r) => (
+                        <div key={r.cosechaId} className="py-1 flex items-center justify-between gap-2 text-[11px]">
+                          <span className="truncate text-[#26352D] font-medium">
+                            {r.loteNombre} ({r.campanaNombre})
+                          </span>
+                          <span className="font-bold text-[#1D704B] tabular-nums whitespace-nowrap">
+                            +{fmtNum(r.toneladasAsignadas)} {r.unidad}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
           {/* 8. Observación */}
           <ObservationField
             value={formObs}
@@ -936,12 +1282,12 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
             placeholder={bi('Observación de la venta...', 'Sale observation...')}
           />
 
-          {/* 9. Botón Guardar */}
+          {/* 9. Botones */}
           <div className="pt-1 flex items-center justify-end gap-2">
             <button
               type="button"
               onClick={() => {
-                setScreen(editingSale ? 'detail' : 'list');
+                setScreen(returnScreenAfterForm);
                 setNotice(null);
               }}
               className="h-[40px] px-4 rounded-xl border border-[#CFD8D2] bg-white text-sm font-semibold text-[#4B5A52] hover:bg-[#F5F7F4] cursor-pointer"
@@ -950,7 +1296,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
             </button>
             <button
               type="submit"
-              disabled={saving}
+              disabled={saving || Boolean(distributionPreview.error)}
               className="h-[40px] px-5 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white text-sm font-bold inline-flex items-center gap-2 transition cursor-pointer disabled:opacity-60"
             >
               {saving && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -963,13 +1309,22 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
   }
 
   // -----------------------------------------------------------
-  // SCREEN: HARVEST SALE DETAIL (INDEPENDENT SCREEN)
+  // SCREEN: HARVEST SALE DETAIL (WITH DISTRIBUTION BREAKDOWN)
   // -----------------------------------------------------------
   if (screen === 'detail' && selectedSale) {
     const buyer = resolveBuyerDisplay(selectedSale);
     const st = statusLabel(selectedSale.estado);
-    const lotName = selectedSale.loteNombre || lotMap.get(selectedSale.loteId)?.nombre || '—';
-    const campName = selectedSale.campanaNombre || campaignMap.get(selectedSale.campanaId)?.nombre || '—';
+    const originSummary =
+      formatSaleOriginSummary(selectedSale, lang) ||
+      selectedSale.loteNombre ||
+      lotMap.get(selectedSale.loteId)?.nombre ||
+      '—';
+    const activeDists = (selectedSale.distribuciones || []).filter((d) => !d.anulada && d.toneladasAsignadas > 0);
+    const campName =
+      selectedSale.campanaNombre ||
+      campaignMap.get(selectedSale.campanaId)?.nombre ||
+      (activeDists.length === 1 ? activeDists[0].campanaNombre || campaignMap.get(activeDists[0].campanaId)?.nombre : '') ||
+      '';
 
     return (
       <div className="space-y-4">
@@ -1027,7 +1382,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
             <div className="min-w-0 flex-1">
               <p className="text-sm font-bold text-[#1F2D25] truncate">{selectedSale.producto}</p>
               <p className="text-xs text-[#64746B] truncate">
-                {lotName} · {campName} · {fmtDate(selectedSale.fecha)}
+                {[originSummary, campName, fmtDate(selectedSale.fecha)].filter(Boolean).join(' · ')}
               </p>
             </div>
             <div className="text-right shrink-0">
@@ -1052,7 +1407,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
               <span className="font-bold text-[#1F2D25] tabular-nums whitespace-nowrap">
                 {selectedSale.precioPendiente
                   ? t('harvestSales.pendingPrice')
-                  : `${fmtMoney(selectedSale.precioUnitario, selectedSale.moneda)} / t`}
+                  : `${fmtMoney(selectedSale.precioUnitario, selectedSale.moneda)} / ${selectedSale.unidad || 't'}`}
               </span>
             </div>
             <div>
@@ -1078,10 +1433,51 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
               </span>
             </div>
             <div>
-              <span className="text-[#7A8780] block">{bi('Fecha de registro', 'Sale date')}</span>
+              <span className="text-[#7A8780] block">{bi('Fecha de venta', 'Sale date')}</span>
               <span className="text-[#26352D] font-medium tabular-nums">{fmtDate(selectedSale.fecha)}</span>
             </div>
           </div>
+
+          {/* Historical Proportional Distribution by Source Lot & Campaign */}
+          {activeDists.length > 0 && (
+            <div className="pt-3 border-t border-[#EEF2EF] space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-[#26352D]">
+                  {bi('Distribución por lote de origen', 'Distribution by source lot')}
+                </span>
+                <span className="text-[11px] font-semibold text-[#64746B] tabular-nums">
+                  {activeDists.length}{' '}
+                  {activeDists.length === 1 ? bi('lote', 'lot') : bi('lotes', 'lots')}
+                </span>
+              </div>
+              <div className="rounded-xl border border-[#E7ECE8] bg-[#FAFBF9] divide-y divide-[#EEF2EF]">
+                {activeDists.map((d, idx) => {
+                  const dLot = d.loteNombre || lotMap.get(d.loteId)?.nombre || d.loteId || '—';
+                  const dCamp = d.campanaNombre || campaignMap.get(d.campanaId)?.nombre || d.campanaId || '';
+                  return (
+                    <div key={d.id || `${d.cosechaId}_${idx}`} className="px-3 py-2 flex items-center justify-between gap-2 text-xs">
+                      <div className="min-w-0">
+                        <p className="font-semibold text-[#1F2D25] truncate">{dLot}</p>
+                        <p className="text-[11px] text-[#64746B] truncate">
+                          {[dCamp, `${fmtNum(d.participacionPct, 1)}%`].filter(Boolean).join(' · ')}
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0 tabular-nums">
+                        <p className="font-bold text-[#1F2D25] whitespace-nowrap">
+                          {fmtNum(d.toneladasAsignadas)} {d.unidad || selectedSale.unidad || 't'}
+                        </p>
+                        {!selectedSale.precioPendiente && d.importeAsignado > 0 && (
+                          <p className="text-[11px] font-semibold text-[#1D704B] whitespace-nowrap">
+                            {fmtMoney(d.importeAsignado, d.moneda || selectedSale.moneda)}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {selectedSale.observacion && (
             <div className="pt-2 border-t border-[#EEF2EF] text-xs">
@@ -1118,8 +1514,8 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
               </h3>
               <p className="text-xs text-[#5E6D64] leading-relaxed">
                 {bi(
-                  `¿Deseas anular esta venta de ${fmtNum(confirmCancelSale.cantidad)} t de ${confirmCancelSale.producto}? Las toneladas volverán a quedar disponibles para venta.`,
-                  `Cancel this sale of ${fmtNum(confirmCancelSale.cantidad)} t of ${confirmCancelSale.producto}? The tons will become available again.`
+                  `¿Deseas anular esta venta de ${fmtNum(confirmCancelSale.cantidad)} ${confirmCancelSale.unidad || 't'} de ${confirmCancelSale.producto}? Las cantidades volverán a sus cosechas de origen en el almacén.`,
+                  `Cancel this sale of ${fmtNum(confirmCancelSale.cantidad)} ${confirmCancelSale.unidad || 't'} of ${confirmCancelSale.producto}? Quantities will return to their source harvests in the warehouse.`
                 )}
               </p>
               <div className="flex items-center justify-end gap-2 pt-1">
@@ -1146,23 +1542,12 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
   }
 
   // -----------------------------------------------------------
-  // SCREEN: HARVEST SALES MAIN LIST
+  // SCREEN: HARVEST SALES MAIN LIST (VENTAS / ALMACÉN)
   // -----------------------------------------------------------
-  const distinctAvailableCampaigns = new Set(
-    availableHarvests
-      .map((h) => h.campanaNombre || campaignMap.get(h.campanaId)?.nombre || '')
-      .filter(Boolean)
-  ).size;
-  const distinctSalesCampaigns = new Set(
-    activeSales
-      .map((s) => s.campanaNombre || campaignMap.get(s.campanaId)?.nombre || '')
-      .filter(Boolean)
-  ).size;
-
   const isInitialLoading = loading && !hasLoaded && !loadError;
   const isBlockingLoadError = Boolean(loadError) && !hasLoaded;
   const canRegisterSale =
-    effectiveIsAdmin && hasLoaded && !isBlockingLoadError && !loading && availableHarvests.length > 0;
+    effectiveIsAdmin && hasLoaded && !isBlockingLoadError && !loading && warehouseProductsWithStock.length > 0;
 
   return (
     <div className="space-y-3.5">
@@ -1180,15 +1565,17 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
           <h2 className="text-base font-bold text-[#26352D] leading-snug">{t('harvestSales.title')}</h2>
           <p className="text-xs text-[#64746B] tabular-nums">
             {isInitialLoading ? (
-              bi('Verificando cosechas disponibles...', 'Checking available harvests...')
+              bi('Consultando almacén y ventas...', 'Checking warehouse and sales...')
             ) : isBlockingLoadError ? (
               <span className="text-[#B42323] font-medium">
                 {bi('Error al cargar información', 'Error loading data')}
               </span>
             ) : (
               <>
-                {activeSales.length} {bi('ventas', 'sales')} · {availableHarvests.length}{' '}
-                {bi('disponibles', 'available')}
+                {activeSales.length} {bi('ventas', 'sales')} · {warehouseProductsWithStock.length}{' '}
+                {warehouseProductsWithStock.length === 1
+                  ? bi('producto en almacén', 'product in warehouse')
+                  : bi('productos en almacén', 'products in warehouse')}
                 {refreshing ? ` · ${bi('Actualizando...', 'Updating...')}` : ''}
               </>
             )}
@@ -1200,7 +1587,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
       <button
         type="button"
         disabled={!canRegisterSale}
-        onClick={() => openCreateFormForHarvest()}
+        onClick={() => openCreateFormForProduct(undefined, 'list')}
         className="w-full h-[42px] px-4 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white text-sm font-bold inline-flex items-center justify-center gap-2 transition cursor-pointer disabled:opacity-45 shadow-xs"
       >
         {isInitialLoading ? (
@@ -1216,7 +1603,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
         )}
       </button>
 
-      {/* Non-blocking refresh error banner (when cached data is already displayed) */}
+      {/* Non-blocking refresh error banner */}
       {loadError && hasLoaded && (
         <div className="rounded-xl border border-[#C44545]/30 bg-[#FCECEC] px-3.5 py-2.5 text-xs font-medium text-[#962D2D] flex items-center justify-between gap-2">
           <div className="flex items-start gap-2 min-w-0">
@@ -1251,26 +1638,7 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
         </div>
       )}
 
-      {/* Campaign filter (unified across both Ventas and Disponibles) */}
-      {campaigns.length > 1 && hasLoaded && (
-        <div className="flex items-center gap-2">
-          <select
-            value={campaignFilter}
-            onChange={(e) => setCampaignFilter(e.target.value)}
-            aria-label={bi('Filtrar por campaña', 'Filter by campaign')}
-            className="w-full h-[38px] px-3 rounded-xl border border-[#CFD8D2] bg-white text-xs font-semibold text-[#26352D] focus:border-[#24875B] focus:outline-none"
-          >
-            <option value="all">{bi('Todas las campañas', 'All campaigns')}</option>
-            {campaigns.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.nombre}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-
-      {/* Compact Tabs: Ventas / Disponibles */}
+      {/* Compact Tabs: Ventas / Almacén */}
       <div className="grid grid-cols-2 gap-1.5 bg-[#EDF1EE] p-1 rounded-xl">
         <button
           type="button"
@@ -1285,18 +1653,18 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
         </button>
         <button
           type="button"
-          onClick={() => setListTab('harvests')}
+          onClick={() => setListTab('warehouse')}
           className={`h-9 rounded-lg text-xs font-bold transition cursor-pointer tabular-nums ${
-            listTab === 'harvests'
+            listTab === 'warehouse'
               ? 'bg-white text-[#1F2D25] shadow-xs'
               : 'text-[#5E6D64] hover:text-[#1F2D25]'
           }`}
         >
-          {bi('Disponibles', 'Available')} ({hasLoaded ? availableHarvests.length : '—'})
+          {bi('Almacén', 'Warehouse')} ({hasLoaded ? warehouseSummaries.length : '—'})
         </button>
       </div>
 
-      {/* State B: Blocking Load Error (never masquerade as 0 records) */}
+      {/* State B: Blocking Load Error */}
       {isBlockingLoadError ? (
         <div className="rounded-2xl border border-[#C44545]/30 bg-white px-4 py-7 text-center space-y-3">
           <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-[#FCECEC] text-[#C44545]">
@@ -1318,14 +1686,30 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
           </button>
         </div>
       ) : isInitialLoading ? (
-        /* State A: Initial Loading / Verifying */
         <div className="rounded-2xl border border-[#E2E7E3] bg-white p-8 flex items-center justify-center gap-2 text-sm text-[#5E6D64]">
           <Loader2 className="h-4 w-4 animate-spin text-[#24875B]" />
-          <span>{bi('Verificando ventas y cosechas disponibles...', 'Checking sales and available harvests...')}</span>
+          <span>{bi('Consultando almacén y ventas...', 'Loading warehouse and sales...')}</span>
         </div>
       ) : listTab === 'sales' ? (
         <>
-          {/* Search & Status filter (only shown when there are sales to filter or active filter) */}
+          {/* Campaign filter (applies to Ventas history; Almacén always aggregates all campaigns) */}
+          {campaigns.length > 1 && hasLoaded && (
+            <select
+              value={campaignFilter}
+              onChange={(e) => setCampaignFilter(e.target.value)}
+              aria-label={bi('Filtrar ventas por campaña', 'Filter sales by campaign')}
+              className="w-full h-[38px] px-3 rounded-xl border border-[#CFD8D2] bg-white text-xs font-semibold text-[#26352D] focus:border-[#24875B] focus:outline-none"
+            >
+              <option value="all">{bi('Todas las campañas', 'All campaigns')}</option>
+              {campaigns.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.nombre}
+                </option>
+              ))}
+            </select>
+          )}
+
+          {/* Search & Status filter */}
           {(activeSales.length > 0 || search.trim() !== '' || statusFilter !== 'ALL') && (
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
               <div className="relative flex-1">
@@ -1362,15 +1746,19 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
                   ? bi('No hay ventas registradas en esta campaña.', 'No sales recorded in this campaign.')
                   : bi('Aún no hay ventas registradas.', 'No sales recorded yet.')}
               </p>
-              {availableHarvests.length > 0 && !search.trim() && statusFilter === 'ALL' && (
+              {warehouseProductsWithStock.length > 0 && !search.trim() && statusFilter === 'ALL' && (
                 <button
                   type="button"
-                  onClick={() => setListTab('harvests')}
+                  onClick={() => setListTab('warehouse')}
                   className="text-xs font-bold text-[#24875B] hover:underline cursor-pointer"
                 >
                   {bi(
-                    `Ver ${availableHarvests.length} cosecha(s) disponible(s)`,
-                    `View ${availableHarvests.length} available harvest(s)`
+                    `Ver almacén (${warehouseProductsWithStock.length} ${
+                      warehouseProductsWithStock.length === 1 ? 'producto disponible' : 'productos disponibles'
+                    })`,
+                    `View warehouse (${warehouseProductsWithStock.length} ${
+                      warehouseProductsWithStock.length === 1 ? 'product available' : 'products available'
+                    })`
                   )}
                 </button>
               )}
@@ -1380,14 +1768,12 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
               {filteredSales.map((sale) => {
                 const buyer = resolveBuyerDisplay(sale);
                 const st = statusLabel(sale.estado);
-                const lotName = sale.loteNombre || lotMap.get(sale.loteId)?.nombre || '';
-                const campName = sale.campanaNombre || campaignMap.get(sale.campanaId)?.nombre || '';
-                const subtitleParts = [
-                  sale.producto,
-                  lotName,
-                  distinctSalesCampaigns > 1 ? campName : '',
-                  fmtDate(sale.fecha),
-                ].filter(Boolean);
+                const origin =
+                  formatSaleOriginSummary(sale, lang) ||
+                  sale.loteNombre ||
+                  lotMap.get(sale.loteId)?.nombre ||
+                  '';
+                const subtitleParts = [sale.producto, origin, fmtDate(sale.fecha)].filter(Boolean);
 
                 return (
                   <button
@@ -1426,61 +1812,78 @@ export const HarvestSalesView: React.FC<HarvestSalesViewProps> = ({
           )}
         </>
       ) : (
-        /* Available Harvests Tab */
-        <div className="space-y-2">
-          {availableHarvests.length === 0 ? (
+        /* General Harvest Warehouse Tab (grouped by product across all lots & campaigns) */
+        <div className="space-y-2.5">
+          {warehouseSummaries.length === 0 ? (
             <div className="rounded-2xl border border-[#E2E7E3] bg-white px-4 py-8 text-center space-y-2">
+              <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-[#F1F5F2] text-[#64746B]">
+                <Package className="h-5 w-5" />
+              </div>
               <p className="text-sm font-medium text-[#5E6D64]">
-                {campaignFilter !== 'all'
-                  ? bi('No hay cosechas disponibles en esta campaña.', 'No harvests available in this campaign.')
-                  : bi('No hay cosechas disponibles para la venta.', 'No harvests available for sale.')}
+                {bi('No hay cosechas registradas en el almacén.', 'No harvests recorded in the warehouse.')}
               </p>
-              {campaignFilter !== 'all' && filterAvailableHarvests(harvests, 'all').length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setCampaignFilter('all')}
-                  className="text-xs font-bold text-[#24875B] hover:underline cursor-pointer"
-                >
-                  {bi('Mostrar todas las campañas', 'Show all campaigns')}
-                </button>
-              )}
             </div>
           ) : (
             <div className="rounded-2xl border border-[#E2E7E3] bg-white divide-y divide-[#EEF2EF] overflow-hidden">
-              {availableHarvests.map((h) => {
-                const lotName = h.loteNombre || lotMap.get(h.loteId)?.nombre || '';
-                const campName = h.campanaNombre || campaignMap.get(h.campanaId)?.nombre || '';
-                const metaParts = [
-                  lotName,
-                  distinctAvailableCampaigns > 1 ? campName : '',
-                  fmtDate(h.fecha),
-                ].filter(Boolean);
-
+              {warehouseSummaries.map((prod) => {
+                const hasStock = prod.totalDisponible > HARVEST_AVAILABILITY_EPSILON;
+                const lotsCountToDisplay = hasStock ? prod.lotesDisponiblesCount : prod.lotesCount;
                 return (
-                  <div key={h.id} className="px-3.5 py-3 flex items-center justify-between gap-2.5">
+                  <div
+                    key={prod.key}
+                    onClick={() => {
+                      setSelectedProductKey(prod.key);
+                      setNotice(null);
+                      setScreen('warehouse_detail');
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setSelectedProductKey(prod.key);
+                        setNotice(null);
+                        setScreen('warehouse_detail');
+                      }
+                    }}
+                    className="px-3.5 py-3 flex items-center justify-between gap-2.5 hover:bg-[#F7F9F7] transition cursor-pointer"
+                  >
                     <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                      <div className="h-9 w-9 rounded-xl bg-[#EAF5EE] text-[#1D704B] flex items-center justify-center shrink-0">
-                        <VisualIcon iconId={resolveProductIcon(h.producto)} nameHint={h.producto} category="ingreso" size={22} />
+                      <div className="h-10 w-10 rounded-xl bg-[#EAF5EE] text-[#1D704B] flex items-center justify-center shrink-0">
+                        <VisualIcon iconId={resolveProductIcon(prod.producto)} nameHint={prod.producto} category="ingreso" size={24} />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm font-bold text-[#1F2D25] truncate leading-snug">{h.producto}</p>
+                        <p className="text-sm font-bold text-[#1F2D25] truncate leading-snug">{prod.producto}</p>
                         <p className="text-xs text-[#64746B] truncate">
-                          {metaParts.join(' · ')}
+                          {lotsCountToDisplay} {lotsCountToDisplay === 1 ? bi('lote', 'lot') : bi('lotes', 'lots')}
+                          {' · '}
+                          {fmtNum(prod.porcentajeVendido, 0)}% {bi('vendido', 'sold')}
                         </p>
-                        <p className="text-xs font-bold text-[#1D704B] tabular-nums whitespace-nowrap mt-0.5">
-                          {fmtNum(h.pendiente)} t {bi('disponibles', 'available')}
+                        <p
+                          className={`text-xs font-extrabold tabular-nums whitespace-nowrap mt-0.5 ${
+                            hasStock ? 'text-[#1D704B]' : 'text-[#7A8780]'
+                          }`}
+                        >
+                          {fmtNum(prod.totalDisponible)} {prod.unidad}{' '}
+                          {hasStock ? bi('disponibles', 'available') : bi('agotado', 'sold out')}
                         </p>
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      disabled={!effectiveIsAdmin}
-                      onClick={() => openCreateFormForHarvest(h)}
-                      className="h-9 px-3 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white text-xs font-bold inline-flex items-center gap-1 transition cursor-pointer shrink-0 disabled:opacity-45"
-                    >
-                      <span>{bi('Vender', 'Sell')}</span>
-                    </button>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        disabled={!effectiveIsAdmin || !hasStock}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openCreateFormForProduct(prod.key, 'list');
+                        }}
+                        className="h-9 px-3 rounded-xl bg-[#24875B] hover:bg-[#1D704B] text-white text-xs font-bold inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-40"
+                      >
+                        <span>{bi('Vender', 'Sell')}</span>
+                      </button>
+                      <ChevronRight className="h-4 w-4 text-[#8A9890]" />
+                    </div>
                   </div>
                 );
               })}

@@ -7,7 +7,9 @@ import {
   buildDebitNoteSecondaryMeta,
   buildPaymentReceiptSecondaryMeta,
   computeDebitNoteSummary,
+  computePaymentReceiptLineDisplay,
   computePaymentReceiptSummary,
+  formatDebitNoteDueCell,
   formatDocumentAmount,
   getCurrencyShortLabel,
   parseDocumentConcept,
@@ -63,6 +65,14 @@ interface RichConceptCell {
   secondaryLines: string[];
 }
 
+interface RichTwoLineCell {
+  primary: string;
+  secondary: string | null;
+  boldPrimary?: boolean;
+  secondaryColor?: [number, number, number];
+  align: 'left' | 'right';
+}
+
 const COLOR_TEXT: [number, number, number] = [17, 24, 39];       // #111827
 const COLOR_MUTED: [number, number, number] = [75, 85, 99];      // #4B5563
 const COLOR_SUBTLE: [number, number, number] = [107, 114, 128];  // #6B7280
@@ -70,6 +80,9 @@ const COLOR_HEAD_TEXT: [number, number, number] = [55, 65, 81];  // #374151
 const COLOR_HEAD_BG: [number, number, number] = [243, 244, 246]; // #F3F4F6
 const COLOR_BORDER: [number, number, number] = [209, 213, 219];  // #D1D5DB
 const COLOR_ROW_LINE: [number, number, number] = [229, 231, 235];// #E5E7EB
+const COLOR_OVERDUE: [number, number, number] = [154, 52, 18];   // #9A3412
+const COLOR_GREEN_BG: [number, number, number] = [234, 245, 238];// #EAF5EE
+const COLOR_GREEN_TEXT: [number, number, number] = [22, 85, 58]; // #16553A
 
 function drawDocumentHeader(
   doc: jsPDF,
@@ -88,7 +101,6 @@ function drawDocumentHeader(
   const { appName, docTitle, numeroLabel, dateLabel, cancelledLabel, marginX, marginY, pageW } = params;
   const rightX = pageW - marginX;
 
-  // Left: Logo + App Name (no non-fiscal text in header)
   const logoSize = 9.5;
   let textStartX = marginX;
   if (logo) {
@@ -105,7 +117,6 @@ function drawDocumentHeader(
   doc.setTextColor(...COLOR_TEXT);
   doc.text(appName, textStartX, marginY + 6.2);
 
-  // Right: Document Title, Number, Issue Date
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(12);
   doc.setTextColor(...COLOR_TEXT);
@@ -130,7 +141,6 @@ function drawDocumentHeader(
     headerBottom = marginY + 18.6;
   }
 
-  // Thin horizontal line below header
   doc.setDrawColor(...COLOR_BORDER);
   doc.setLineWidth(0.28);
   doc.line(marginX, headerBottom, rightX, headerBottom);
@@ -153,7 +163,7 @@ function drawClientSection(
 ): number {
   const { clientName, clientPhone, clientAddress, rightMetaLine, lang, marginX, pageW, startY } = params;
   const rightX = pageW - marginX;
-  const maxLeftW = rightMetaLine ? pageW - marginX * 2 - 76 : pageW - marginX * 2;
+  const maxLeftW = rightMetaLine ? pageW - marginX * 2 - 78 : pageW - marginX * 2;
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10.5);
@@ -231,7 +241,6 @@ function drawObservationAndFooter(
     y += wrapped.length * 3.8 + 1.5;
   }
 
-  // Single non-fiscal footer immediately below content (NOT pinned at bottom of page)
   if (y + 8 > pageH - marginY - 4) {
     doc.addPage();
     y = marginY + 4;
@@ -247,7 +256,6 @@ function drawObservationAndFooter(
   doc.setTextColor(...COLOR_SUBTLE);
   doc.text(nonFiscalText, marginX, y);
 
-  // Page numbering ONLY when the document spans more than 1 page
   const totalPages = doc.getNumberOfPages();
   if (totalPages > 1) {
     for (let p = 1; p <= totalPages; p++) {
@@ -258,6 +266,28 @@ function drawObservationAndFooter(
       const pageTxt = lang === 'en' ? `Page ${p} / ${totalPages}` : `Página ${p} / ${totalPages}`;
       doc.text(pageTxt, rightX, pageH - 6, { align: 'right' });
     }
+  }
+}
+
+function drawTwoLineCell(
+  doc: jsPDF,
+  cell: { x: number; y: number; width: number; height: number },
+  info: RichTwoLineCell
+): void {
+  const padX = 1.6;
+  const anchorX = info.align === 'right' ? cell.x + cell.width - padX : cell.x + padX;
+  const opts = info.align === 'right' ? { align: 'right' as const } : undefined;
+
+  doc.setFont('helvetica', info.boldPrimary ? 'bold' : 'normal');
+  doc.setFontSize(7.9);
+  doc.setTextColor(...(info.boldPrimary ? COLOR_TEXT : COLOR_HEAD_TEXT));
+  doc.text(info.primary, anchorX, cell.y + 4.7, opts);
+
+  if (info.secondary) {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(6.7);
+    doc.setTextColor(...(info.secondaryColor || COLOR_SUBTLE));
+    doc.text(info.secondary, anchorX, cell.y + 7.9, opts);
   }
 }
 
@@ -304,40 +334,45 @@ export async function generateDebitNotePdf(
     startY: y,
   });
 
-  // Build rich concept metadata and table rows (5 columns summing to 195.9 mm)
-  const conceptColW = 91.9;
+  // 8 columns summing to 195.9 mm:
+  // 18 + 55.9 + 18 + 20 + 21 + 22 + 19 + 22 = 195.9 mm
+  const conceptColW = 55.9;
   const conceptCells: RichConceptCell[] = [];
-  const amountSubLines: Array<string | null> = [];
+  const dueCells: RichTwoLineCell[] = [];
 
   const bodyRows = debitNote.items.map((item) => {
     const parsed = parseDocumentConcept(item);
     const secondaryLines = buildDebitNoteSecondaryMeta(item, lang);
     conceptCells.push({ primary: parsed.primary, secondaryLines });
 
-    const hasInterest = item.interes > 0.005;
-    const interestSub = hasInterest
-      ? `+ ${formatDocumentAmount(item.interes, item.moneda, summary.singleCurrency, lang)} ${
-          lang === 'en' ? 'int.' : 'int.'
-        }`
-      : null;
-    amountSubLines.push(interestSub);
+    const dueDisplay = formatDebitNoteDueCell(item, lang);
+    dueCells.push({
+      primary: dueDisplay.dueDateText,
+      secondary: dueDisplay.overdueText,
+      boldPrimary: false,
+      secondaryColor: COLOR_OVERDUE,
+      align: 'left',
+    });
 
-    // Reserve exact vertical height in autoTable via invisible placeholder lines
     const conceptPlaceholder = [parsed.primary, ...secondaryLines].join('\n');
-    const amountMain = formatDocumentAmount(
-      item.saldoPendiente,
-      item.moneda,
-      summary.singleCurrency,
-      lang
-    );
-    const amountPlaceholder = interestSub ? `${amountMain}\n${interestSub}` : amountMain;
+    const duePlaceholder = dueDisplay.overdueText
+      ? `${dueDisplay.dueDateText}\n${dueDisplay.overdueText}`
+      : dueDisplay.dueDateText;
+
+    const interestTxt =
+      item.interes > 0.005
+        ? formatDocumentAmount(item.interes, item.moneda, summary.singleCurrency, lang)
+        : '—';
 
     return [
       item.fecha ? formatDateLocale(item.fecha, lang) : '—',
       conceptPlaceholder,
       `${formatNumberLocale(item.cantidad, lang, 2)} ${item.unidad}`,
       formatDocumentAmount(item.precioUnitario, item.moneda, summary.singleCurrency, lang),
-      amountPlaceholder,
+      duePlaceholder,
+      formatDocumentAmount(item.saldoPendiente, item.moneda, summary.singleCurrency, lang),
+      interestTxt,
+      formatDocumentAmount(item.totalPorCobrar, item.moneda, summary.singleCurrency, lang),
     ];
   });
 
@@ -348,18 +383,21 @@ export async function generateDebitNotePdf(
     head: [
       [
         lang === 'en' ? 'Date' : 'Fecha',
-        lang === 'en' ? 'Concept / Description' : 'Concepto / Descripción',
-        lang === 'en' ? 'Quantity' : 'Cantidad',
-        (lang === 'en' ? 'Unit price' : 'Precio unit.') + currSuffix,
-        (lang === 'en' ? 'Pending amount' : 'Importe pendiente') + currSuffix,
+        lang === 'en' ? 'Concept' : 'Concepto',
+        lang === 'en' ? 'Qty' : 'Cantidad',
+        (lang === 'en' ? 'Unit price' : 'P. unit.') + currSuffix,
+        lang === 'en' ? 'Due date' : 'Vencimiento',
+        (lang === 'en' ? 'Pending prin.' : 'Capital pend.') + currSuffix,
+        (lang === 'en' ? 'Interest' : 'Interés') + currSuffix,
+        (lang === 'en' ? 'Total' : 'Total') + currSuffix,
       ],
     ],
     body: bodyRows,
     styles: {
       font: 'helvetica',
-      fontSize: 8.4,
+      fontSize: 7.9,
       textColor: COLOR_TEXT,
-      cellPadding: { top: 2.3, bottom: 2.3, left: 2, right: 2 },
+      cellPadding: { top: 2.2, bottom: 2.2, left: 1.5, right: 1.5 },
       valign: 'top',
       lineColor: COLOR_ROW_LINE,
       lineWidth: 0,
@@ -369,32 +407,34 @@ export async function generateDebitNotePdf(
       fillColor: COLOR_HEAD_BG,
       textColor: COLOR_HEAD_TEXT,
       fontStyle: 'bold',
-      fontSize: 7.9,
-      cellPadding: { top: 2.4, bottom: 2.4, left: 2, right: 2 },
+      fontSize: 7.3,
+      cellPadding: { top: 2.3, bottom: 2.3, left: 1.5, right: 1.5 },
     },
     columnStyles: {
-      0: { cellWidth: 22, halign: 'left', textColor: COLOR_HEAD_TEXT },
+      0: { cellWidth: 18, halign: 'left', textColor: COLOR_HEAD_TEXT },
       1: { cellWidth: conceptColW, halign: 'left' },
-      2: { cellWidth: 24, halign: 'right', textColor: COLOR_HEAD_TEXT },
-      3: { cellWidth: 27, halign: 'right', textColor: COLOR_HEAD_TEXT },
-      4: { cellWidth: 31, halign: 'right', fontStyle: 'bold', textColor: COLOR_TEXT },
+      2: { cellWidth: 18, halign: 'right', textColor: COLOR_HEAD_TEXT },
+      3: { cellWidth: 20, halign: 'right', textColor: COLOR_HEAD_TEXT },
+      4: { cellWidth: 21, halign: 'left', textColor: COLOR_HEAD_TEXT },
+      5: { cellWidth: 22, halign: 'right', textColor: COLOR_HEAD_TEXT },
+      6: { cellWidth: 19, halign: 'right', textColor: COLOR_MUTED },
+      7: { cellWidth: 22, halign: 'right', fontStyle: 'bold', textColor: COLOR_TEXT },
     },
     didParseCell: (data) => {
-      // Align header labels with numeric columns
-      if (data.section === 'head' && data.column.index >= 2) {
-        data.cell.styles.halign = 'right';
+      if (data.section === 'head') {
+        if (data.column.index === 2 || data.column.index === 3 || data.column.index >= 5) {
+          data.cell.styles.halign = 'right';
+        }
       }
-      // Suppress default text drawing for rich cells (drawn cleanly in didDrawCell)
       if (data.section === 'body' && data.column.index === 1) {
         data.cell.styles.textColor = [255, 255, 255];
       }
-      if (data.section === 'body' && data.column.index === 4 && amountSubLines[data.row.index]) {
+      if (data.section === 'body' && data.column.index === 4 && dueCells[data.row.index]?.secondary) {
         data.cell.styles.textColor = [255, 255, 255];
       }
     },
     didDrawCell: (data) => {
       const { cell } = data;
-      // Thin horizontal lines ONLY (no vertical borders)
       if (data.section === 'head') {
         doc.setDrawColor(...COLOR_BORDER);
         doc.setLineWidth(0.25);
@@ -408,45 +448,31 @@ export async function generateDebitNotePdf(
         if (data.column.index === 1) {
           const meta = conceptCells[data.row.index];
           if (meta) {
-            const innerX = cell.x + 2;
-            const innerW = cell.width - 4;
-            let cursorY = cell.y + 4.9;
+            const innerX = cell.x + 1.5;
+            const innerW = cell.width - 3;
+            let cursorY = cell.y + 4.7;
             doc.setFont('helvetica', 'bold');
-            doc.setFontSize(8.4);
+            doc.setFontSize(7.9);
             doc.setTextColor(...COLOR_TEXT);
             const primaryWrapped = doc.splitTextToSize(meta.primary, innerW);
             doc.text(primaryWrapped, innerX, cursorY);
-            cursorY += primaryWrapped.length * 3.55;
+            cursorY += primaryWrapped.length * 3.35;
 
             if (meta.secondaryLines.length > 0) {
               doc.setFont('helvetica', 'normal');
-              doc.setFontSize(7.4);
+              doc.setFontSize(6.9);
               doc.setTextColor(...COLOR_SUBTLE);
               meta.secondaryLines.forEach((line) => {
                 const subWrapped = doc.splitTextToSize(line, innerW);
                 doc.text(subWrapped, innerX, cursorY);
-                cursorY += subWrapped.length * 3.2;
+                cursorY += subWrapped.length * 3.0;
               });
             }
           }
         } else if (data.column.index === 4) {
-          const sub = amountSubLines[data.row.index];
-          if (sub) {
-            const item = debitNote.items[data.row.index];
-            const rightTextX = cell.x + cell.width - 2;
-            doc.setFont('helvetica', 'bold');
-            doc.setFontSize(8.4);
-            doc.setTextColor(...COLOR_TEXT);
-            doc.text(
-              formatDocumentAmount(item.saldoPendiente, item.moneda, summary.singleCurrency, lang),
-              rightTextX,
-              cell.y + 4.9,
-              { align: 'right' }
-            );
-            doc.setFont('helvetica', 'normal');
-            doc.setFontSize(7.2);
-            doc.setTextColor(...COLOR_SUBTLE);
-            doc.text(sub, rightTextX, cell.y + 8.3, { align: 'right' });
+          const due = dueCells[data.row.index];
+          if (due && due.secondary) {
+            drawTwoLineCell(doc, cell, due);
           }
         }
       }
@@ -471,7 +497,6 @@ export async function generateDebitNotePdf(
       totalY = marginY + 4;
     }
 
-    // Principal pending
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8.4);
     doc.setTextColor(...COLOR_MUTED);
@@ -493,7 +518,6 @@ export async function generateDebitNotePdf(
     });
     totalY += 4.8;
 
-    // Late interest (ONLY when > 0)
     if (hasInterest) {
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(8.4);
@@ -517,7 +541,6 @@ export async function generateDebitNotePdf(
       totalY += 4.8;
     }
 
-    // Highlighted TOTAL POR COBRAR
     const boxY = totalY - 2.2;
     const boxH = 8.2;
     doc.setFillColor(...COLOR_HEAD_BG);
@@ -590,6 +613,7 @@ export async function generatePaymentReceiptPdf(
   const currSuffix = summary.singleCurrency
     ? ` (${getCurrencyShortLabel(summary.singleCurrency)})`
     : '';
+  const equivSubLabel = lang === 'en' ? 'Applied equiv.' : 'Equiv. aplicado';
 
   let y = drawDocumentHeader(doc, logo, {
     appName,
@@ -630,45 +654,64 @@ export async function generatePaymentReceiptPdf(
     startY: y,
   });
 
-  const conceptColW = 91.9;
+  // 7 columns summing to 195.9 mm:
+  // 19 + 60.9 + 23 + 20 + 25 + 25 + 23 = 195.9 mm
+  const conceptColW = 60.9;
   const conceptCells: RichConceptCell[] = [];
-  const paidSubLines: Array<string | null> = [];
+  const paidUsdCells: Array<RichTwoLineCell | null> = [];
+  const paidBsCells: Array<RichTwoLineCell | null> = [];
 
   const bodyRows = receipt.items.map((item) => {
     const parsed = parseDocumentConcept(item);
     const secondaryLines = buildPaymentReceiptSecondaryMeta(item, lang);
     conceptCells.push({ primary: parsed.primary, secondaryLines });
 
-    const hasInterest = item.interesPagado > 0.005;
-    const paidSub = hasInterest
-      ? `${lang === 'en' ? 'Prin.' : 'Cap.'} ${formatDocumentAmount(
-          item.capitalPagado,
-          item.monedaDeuda,
-          summary.singleCurrency,
-          lang
-        )} · ${lang === 'en' ? 'Int.' : 'Int.'} ${formatDocumentAmount(
-          item.interesPagado,
-          item.monedaDeuda,
-          summary.singleCurrency,
-          lang
-        )}`
+    const lineDisp = computePaymentReceiptLineDisplay(item, receipt.tcAplicado);
+
+    const usdCell: RichTwoLineCell | null = lineDisp.paidUsd
+      ? {
+          primary: formatNumberLocale(lineDisp.paidUsd.value, lang, 2),
+          secondary: lineDisp.paidUsd.isEquivalentApplied ? equivSubLabel : null,
+          boldPrimary: lineDisp.paidUsd.isActualReceived,
+          align: 'right',
+        }
       : null;
-    paidSubLines.push(paidSub);
+    paidUsdCells.push(usdCell);
+
+    const bsCell: RichTwoLineCell | null = lineDisp.paidBs
+      ? {
+          primary: formatNumberLocale(lineDisp.paidBs.value, lang, 2),
+          secondary: lineDisp.paidBs.isEquivalentApplied ? equivSubLabel : null,
+          boldPrimary: lineDisp.paidBs.isActualReceived,
+          align: 'right',
+        }
+      : null;
+    paidBsCells.push(bsCell);
 
     const conceptPlaceholder = [parsed.primary, ...secondaryLines].join('\n');
-    const paidMain = formatDocumentAmount(
-      item.totalPagado,
-      item.monedaDeuda,
-      summary.singleCurrency,
-      lang
-    );
-    const paidPlaceholder = paidSub ? `${paidMain}\n${paidSub}` : paidMain;
+    const usdPlaceholder = usdCell
+      ? usdCell.secondary
+        ? `${usdCell.primary}\n${usdCell.secondary}`
+        : usdCell.primary
+      : '—';
+    const bsPlaceholder = bsCell
+      ? bsCell.secondary
+        ? `${bsCell.primary}\n${bsCell.secondary}`
+        : bsCell.primary
+      : '—';
+
+    const interestTxt =
+      item.interesPagado > 0.005
+        ? formatDocumentAmount(item.interesPagado, item.monedaDeuda, summary.singleCurrency, lang)
+        : '—';
 
     return [
       item.fechaDeuda ? formatDateLocale(item.fechaDeuda, lang) : '—',
       conceptPlaceholder,
       formatDocumentAmount(item.importeAnterior, item.monedaDeuda, summary.singleCurrency, lang),
-      paidPlaceholder,
+      interestTxt,
+      usdPlaceholder,
+      bsPlaceholder,
       formatDocumentAmount(item.saldoRestante, item.monedaDeuda, summary.singleCurrency, lang),
     ];
   });
@@ -680,18 +723,20 @@ export async function generatePaymentReceiptPdf(
     head: [
       [
         lang === 'en' ? 'Date' : 'Fecha',
-        lang === 'en' ? 'Concept / Description' : 'Concepto / Descripción',
+        lang === 'en' ? 'Concept' : 'Concepto',
         (lang === 'en' ? 'Prev. bal.' : 'Saldo ant.') + currSuffix,
-        (lang === 'en' ? 'Paid' : 'Cobrado') + currSuffix,
+        (lang === 'en' ? 'Interest' : 'Interés') + currSuffix,
+        lang === 'en' ? 'Paid USD' : 'Pagado USD',
+        lang === 'en' ? 'Paid Bs' : 'Pagado Bs',
         (lang === 'en' ? 'Remaining' : 'Saldo rest.') + currSuffix,
       ],
     ],
     body: bodyRows,
     styles: {
       font: 'helvetica',
-      fontSize: 8.4,
+      fontSize: 7.9,
       textColor: COLOR_TEXT,
-      cellPadding: { top: 2.3, bottom: 2.3, left: 2, right: 2 },
+      cellPadding: { top: 2.2, bottom: 2.2, left: 1.5, right: 1.5 },
       valign: 'top',
       lineColor: COLOR_ROW_LINE,
       lineWidth: 0,
@@ -701,15 +746,17 @@ export async function generatePaymentReceiptPdf(
       fillColor: COLOR_HEAD_BG,
       textColor: COLOR_HEAD_TEXT,
       fontStyle: 'bold',
-      fontSize: 7.9,
-      cellPadding: { top: 2.4, bottom: 2.4, left: 2, right: 2 },
+      fontSize: 7.4,
+      cellPadding: { top: 2.3, bottom: 2.3, left: 1.5, right: 1.5 },
     },
     columnStyles: {
-      0: { cellWidth: 22, halign: 'left', textColor: COLOR_HEAD_TEXT },
+      0: { cellWidth: 19, halign: 'left', textColor: COLOR_HEAD_TEXT },
       1: { cellWidth: conceptColW, halign: 'left' },
-      2: { cellWidth: 26, halign: 'right', textColor: COLOR_MUTED },
-      3: { cellWidth: 30, halign: 'right', fontStyle: 'bold', textColor: COLOR_TEXT },
-      4: { cellWidth: 26, halign: 'right', textColor: COLOR_HEAD_TEXT },
+      2: { cellWidth: 23, halign: 'right', textColor: COLOR_MUTED },
+      3: { cellWidth: 20, halign: 'right', textColor: COLOR_MUTED },
+      4: { cellWidth: 25, halign: 'right', textColor: COLOR_TEXT },
+      5: { cellWidth: 25, halign: 'right', textColor: COLOR_TEXT },
+      6: { cellWidth: 23, halign: 'right', textColor: COLOR_HEAD_TEXT },
     },
     didParseCell: (data) => {
       if (data.section === 'head' && data.column.index >= 2) {
@@ -718,8 +765,23 @@ export async function generatePaymentReceiptPdf(
       if (data.section === 'body' && data.column.index === 1) {
         data.cell.styles.textColor = [255, 255, 255];
       }
-      if (data.section === 'body' && data.column.index === 3 && paidSubLines[data.row.index]) {
-        data.cell.styles.textColor = [255, 255, 255];
+      if (data.section === 'body' && data.column.index === 4) {
+        const c = paidUsdCells[data.row.index];
+        if (c) {
+          if (c.secondary) data.cell.styles.textColor = [255, 255, 255];
+          else if (c.boldPrimary) data.cell.styles.fontStyle = 'bold';
+        } else {
+          data.cell.styles.textColor = COLOR_SUBTLE;
+        }
+      }
+      if (data.section === 'body' && data.column.index === 5) {
+        const c = paidBsCells[data.row.index];
+        if (c) {
+          if (c.secondary) data.cell.styles.textColor = [255, 255, 255];
+          else if (c.boldPrimary) data.cell.styles.fontStyle = 'bold';
+        } else {
+          data.cell.styles.textColor = COLOR_SUBTLE;
+        }
       }
     },
     didDrawCell: (data) => {
@@ -737,45 +799,36 @@ export async function generatePaymentReceiptPdf(
         if (data.column.index === 1) {
           const meta = conceptCells[data.row.index];
           if (meta) {
-            const innerX = cell.x + 2;
-            const innerW = cell.width - 4;
-            let cursorY = cell.y + 4.9;
+            const innerX = cell.x + 1.5;
+            const innerW = cell.width - 3;
+            let cursorY = cell.y + 4.7;
             doc.setFont('helvetica', 'bold');
-            doc.setFontSize(8.4);
+            doc.setFontSize(7.9);
             doc.setTextColor(...COLOR_TEXT);
             const primaryWrapped = doc.splitTextToSize(meta.primary, innerW);
             doc.text(primaryWrapped, innerX, cursorY);
-            cursorY += primaryWrapped.length * 3.55;
+            cursorY += primaryWrapped.length * 3.35;
 
             if (meta.secondaryLines.length > 0) {
               doc.setFont('helvetica', 'normal');
-              doc.setFontSize(7.4);
+              doc.setFontSize(6.9);
               doc.setTextColor(...COLOR_SUBTLE);
               meta.secondaryLines.forEach((line) => {
                 const subWrapped = doc.splitTextToSize(line, innerW);
                 doc.text(subWrapped, innerX, cursorY);
-                cursorY += subWrapped.length * 3.2;
+                cursorY += subWrapped.length * 3.0;
               });
             }
           }
-        } else if (data.column.index === 3) {
-          const sub = paidSubLines[data.row.index];
-          if (sub) {
-            const item = receipt.items[data.row.index];
-            const rightTextX = cell.x + cell.width - 2;
-            doc.setFont('helvetica', 'bold');
-            doc.setFontSize(8.4);
-            doc.setTextColor(...COLOR_TEXT);
-            doc.text(
-              formatDocumentAmount(item.totalPagado, item.monedaDeuda, summary.singleCurrency, lang),
-              rightTextX,
-              cell.y + 4.9,
-              { align: 'right' }
-            );
-            doc.setFont('helvetica', 'normal');
-            doc.setFontSize(6.8);
-            doc.setTextColor(...COLOR_SUBTLE);
-            doc.text(sub, rightTextX, cell.y + 8.3, { align: 'right' });
+        } else if (data.column.index === 4) {
+          const c = paidUsdCells[data.row.index];
+          if (c && c.secondary) {
+            drawTwoLineCell(doc, cell, c);
+          }
+        } else if (data.column.index === 5) {
+          const c = paidBsCells[data.row.index];
+          if (c && c.secondary) {
+            drawTwoLineCell(doc, cell, c);
           }
         }
       }
@@ -785,7 +838,7 @@ export async function generatePaymentReceiptPdf(
   // Right-aligned totals block (separated by currency — NEVER sum USD + Bs)
   const finalTableY = (doc as any).lastAutoTable?.finalY ?? y + 20;
   let totalY = finalTableY + 5;
-  const totalsW = 80;
+  const totalsW = 86;
   const totalsX = pageW - marginX - totalsW;
   const rightX = pageW - marginX;
 
@@ -794,6 +847,7 @@ export async function generatePaymentReceiptPdf(
     const cLabel = getCurrencyShortLabel(block.currency);
     const hasInterest = block.interest > 0.005;
     const hasRemaining = block.remaining > 0.005;
+    const isConvertedBlock = summary.hasCrossCurrency && block.currency !== receipt.monedaPago;
     const blockH = 6 + (hasInterest ? 5 : 0) + 9 + (hasRemaining ? 6 : 0) + 3;
 
     if (totalY + blockH > pageH - marginY - 10) {
@@ -801,18 +855,17 @@ export async function generatePaymentReceiptPdf(
       totalY = marginY + 4;
     }
 
-    // Capital cobrado
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8.4);
+    doc.setFontSize(8.3);
     doc.setTextColor(...COLOR_MUTED);
     doc.text(
       isMixed
         ? lang === 'en'
-          ? `Principal paid (${cLabel})`
-          : `Capital cobrado (${cLabel})`
+          ? `Principal applied (${cLabel})`
+          : `Capital aplicado (${cLabel})`
         : lang === 'en'
-        ? 'Principal paid'
-        : 'Capital cobrado',
+        ? 'Principal applied'
+        : 'Capital aplicado',
       totalsX + 2.5,
       totalY
     );
@@ -823,10 +876,9 @@ export async function generatePaymentReceiptPdf(
     });
     totalY += 4.8;
 
-    // Interés cobrado (only if > 0)
     if (hasInterest) {
       doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8.4);
+      doc.setFontSize(8.3);
       doc.setTextColor(...COLOR_MUTED);
       doc.text(
         isMixed
@@ -847,7 +899,6 @@ export async function generatePaymentReceiptPdf(
       totalY += 4.8;
     }
 
-    // Highlighted TOTAL COBRADO
     const boxY = totalY - 2.2;
     const boxH = 8.2;
     doc.setFillColor(...COLOR_HEAD_BG);
@@ -857,10 +908,14 @@ export async function generatePaymentReceiptPdf(
     doc.line(totalsX, boxY, totalsX + totalsW, boxY);
 
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8.8);
+    doc.setFontSize(8.4);
     doc.setTextColor(...COLOR_TEXT);
     doc.text(
-      isMixed
+      isConvertedBlock
+        ? lang === 'en'
+          ? `EQUIVALENT APPLIED (${cLabel})`
+          : `EQUIVALENTE APLICADO (${cLabel})`
+        : isMixed
         ? lang === 'en'
           ? `TOTAL PAID (${cLabel})`
           : `TOTAL COBRADO (${cLabel})`
@@ -870,14 +925,13 @@ export async function generatePaymentReceiptPdf(
       totalsX + 2.5,
       boxY + 5.4
     );
-    doc.setFontSize(10);
+    doc.setFontSize(9.8);
     doc.text(formatMoneyLocale(block.total, block.currency, lang), rightX - 2.5, boxY + 5.4, {
       align: 'right',
     });
 
     totalY = boxY + boxH + 4.2;
 
-    // Remaining balance (only if > 0)
     if (hasRemaining) {
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(8.2);
@@ -903,32 +957,42 @@ export async function generatePaymentReceiptPdf(
   }
 
   if (summary.hasCrossCurrency) {
-    if (totalY + 6 > pageH - marginY - 10) {
+    const recBoxH = 10;
+    if (totalY + recBoxH > pageH - marginY - 10) {
       doc.addPage();
       totalY = marginY + 4;
     }
-    doc.setDrawColor(...COLOR_ROW_LINE);
-    doc.setLineWidth(0.2);
-    doc.line(totalsX, totalY - 2, rightX, totalY - 2);
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.8);
-    doc.setTextColor(...COLOR_MUTED);
+    const recY = totalY - 1.5;
+    doc.setFillColor(...COLOR_GREEN_BG);
+    doc.roundedRect(totalsX, recY, totalsW, recBoxH, 1.2, 1.2, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.1);
+    doc.setTextColor(...COLOR_GREEN_TEXT);
     doc.text(
-      `${lang === 'en' ? 'Amount received' : 'Importe recibido'} (${
-        lang === 'en' ? 'FX' : 'TC'
-      } ${formatNumberLocale(receipt.tcAplicado, lang, 2)})`,
+      lang === 'en' ? 'AMOUNT RECEIVED' : 'IMPORTE RECIBIDO',
       totalsX + 2.5,
-      totalY + 1.8
+      recY + 4.2
+    );
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.1);
+    doc.text(
+      `${lang === 'en' ? 'Applied FX' : 'TC aplicado'}: ${formatNumberLocale(
+        receipt.tcAplicado,
+        lang,
+        2
+      )}`,
+      totalsX + 2.5,
+      recY + 8.0
     );
     doc.setFont('helvetica', 'bold');
-    doc.setTextColor(...COLOR_TEXT);
+    doc.setFontSize(9.8);
     doc.text(
       formatMoneyLocale(receipt.importeOriginalPagado, receipt.monedaPago, lang),
       rightX - 2.5,
-      totalY + 1.8,
+      recY + 6.4,
       { align: 'right' }
     );
-    totalY += 5.5;
+    totalY = recY + recBoxH + 3.5;
   }
 
   drawObservationAndFooter(doc, {

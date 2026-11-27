@@ -13,6 +13,11 @@ export interface ParsedDocumentConcept {
   secondary: string;
 }
 
+export interface DebitNoteDueDisplay {
+  dueDateText: string;
+  overdueText: string | null;
+}
+
 export interface DebitNoteCurrencyTotals {
   currency: Currency;
   hasItems: boolean;
@@ -37,6 +42,19 @@ export interface PaymentReceiptCurrencyTotals {
   remaining: number;
 }
 
+export interface PaymentReceiptAmountCell {
+  value: number;
+  currency: Currency;
+  isActualReceived: boolean;
+  isEquivalentApplied: boolean;
+}
+
+export interface PaymentReceiptLineDisplay {
+  paidUsd: PaymentReceiptAmountCell | null;
+  paidBs: PaymentReceiptAmountCell | null;
+  isCrossCurrency: boolean;
+}
+
 export interface PaymentReceiptSummary {
   singleCurrency: Currency | null;
   usd: PaymentReceiptCurrencyTotals;
@@ -45,6 +63,10 @@ export interface PaymentReceiptSummary {
   hasCrossCurrency: boolean;
   hasAnyInterest: boolean;
   hasAnyRemaining: boolean;
+  hasAnyPaidUsd: boolean;
+  hasAnyPaidBs: boolean;
+  totalReceivedCurrency: Currency;
+  totalReceivedAmount: number;
 }
 
 function round2(n: number): number {
@@ -60,8 +82,8 @@ export function getCurrencyShortLabel(currency: Currency): string {
  * Splits a raw debt concept into a bold primary title and a smaller secondary detail line:
  * - Machinery jobs ("New Holland TS115 — Ripper (subsolador)") ->
  *   primary: "Ripper (subsolador)", secondary: "New Holland TS115"
- * - Harvest sales ("Venta de Soya — Lote Norte") ->
- *   primary: "Venta de Soya", secondary: "Lote Norte"
+ * - Harvest sales ("Venta de Soya — Lote Norte" or "Venta de Soya — 3 lotes (...)") ->
+ *   primary: "Venta de Soya", secondary: "Lote Norte" / "3 lotes (...)"
  */
 export function parseDocumentConcept(item: {
   concepto?: string;
@@ -124,31 +146,48 @@ export function formatDocumentAmount(
   return formatMoneyLocale(value, currency, lang);
 }
 
+/**
+ * Secondary detail lines under Concepto in Debit Note.
+ * Due date and overdue days now live in their own dedicated Vencimiento column,
+ * so Concepto only carries clean secondary origin/equipment context.
+ */
 export function buildDebitNoteSecondaryMeta(
   item: DebitNoteLine,
-  lang: AppLanguage
+  _lang?: AppLanguage
 ): string[] {
   const parsed = parseDocumentConcept(item);
   const lines: string[] = [];
   if (parsed.secondary) {
     lines.push(parsed.secondary);
   }
-  if (item.fechaVencimiento) {
-    const dueFormatted = formatDateLocale(item.fechaVencimiento, lang);
-    const dueLabel = lang === 'en' ? `Due: ${dueFormatted}` : `Vence: ${dueFormatted}`;
-    if (item.diasAtraso > 0) {
-      const lateLabel =
-        lang === 'en'
-          ? `${item.diasAtraso}d overdue`
-          : `${item.diasAtraso} d. mora`;
-      lines.push(`${dueLabel} · ${lateLabel}`);
-    } else {
-      lines.push(dueLabel);
-    }
-  }
   return lines;
 }
 
+/**
+ * Formats the dedicated Vencimiento column cell for a Debit Note line:
+ * primary due date + optional subtle secondary overdue-days label.
+ */
+export function formatDebitNoteDueCell(
+  item: DebitNoteLine,
+  lang: AppLanguage
+): DebitNoteDueDisplay {
+  const dueDateText = item.fechaVencimiento
+    ? formatDateLocale(item.fechaVencimiento, lang)
+    : '—';
+  const overdueDays = Math.max(0, Math.round(Number(item.diasAtraso) || 0));
+  const overdueText =
+    overdueDays > 0
+      ? lang === 'en'
+        ? `${overdueDays}d overdue`
+        : `${overdueDays} d. mora`
+      : null;
+  return { dueDateText, overdueText };
+}
+
+/**
+ * Secondary detail lines under Concepto in Payment Receipt.
+ * When cross-currency, keeps subtle historical FX reference alongside equipment/lot info.
+ */
 export function buildPaymentReceiptSecondaryMeta(
   item: PaymentReceiptLine,
   lang: AppLanguage
@@ -158,16 +197,111 @@ export function buildPaymentReceiptSecondaryMeta(
   if (parsed.secondary) {
     lines.push(parsed.secondary);
   }
-  if (item.monedaPago !== item.monedaDeuda) {
-    const paidTxt = formatMoneyLocale(item.importeOriginalPagado, item.monedaPago, lang);
+  if (item.monedaPago !== item.monedaDeuda && item.tcAplicado > 0) {
     const tcTxt = formatNumberLocale(item.tcAplicado, lang, 2);
-    lines.push(
-      lang === 'en'
-        ? `Paid ${paidTxt} (FX ${tcTxt})`
-        : `Pagado ${paidTxt} (TC ${tcTxt})`
-    );
+    lines.push(lang === 'en' ? `FX ${tcTxt}` : `TC ${tcTxt}`);
   }
   return lines;
+}
+
+/**
+ * Computes the independent Pagado USD and Pagado Bs display cells for a Payment Receipt line.
+ * - Clearly distinguishes actual amount received vs converted equivalent applied.
+ * - Never sums USD and Bs as two separate payments.
+ * - Uses the historical payment exchange rate (`tcAplicado`).
+ */
+export function computePaymentReceiptLineDisplay(
+  item: PaymentReceiptLine,
+  fallbackTc?: number
+): PaymentReceiptLineDisplay {
+  const isCrossCurrency = item.monedaPago !== item.monedaDeuda;
+  const tc =
+    Number(item.tcAplicado) > 0
+      ? Number(item.tcAplicado)
+      : Number(fallbackTc) > 0
+      ? Number(fallbackTc)
+      : 6.96;
+
+  const totalDebtApplied = round2(
+    Number(item.totalPagado) > 0
+      ? Number(item.totalPagado)
+      : (Number(item.capitalPagado) || 0) + (Number(item.interesPagado) || 0)
+  );
+
+  let origPaid = round2(Number(item.importeOriginalPagado) || 0);
+  if (origPaid <= 0 && totalDebtApplied > 0) {
+    if (!isCrossCurrency) {
+      origPaid = totalDebtApplied;
+    } else if (item.monedaDeuda === 'USD' && item.monedaPago === 'BOB') {
+      origPaid = round2(totalDebtApplied * tc);
+    } else if (item.monedaDeuda === 'BOB' && item.monedaPago === 'USD') {
+      origPaid = round2(totalDebtApplied / tc);
+    }
+  }
+
+  // Case 1: USD debt paid in USD
+  if (item.monedaDeuda === 'USD' && item.monedaPago === 'USD') {
+    return {
+      paidUsd: {
+        value: totalDebtApplied,
+        currency: 'USD',
+        isActualReceived: true,
+        isEquivalentApplied: false,
+      },
+      paidBs: null,
+      isCrossCurrency: false,
+    };
+  }
+
+  // Case 2: USD debt paid in Bs (most common cross-currency case)
+  if (item.monedaDeuda === 'USD' && item.monedaPago === 'BOB') {
+    return {
+      paidUsd: {
+        value: totalDebtApplied,
+        currency: 'USD',
+        isActualReceived: false,
+        isEquivalentApplied: true,
+      },
+      paidBs: {
+        value: origPaid,
+        currency: 'BOB',
+        isActualReceived: true,
+        isEquivalentApplied: false,
+      },
+      isCrossCurrency: true,
+    };
+  }
+
+  // Case 3: Bs debt paid in Bs
+  if (item.monedaDeuda === 'BOB' && item.monedaPago === 'BOB') {
+    return {
+      paidUsd: null,
+      paidBs: {
+        value: totalDebtApplied,
+        currency: 'BOB',
+        isActualReceived: true,
+        isEquivalentApplied: false,
+      },
+      isCrossCurrency: false,
+    };
+  }
+
+  // Case 4: Bs debt paid in USD
+  return {
+    paidUsd: {
+      value: origPaid,
+      currency: 'USD',
+      isActualReceived: true,
+      isEquivalentApplied: false,
+    },
+    paidBs: {
+      value: totalDebtApplied,
+      currency: 'BOB',
+      isActualReceived: false,
+      isEquivalentApplied: true,
+    },
+    isCrossCurrency: true,
+  };
 }
 
 export function computeDebitNoteSummary(note: DebitNoteRecord): DebitNoteSummary {
@@ -270,9 +404,14 @@ export function computePaymentReceiptSummary(receipt: PaymentReceiptRecord): Pay
     }
   }
 
+  const lineDisplays = items.map((item) =>
+    computePaymentReceiptLineDisplay(item, receipt.tcAplicado)
+  );
   const hasCrossCurrency = items.some((i) => i.monedaPago !== i.monedaDeuda);
   const hasAnyInterest = blocks.some((b) => b.interest > 0.005);
   const hasAnyRemaining = blocks.some((b) => b.remaining > 0.005);
+  const hasAnyPaidUsd = lineDisplays.some((d) => d.paidUsd !== null);
+  const hasAnyPaidBs = lineDisplays.some((d) => d.paidBs !== null);
 
   return {
     singleCurrency,
@@ -282,5 +421,9 @@ export function computePaymentReceiptSummary(receipt: PaymentReceiptRecord): Pay
     hasCrossCurrency,
     hasAnyInterest,
     hasAnyRemaining,
+    hasAnyPaidUsd,
+    hasAnyPaidBs,
+    totalReceivedCurrency: receipt.monedaPago,
+    totalReceivedAmount: round2(Number(receipt.importeOriginalPagado) || 0),
   };
 }

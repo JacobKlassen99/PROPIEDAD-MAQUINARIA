@@ -285,6 +285,7 @@ export interface HarvestRecord {
   loteId: string;
   loteNombre?: string;
   producto: string;
+  unidad?: string;
   toneladas: number;
   asignadas: number;
   pendiente: number;
@@ -292,6 +293,56 @@ export interface HarvestRecord {
   observacion?: string;
   asignaciones: HarvestPriceAssignment[];
   creadoEn?: string;
+}
+
+export interface HarvestSaleDistribution {
+  id: string;
+  ventaId: string;
+  cosechaId: string;
+  loteId: string;
+  loteNombre?: string;
+  campanaId: string;
+  campanaNombre?: string;
+  producto: string;
+  unidad: string;
+  toneladasAsignadas: number;
+  participacionPct: number;
+  precioUnitario: number;
+  importeAsignado: number;
+  moneda: Currency;
+  tcHistorico: number;
+  movimientoId?: string;
+  anulada?: boolean;
+  creadoEn?: string;
+  actualizadoEn?: string;
+}
+
+export interface WarehouseLotBreakdown {
+  key: string;
+  loteId: string;
+  loteNombre: string;
+  campanaId: string;
+  campanaNombre: string;
+  cosechado: number;
+  vendido: number;
+  disponible: number;
+  porcentajeVendido: number;
+  participacionStockPct: number;
+  cosechaIds: string[];
+}
+
+export interface WarehouseProductSummary {
+  key: string;
+  producto: string;
+  unidad: string;
+  totalCosechado: number;
+  totalVendido: number;
+  totalDisponible: number;
+  porcentajeVendido: number;
+  lotesCount: number;
+  lotesDisponiblesCount: number;
+  lotes: WarehouseLotBreakdown[];
+  cosechasDisponibles: HarvestRecord[];
 }
 
 export interface ExpenseAllocationLot {
@@ -363,6 +414,7 @@ export interface HarvestSale {
   campanaNombre?: string;
   loteId: string;
   loteNombre?: string;
+  origenResumen?: string;
   producto: string;
   cantidad: number;
   unidad: string;
@@ -385,6 +437,7 @@ export interface HarvestSale {
   estadoComprador: 'ASIGNADO' | 'PENDIENTE';
   estadoPrecio: 'ASIGNADO' | 'PENDIENTE';
   anulada?: boolean;
+  distribuciones?: HarvestSaleDistribution[];
   creadoPor?: string;
   creadoEn?: string;
   actualizadoEn?: string;
