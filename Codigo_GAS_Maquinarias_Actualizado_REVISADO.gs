@@ -1853,7 +1853,7 @@ function handleCreateMachineryJob(j, userSession) {
     if (!jobsSheet) throw new Error('Hoja Trabajos no encontrada.');
     if (!movSheet) throw new Error('Hoja Movimientos no encontrada.');
 
-    asegurarColumnasOpcionales_2026(jobsSheet, ['clienteId', 'clientePendiente', 'plazoDias', 'fechaVencimiento', 'aplicarInteres', 'tasaInteresMensual']);
+    asegurarColumnasOpcionales_2026(jobsSheet, ['implementoId', 'clienteId', 'clientePendiente', 'plazoDias', 'fechaVencimiento', 'aplicarInteres', 'tasaInteresMensual', 'idempotencyKey']);
     const jHeaders = getSheetHeaders_(jobsSheet);
     const mHeaders = getSheetHeaders_(movSheet);
     validateRequiredColumns_('Trabajos', jHeaders, SHEET_SCHEMAS.Trabajos);
@@ -1861,6 +1861,30 @@ function handleCreateMachineryJob(j, userSession) {
 
     const jMap = getHeaderIndexMap_(jHeaders);
     const mMap = getHeaderIndexMap_(mHeaders);
+
+    // Idempotencia a nivel de solicitud (independiente de la confirmación de posible duplicado)
+    const idemKey = String((j && j.idempotencyKey) || '').trim();
+    if (idemKey) {
+      const existingByIdem = getSheetDataAsObjects('Trabajos').find(function (r) {
+        return String(r.idempotencyKey || '').trim() === idemKey;
+      });
+      if (existingByIdem) {
+        return {
+          ok: true,
+          deduplicated: true,
+          result: {
+            ...existingByIdem,
+            tipoTrabajo: String(existingByIdem.destino || '').toUpperCase() === 'PROPIEDAD' ? 'propiedad' : 'tercero',
+            cantidad: Number(existingByIdem.cantidad) || 0,
+            precioUnitario: Number(existingByIdem.precioUnitario) || 0,
+            tarifa: Number(existingByIdem.precioUnitario) || 0,
+            importe: Number(existingByIdem.importe) || 0,
+            total: Number(existingByIdem.importe) || 0,
+            tc: Number(existingByIdem.tc) || 0
+          }
+        };
+      }
+    }
 
     const id = Utilities.getUuid();
     const maqId = j.maquinaId || j.maquinariaId;
@@ -1936,6 +1960,24 @@ function handleCreateMachineryJob(j, userSession) {
       if (resolvedTasaInteres <= 0) resolvedAplicarInteres = false;
     }
 
+    // Protección autoritativa contra posibles registros duplicados (±30 días, bajo LockService, antes de escribir)
+    const unidadVal = String(j.unidad || 'ha');
+    const dupJobRes = dupCheckTrabajo_2026({
+      fecha: fechaVal,
+      destino: destinoVal,
+      maquinaId: String(maqId),
+      implementoId: String(implementoId || ''),
+      loteId: destinoVal === 'PROPIEDAD' ? String(j.loteId || '') : '',
+      clienteId: destinoVal === 'TERCERO' ? resolvedClienteId : '',
+      cliente: destinoVal === 'TERCERO' ? resolvedClienteNombre : '',
+      clientePendiente: destinoVal === 'TERCERO' ? resolvedClientePendiente : false,
+      cantidad: cantVal,
+      unidad: unidadVal
+    }, '', j.duplicateConfirmation);
+    if (dupJobRes) {
+      return dupJobRes;
+    }
+
     // 1. Insertar en Trabajos
     const jRow = Array(jHeaders.length).fill('');
     jRow[jMap['id']] = id;
@@ -1953,7 +1995,7 @@ function handleCreateMachineryJob(j, userSession) {
     if (jMap['aplicarinteres'] !== undefined) jRow[jMap['aplicarinteres']] = resolvedAplicarInteres;
     if (jMap['tasainteresmensual'] !== undefined) jRow[jMap['tasainteresmensual']] = resolvedTasaInteres;
     jRow[jMap['cantidad']] = cantVal;
-    jRow[jMap['unidad']] = String(j.unidad || 'ha');
+    jRow[jMap['unidad']] = unidadVal;
     jRow[jMap['preciounitario']] = precioVal;
     jRow[jMap['moneda']] = monVal;
     jRow[jMap['tc']] = finalTc;
@@ -1965,6 +2007,7 @@ function handleCreateMachineryJob(j, userSession) {
     jRow[jMap['observacion']] = obsVal;
     if (jMap['trabajonombre'] !== undefined) jRow[jMap['trabajonombre']] = String(j.trabajoNombre || '');
     if (jMap['trabajotipoid'] !== undefined) jRow[jMap['trabajotipoid']] = String(j.trabajoTipoId || '');
+    if (jMap['idempotencykey'] !== undefined) jRow[jMap['idempotencykey']] = idemKey;
     jRow[jMap['creadopor']] = usuarioNombre;
     jRow[jMap['creadoen']] = ahora;
     jRow[jMap['actualizadoen']] = ahora;
@@ -1981,7 +2024,7 @@ function handleCreateMachineryJob(j, userSession) {
       if (!userSession || userSession.rol !== 'admin') {
         throw new Error('Solo el administrador puede registrar cobros. Guarde el servicio como pendiente y registre el cobro desde Administración → Cuentas por cobrar.');
       }
-      if (clientePendiente || !resolvedClienteId) {
+      if (resolvedClientePendiente || !resolvedClienteId) {
         throw new Error('No se puede registrar un cobro inicial sin un cliente asignado del catálogo.');
       }
     }
@@ -2096,7 +2139,7 @@ function handleUpdateMachineryJob(id, j, userSession) {
     const movSheet = findSheetIgnoreCase_('Movimientos');
     if (!jobsSheet || !movSheet) throw new Error('Hojas Trabajos o Movimientos no encontradas.');
 
-    asegurarColumnasOpcionales_2026(jobsSheet, ['clienteId', 'clientePendiente', 'plazoDias', 'fechaVencimiento', 'aplicarInteres', 'tasaInteresMensual']);
+    asegurarColumnasOpcionales_2026(jobsSheet, ['implementoId', 'clienteId', 'clientePendiente', 'plazoDias', 'fechaVencimiento', 'aplicarInteres', 'tasaInteresMensual']);
     const jRows = jobsSheet.getDataRange().getValues();
     if (jRows.length < 2) return { ok: false, error: 'No existen trabajos registrados.' };
 
@@ -2352,6 +2395,38 @@ function handleUpdateMachineryJob(id, j, userSession) {
           ok: false,
           error: 'No se puede modificar el tipo de cambio de este servicio porque existen cobros históricos en Bs sin tipo de cambio propio.'
         };
+      }
+    }
+
+    // 3.5 Protección contra duplicados al editar (solo si cambió fecha operativa o criterios de coincidencia; nunca se compara consigo mismo)
+    const oldDupJobCand = {
+      fecha: oldFecha,
+      destino: oldDestino,
+      maquinaId: oldMaqId,
+      implementoId: oldImplementoId,
+      loteId: oldDestino === 'PROPIEDAD' ? oldLoteId : '',
+      clienteId: oldDestino === 'TERCERO' ? oldClienteId : '',
+      cliente: oldDestino === 'TERCERO' ? oldCliente : '',
+      clientePendiente: oldDestino === 'TERCERO' ? oldClientePendiente : false,
+      cantidad: oldCant,
+      unidad: oldUnidad
+    };
+    const newDupJobCand = {
+      fecha: finalFecha,
+      destino: newDestino,
+      maquinaId: finalMaqId,
+      implementoId: finalImplementoId,
+      loteId: newDestino === 'PROPIEDAD' ? finalLoteId : '',
+      clienteId: newDestino === 'TERCERO' ? finalClienteId : '',
+      cliente: newDestino === 'TERCERO' ? finalCliente : '',
+      clientePendiente: newDestino === 'TERCERO' ? finalClientePendiente : false,
+      cantidad: finalCant,
+      unidad: finalUnidad
+    };
+    if (dupTrabajoFingerprint_2026(oldDupJobCand) !== dupTrabajoFingerprint_2026(newDupJobCand)) {
+      const dupEditJobRes = dupCheckTrabajo_2026(newDupJobCand, idTrim, j.duplicateConfirmation);
+      if (dupEditJobRes) {
+        return dupEditJobRes;
       }
     }
 
@@ -2768,9 +2843,30 @@ function handleCreateExpense(exp, userSession) {
     const sheet = findSheetIgnoreCase_('Movimientos');
     if (!sheet) throw new Error('Hoja Movimientos no encontrada.');
 
+    asegurarColumnasOpcionales_2026(sheet, ['observacion', 'idempotencyKey']);
     const headers = getSheetHeaders_(sheet);
     validateRequiredColumns_('Movimientos', headers, SHEET_SCHEMAS.Movimientos);
     const map = getHeaderIndexMap_(headers);
+
+    // Idempotencia a nivel de solicitud
+    const idemKey = String((exp && exp.idempotencyKey) || '').trim();
+    if (idemKey) {
+      const existingByIdem = getSheetDataAsObjects('Movimientos').find(function (r) {
+        return String(r.idempotencyKey || '').trim() === idemKey;
+      });
+      if (existingByIdem) {
+        return {
+          ok: true,
+          deduplicated: true,
+          result: {
+            ...existingByIdem,
+            clase: 'GASTO',
+            importe: Number(existingByIdem.importe) || 0,
+            tc: Number(existingByIdem.tc) || 0
+          }
+        };
+      }
+    }
 
     const id = Utilities.getUuid();
     const cantVal = Number(exp.cantidad) || 1;
@@ -2778,37 +2874,69 @@ function handleCreateExpense(exp, userSession) {
     const totalVal = Number(exp.importe) || (cantVal * precioVal);
     const rawMon = String(exp.moneda || 'BOB').toUpperCase();
     const monVal = rawMon === 'USD' ? 'USD' : 'BOB';
+    const moduloVal = String(exp.modulo || 'PROPIEDAD').toUpperCase();
+    const fechaVal = validarFechaIso_2026(exp.fecha, getBoliviaTodayStr_());
+    const descVal = String(exp.descripcion || exp.itemNombre || exp.itemGasto || '').trim();
+    const loteIdVal = String(exp.loteId || '').trim();
+    const maqIdVal = String(exp.maquinaId || exp.maquinariaId || '').trim();
+    const implementoIdVal = String(exp.implementoId || '').trim();
+    const unidadVal = String(exp.unidad || 'unidades').trim();
+    const trabajoIdVal = String(exp.trabajoId || '').trim();
+    const obsVal = String(exp.observacion || exp.observaciones || '').trim();
+    const itemIdVal = dupResolverExpenseItemId_2026(exp.itemId, descVal, moduloVal);
 
     const finalTc = resolverTipoCambioOperacion_2026(exp.tc ?? exp.tipoCambio);
+
+    // Protección autoritativa contra posibles registros duplicados (±30 días, solo gastos manuales sin trabajoId)
+    if (!trabajoIdVal) {
+      const dupExpRes = dupCheckGasto_2026({
+        fecha: fechaVal,
+        modulo: moduloVal,
+        itemId: itemIdVal,
+        descripcion: descVal,
+        maquinaId: maqIdVal,
+        implementoId: implementoIdVal,
+        loteId: loteIdVal,
+        importe: totalVal,
+        moneda: monVal,
+        cantidad: cantVal,
+        unidad: unidadVal
+      }, '', exp.duplicateConfirmation);
+      if (dupExpRes) {
+        return dupExpRes;
+      }
+    }
 
     const ahora = new Date().toISOString();
     const usuarioNombre = userSession?.usuarioId || 'operador';
 
-    const row = [];
+    const row = Array(headers.length).fill('');
     row[map['id']] = id;
-    row[map['fecha']] = String(exp.fecha || ahora.slice(0, 10));
+    row[map['fecha']] = fechaVal;
     row[map['campanaid']] = String(exp.campanaId || '');
-    row[map['modulo']] = String(exp.modulo || 'PROPIEDAD').toUpperCase();
+    row[map['modulo']] = moduloVal;
     row[map['clase']] = 'GASTO';
-    row[map['itemid']] = String(exp.itemId || '');
-    row[map['descripcion']] = String(exp.descripcion || exp.itemNombre || '').trim();
-    row[map['loteid']] = String(exp.loteId || '');
-    row[map['maquinaid']] = String(exp.maquinaId || exp.maquinariaId || '');
+    row[map['itemid']] = itemIdVal;
+    row[map['descripcion']] = descVal;
+    row[map['loteid']] = loteIdVal;
+    row[map['maquinaid']] = maqIdVal;
     row[map['cantidad']] = cantVal;
-    row[map['unidad']] = String(exp.unidad || 'unidades').trim();
+    row[map['unidad']] = unidadVal;
     row[map['preciounitario']] = precioVal;
     row[map['importe']] = totalVal;
     row[map['moneda']] = monVal;
     row[map['tc']] = finalTc;
-    row[map['trabajoid']] = String(exp.trabajoId || '');
+    row[map['trabajoid']] = trabajoIdVal;
+    if (map['observacion'] !== undefined) row[map['observacion']] = obsVal;
+    if (map['idempotencykey'] !== undefined) row[map['idempotencykey']] = idemKey;
     row[map['creadopor']] = usuarioNombre;
     row[map['creadoen']] = ahora;
     row[map['actualizadoen']] = ahora;
 
     sheet.appendRow(row);
-    logAudit_(usuarioNombre, 'CREATE', 'Movimientos', id, 'Gasto registrado: ' + (exp.descripcion || id));
+    logAudit_(usuarioNombre, 'CREATE', 'Movimientos', id, 'Gasto registrado: ' + (descVal || id));
 
-    return { ok: true, result: { id, ...exp, clase: 'GASTO', importe: totalVal, tc: finalTc } };
+    return { ok: true, result: { id, ...exp, itemId: itemIdVal, fecha: fechaVal, clase: 'GASTO', importe: totalVal, tc: finalTc } };
   } finally {
     lock.releaseLock();
   }
@@ -2874,6 +3002,7 @@ function handleUpdateMovement(id, m, userSession) {
     const sheet = findSheetIgnoreCase_('Movimientos');
     if (!sheet) throw new Error('Hoja Movimientos no encontrada.');
 
+    asegurarColumnasOpcionales_2026(sheet, ['observacion']);
     const rows = sheet.getDataRange().getValues();
     if (rows.length < 2) return { ok: false, error: 'No existen movimientos registrados.' };
 
@@ -2909,26 +3038,36 @@ function handleUpdateMovement(id, m, userSession) {
     const usuarioNombre = userSession?.usuarioId || 'operador';
 
     const oldRow = rows[foundIdx - 1];
-    const oldFecha = String(oldRow[map['fecha']] || '');
+    const oldFecha = finToIsoDate_2026(oldRow[map['fecha']]) || String(oldRow[map['fecha']] || '');
     const oldCampanaId = String(oldRow[map['campanaid']] || '');
-    const oldModulo = String(oldRow[map['modulo']] || 'PROPIEDAD');
-    const oldClase = String(oldRow[map['clase']] || 'GASTO');
-    const oldDesc = String(oldRow[map['descripcion']] || '');
-    const oldLoteId = String(oldRow[map['loteid']] || '');
+    const oldModulo = String(oldRow[map['modulo']] || 'PROPIEDAD').toUpperCase();
+    const oldClase = String(oldRow[map['clase']] || 'GASTO').toUpperCase();
+    const oldItemId = map['itemid'] !== undefined ? String(oldRow[map['itemid']] || '').trim() : '';
+    const oldDesc = String(oldRow[map['descripcion']] || '').trim();
+    const oldLoteId = String(oldRow[map['loteid']] || '').trim();
+    const oldMaqId = map['maquinaid'] !== undefined ? String(oldRow[map['maquinaid']] || '').trim() : '';
     const oldCant = Number(oldRow[map['cantidad']]) || 1;
-    const oldUnidad = String(oldRow[map['unidad']] || 'unidades');
+    const oldUnidad = String(oldRow[map['unidad']] || 'unidades').trim();
     const oldPrecio = Number(oldRow[map['preciounitario']]) || 0;
-    const oldMoneda = String(oldRow[map['moneda']] || 'BOB').toUpperCase();
+    const oldTotal = Number(oldRow[map['importe']]) || (oldCant * oldPrecio);
+    const oldMoneda = String(oldRow[map['moneda']] || 'BOB').toUpperCase() === 'USD' ? 'USD' : 'BOB';
     const oldTc = Number(oldRow[map['tc']]) || 0;
+    const oldObs = map['observacion'] !== undefined ? String(oldRow[map['observacion']] || '') : '';
 
-    const finalFecha = m.fecha !== undefined ? String(m.fecha) : oldFecha;
+    const finalFecha = m.fecha !== undefined ? validarFechaIso_2026(m.fecha, oldFecha) : oldFecha;
     const finalCampanaId = m.campanaId !== undefined ? String(m.campanaId) : oldCampanaId;
     const finalModulo = m.modulo !== undefined ? String(m.modulo).toUpperCase() : oldModulo;
     const finalClase = m.clase !== undefined ? String(m.clase).toUpperCase() : oldClase;
     const finalDesc = (m.descripcion !== undefined || m.item !== undefined || m.concepto !== undefined || m.itemGasto !== undefined)
       ? String(m.descripcion || m.item || m.concepto || m.itemGasto || '').trim()
       : oldDesc;
-    const finalLoteId = m.loteId !== undefined ? String(m.loteId) : oldLoteId;
+    const finalItemId = m.itemId !== undefined
+      ? dupResolverExpenseItemId_2026(m.itemId, finalDesc, finalModulo)
+      : (finalDesc !== oldDesc ? dupResolverExpenseItemId_2026('', finalDesc, finalModulo) : dupResolverExpenseItemId_2026(oldItemId, finalDesc, finalModulo));
+    const finalLoteId = m.loteId !== undefined ? String(m.loteId).trim() : oldLoteId;
+    const finalMaqId = (m.maquinaId !== undefined || m.maquinariaId !== undefined)
+      ? String(m.maquinaId || m.maquinariaId || '').trim()
+      : oldMaqId;
     const finalCant = m.cantidad !== undefined ? (Number(m.cantidad) || 1) : oldCant;
     const finalUnidad = m.unidad !== undefined ? String(m.unidad).trim() : oldUnidad;
     const finalPrecio = (m.precioUnitario !== undefined || m.precio !== undefined)
@@ -2938,20 +3077,63 @@ function handleUpdateMovement(id, m, userSession) {
     const rawMon = m.moneda !== undefined ? String(m.moneda).toUpperCase() : oldMoneda;
     const finalMoneda = rawMon === 'USD' ? 'USD' : 'BOB';
     const finalTc = resolverTipoCambioOperacion_2026(m.tc ?? m.tipoCambio, oldTc);
+    const finalObs = (m.observacion !== undefined || m.observaciones !== undefined)
+      ? String(m.observacion ?? m.observaciones ?? '').trim()
+      : oldObs;
+
+    // Protección contra duplicados al editar gastos (solo si cambió fecha operativa o criterios de coincidencia; nunca contra sí mismo)
+    if (finalClase === 'GASTO') {
+      const oldDupExpCand = {
+        fecha: oldFecha,
+        modulo: oldModulo,
+        itemId: dupResolverExpenseItemId_2026(oldItemId, oldDesc, oldModulo),
+        descripcion: oldDesc,
+        maquinaId: oldMaqId,
+        implementoId: '',
+        loteId: oldLoteId,
+        importe: oldTotal,
+        moneda: oldMoneda,
+        cantidad: oldCant,
+        unidad: oldUnidad
+      };
+      const newDupExpCand = {
+        fecha: finalFecha,
+        modulo: finalModulo,
+        itemId: finalItemId,
+        descripcion: finalDesc,
+        maquinaId: finalMaqId,
+        implementoId: String(m.implementoId || '').trim(),
+        loteId: finalLoteId,
+        importe: finalTotal,
+        moneda: finalMoneda,
+        cantidad: finalCant,
+        unidad: finalUnidad
+      };
+      if (dupGastoFingerprint_2026(oldDupExpCand) !== dupGastoFingerprint_2026(newDupExpCand)) {
+        const dupEditExpRes = dupCheckGasto_2026(newDupExpCand, String(id), m.duplicateConfirmation);
+        if (dupEditExpRes) {
+          return dupEditExpRes;
+        }
+      }
+    }
 
     if (map['fecha'] !== undefined) sheet.getRange(foundIdx, map['fecha'] + 1).setValue(finalFecha);
     if (map['campanaid'] !== undefined) sheet.getRange(foundIdx, map['campanaid'] + 1).setValue(finalCampanaId);
     if (map['modulo'] !== undefined) sheet.getRange(foundIdx, map['modulo'] + 1).setValue(finalModulo);
     if (map['clase'] !== undefined) sheet.getRange(foundIdx, map['clase'] + 1).setValue(finalClase);
+    if (map['itemid'] !== undefined) sheet.getRange(foundIdx, map['itemid'] + 1).setValue(finalItemId);
     if (map['descripcion'] !== undefined) sheet.getRange(foundIdx, map['descripcion'] + 1).setValue(finalDesc);
     if (map['loteid'] !== undefined) sheet.getRange(foundIdx, map['loteid'] + 1).setValue(finalLoteId);
-    if (map['maquinaid'] !== undefined && (m.maquinaId !== undefined || m.maquinariaId !== undefined)) sheet.getRange(foundIdx, map['maquinaid'] + 1).setValue(String(m.maquinaId || m.maquinariaId || '').trim());
+    if (map['maquinaid'] !== undefined) sheet.getRange(foundIdx, map['maquinaid'] + 1).setValue(finalMaqId);
     if (map['cantidad'] !== undefined) sheet.getRange(foundIdx, map['cantidad'] + 1).setValue(finalCant);
     if (map['unidad'] !== undefined) sheet.getRange(foundIdx, map['unidad'] + 1).setValue(finalUnidad);
     if (map['preciounitario'] !== undefined) sheet.getRange(foundIdx, map['preciounitario'] + 1).setValue(finalPrecio);
     if (map['importe'] !== undefined) sheet.getRange(foundIdx, map['importe'] + 1).setValue(finalTotal);
     if (map['moneda'] !== undefined) sheet.getRange(foundIdx, map['moneda'] + 1).setValue(finalMoneda);
     if (map['tc'] !== undefined) sheet.getRange(foundIdx, map['tc'] + 1).setValue(finalTc);
+    if (map['observacion'] !== undefined && (m.observacion !== undefined || m.observaciones !== undefined)) {
+      sheet.getRange(foundIdx, map['observacion'] + 1).setValue(finalObs);
+    }
     if (map['actualizadoen'] !== undefined) sheet.getRange(foundIdx, map['actualizadoen'] + 1).setValue(ahora);
 
     logAudit_(usuarioNombre, 'UPDATE', 'Movimientos', id, 'Movimiento actualizado: ' + finalDesc);
@@ -2964,8 +3146,10 @@ function handleUpdateMovement(id, m, userSession) {
         campanaId: finalCampanaId,
         modulo: finalModulo,
         clase: finalClase,
+        itemId: finalItemId,
         descripcion: finalDesc,
         loteId: finalLoteId,
+        maquinaId: finalMaqId,
         cantidad: finalCant,
         unidad: finalUnidad,
         precioUnitario: finalPrecio,
@@ -2973,7 +3157,8 @@ function handleUpdateMovement(id, m, userSession) {
         importe: finalTotal,
         total: finalTotal,
         moneda: finalMoneda,
-        tc: finalTc
+        tc: finalTc,
+        observacion: finalObs
       }
     };
   } finally {
@@ -5060,6 +5245,20 @@ function cosechasCrear_2026(p,userSession){
     if(canonicalQty<=0) throw new Error('La cantidad cosechada debe ser mayor a cero.');
 
     const fecha=validarFechaIso_2026(p.fecha,getBoliviaTodayStr_());
+
+    // Protección autoritativa contra posibles cosechas duplicadas (±30 días, bajo LockService, antes de escribir)
+    const dupHarvRes = dupCheckCosecha_2026({
+      fecha: fecha,
+      conceptoId: conceptoId,
+      producto: producto,
+      loteId: String(p.loteId),
+      toneladas: canonicalQty,
+      unidad: unitInfo.canonicalUnit
+    }, '', p.duplicateConfirmation);
+    if (dupHarvRes) {
+      return dupHarvRes;
+    }
+
     const ahora=new Date().toISOString();
     const usuario=String(userSession&&userSession.usuarioId||'operador');
     const x={
@@ -5191,6 +5390,34 @@ function cosechasActualizar_2026(p, userSession) {
       throw new Error(
         'No se puede reducir la cantidad (' + finalToneladas + ' ' + finalUnidad + ') por debajo de las cantidades ya comprometidas en ventas (' + asignadas + ' ' + finalUnidad + ').'
       );
+    }
+
+    // Protección contra duplicados al editar cosecha (solo si cambió fecha operativa o criterios de coincidencia; nunca contra sí misma)
+    const oldDupHarvCand = {
+      fecha: oldFecha,
+      conceptoId: oldResolvedCid || oldConceptoId,
+      producto: oldProducto,
+      loteId: oldLoteId,
+      toneladas: oldToneladas,
+      unidad: oldUnidad
+    };
+    const newDupHarvCand = {
+      fecha: finalFecha,
+      conceptoId: newResolvedCid || finalConceptoId,
+      producto: finalProducto,
+      loteId: finalLoteId,
+      toneladas: finalToneladas,
+      unidad: finalUnidad
+    };
+    if (dupCosechaFingerprint_2026(oldDupHarvCand) !== dupCosechaFingerprint_2026(newDupHarvCand)) {
+      const dupEditHarvRes = dupCheckCosecha_2026(
+        newDupHarvCand,
+        id,
+        p.duplicateConfirmation || data.duplicateConfirmation
+      );
+      if (dupEditHarvRes) {
+        return dupEditHarvRes;
+      }
     }
 
     const ahora = new Date().toISOString();
@@ -5382,9 +5609,35 @@ function gastosDistribuirLotes_2026(p,session) {
     if(!mov)throw new Error('Falta hoja Movimientos.');
     validateRequiredColumns_('Movimientos',getSheetHeaders_(mov),SHEET_SCHEMAS.Movimientos);
     const dist=cosechasHoja_2026('DistribucionesGasto',GASTOS_DISTRIBUCION_CAMPOS_2026);
-    const grupoId=String(p.grupoId||Utilities.getUuid());
-    if(getSheetDataAsObjects('DistribucionesGasto').some(x=>String(x.grupoId)===grupoId))
-      throw new Error('Esta distribución ya existe; consulte su historial.');
+    const grupoId=String(p.grupoId||p.idempotencyKey||Utilities.getUuid()).trim();
+    const existentesDist=getSheetDataAsObjects('DistribucionesGasto').filter(x=>String(x.grupoId)===grupoId);
+    if(existentesDist.length>0){
+      return {
+        ok:true,
+        deduplicated:true,
+        result:{
+          grupoId,
+          total:existentesDist.reduce((s,x)=>s+(Number(x.importe)||0),0),
+          moneda:String(existentesDist[0].moneda||moneda),
+          totalHectareas:existentesDist.reduce((s,x)=>s+(Number(x.hectareas)||0),0),
+          partes:existentesDist
+        }
+      };
+    }
+
+    const resolvedItemId=dupResolverExpenseItemId_2026(p.itemId,descripcion,'PROPIEDAD');
+    const dupAllocRes=dupCheckGastoDistribuido_2026({
+      fecha:fecha,
+      itemId:resolvedItemId,
+      descripcion:descripcion,
+      importe:total,
+      moneda:moneda,
+      partes:partes
+    },p.duplicateConfirmation);
+    if(dupAllocRes){
+      return dupAllocRes;
+    }
+
     const totalCentavos=Math.round(total*100);
     const usuario=String(session&&session.usuarioId||'operador');
     const ahora=new Date().toISOString();
@@ -9544,6 +9797,582 @@ function migrarVinculacionProductosCosecha2026() {
     lock.releaseLock();
   }
 }
+
+// =============================================================
+// PROTECCIÓN CONTRA POSIBLES REGISTROS DUPLICADOS (±30 DÍAS)
+// Validación autoritativa bajo LockService en zona America/La_Paz
+// =============================================================
+const DUP_WINDOW_DAYS_2026 = 30;
+
+function dupNormText_2026(val) {
+  return String(val || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+function dupNormNumStr_2026(val, decimals) {
+  const d = typeof decimals === 'number' ? decimals : 4;
+  const n = Number(String(val === undefined || val === null ? '' : val).trim().replace(',', '.'));
+  if (!Number.isFinite(n)) return (0).toFixed(d);
+  const f = Math.pow(10, d);
+  return (Math.round(n * f) / f).toFixed(d);
+}
+
+function dupNormWorkUnit_2026(unit) {
+  const u = dupNormText_2026(unit);
+  if (u === 'h' || u === 'hr' || u === 'hrs' || u === 'hora' || u === 'horas' || u === 'hour' || u === 'hours') {
+    return 'hora';
+  }
+  return 'ha';
+}
+
+function dupNormCurrency_2026(moneda) {
+  const m = String(moneda || 'BOB').trim().toUpperCase();
+  if (m === 'USD' || m === 'US$' || m === 'U$D' || m === '$') return 'USD';
+  return 'BOB';
+}
+
+function dupNormExpenseUnit_2026(unit) {
+  const u = dupNormText_2026(unit);
+  if (!u || u === 'u' || u === 'unid' || u === 'unidad' || u === 'unidades' || u === 'unit' || u === 'units') {
+    return 'unidad';
+  }
+  if (u === 'l' || u === 'lt' || u === 'lts' || u === 'litro' || u === 'litros' || u === 'liter' || u === 'liters') return 'litro';
+  if (u === 'kg' || u === 'kilo' || u === 'kilos' || u === 'kilogramo' || u === 'kilogramos') return 'kg';
+  if (u === 't' || u === 'tn' || u === 'ton' || u === 'tons' || u === 'tonelada' || u === 'toneladas') return 't';
+  if (u === 'ha' || u === 'has' || u === 'hectarea' || u === 'hectareas' || u === 'hectare' || u === 'hectares') return 'ha';
+  if (u === 'h' || u === 'hr' || u === 'hrs' || u === 'hora' || u === 'horas' || u === 'hour' || u === 'hours') return 'hora';
+  if (u === 'bolsa' || u === 'bolsas' || u === 'bag' || u === 'bags') return 'bolsa';
+  if (u === 'qq' || u === 'quintal' || u === 'quintales') return 'qq';
+  return u;
+}
+
+function dupExpenseHasExplicitQty_2026(qty, unit) {
+  const n = Number(String(qty === undefined || qty === null ? '1' : qty).replace(',', '.'));
+  const normU = dupNormExpenseUnit_2026(unit);
+  if (Number.isFinite(n) && Math.abs(n - 1) > 0.0001) return true;
+  if (normU && normU !== 'unidad') return true;
+  return false;
+}
+
+function dupIsWithinWindow_2026(dateA, dateB) {
+  const isoA = finToIsoDate_2026(dateA);
+  const isoB = finToIsoDate_2026(dateB);
+  if (!isoA || !isoB) return false;
+  return Math.abs(finDaysDiffIso_2026(isoA, isoB)) <= DUP_WINDOW_DAYS_2026;
+}
+
+function dupIsRowAnnulledOrDeleted_2026(row) {
+  if (!row) return true;
+  if (finParseBool_2026(row.anulado, false)) return true;
+  if (finParseBool_2026(row.anulada, false)) return true;
+  if (finParseBool_2026(row.eliminado, false)) return true;
+  if (finParseBool_2026(row.eliminada, false)) return true;
+  const st = String(row.estadoRegistro || row.estado || '').trim().toUpperCase();
+  if (st === 'ANULADO' || st === 'ANULADA' || st === 'ELIMINADO' || st === 'ELIMINADA') return true;
+  return false;
+}
+
+function dupBuildMatchSignature_2026(matches) {
+  return (matches || [])
+    .map(function (m) { return String(m.id || '').trim(); })
+    .filter(Boolean)
+    .sort()
+    .join('|');
+}
+
+function dupIsConfirmationValid_2026(confirmation, fingerprint, matchSignature) {
+  if (!confirmation || typeof confirmation !== 'object') return false;
+  if (confirmation.confirmed !== true) return false;
+  if (String(confirmation.fingerprint || '') !== String(fingerprint || '')) return false;
+  if (String(confirmation.matchSignature || '') !== String(matchSignature || '')) return false;
+  return true;
+}
+
+function dupBuildResponse_2026(entityType, fingerprint, matches) {
+  const sorted = (matches || []).slice().sort(function (a, b) {
+    const fa = String(b.fecha || '').localeCompare(String(a.fecha || ''));
+    if (fa !== 0) return fa;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  });
+  const matchSignature = dupBuildMatchSignature_2026(sorted);
+  return {
+    ok: false,
+    code: 'POSSIBLE_DUPLICATE',
+    error: 'Ya existe un registro similar dentro de un rango de 30 días. Verifica que no estés registrando nuevamente la misma operación.',
+    duplicateCheck: {
+      entityType: entityType,
+      fingerprint: fingerprint,
+      matchSignature: matchSignature,
+      matches: sorted
+    }
+  };
+}
+
+function dupBuildCatalogLookup_2026() {
+  const maquinas = {};
+  getSheetDataAsObjects('Maquinas').forEach(function (m) {
+    if (m && m.id) maquinas[String(m.id)] = String(m.nombre || m.id).trim();
+  });
+  const implementos = {};
+  getSheetDataAsObjects('TrabajosMaquinaria').forEach(function (t) {
+    if (t && t.id) implementos[String(t.id)] = String(t.nombre || t.id).trim();
+  });
+  const lotes = {};
+  getSheetDataAsObjects('Lotes').forEach(function (l) {
+    if (l && l.id) lotes[String(l.id)] = String(l.nombre || l.id).trim();
+  });
+  const campanas = {};
+  getSheetDataAsObjects('Campanas').forEach(function (c) {
+    if (c && c.id) campanas[String(c.id)] = String(c.nombre || c.id).trim();
+  });
+  const clientes = {};
+  if (findSheetIgnoreCase_('Clientes')) {
+    getSheetDataAsObjects('Clientes').forEach(function (c) {
+      if (c && c.id) clientes[String(c.id)] = String(c.nombre || c.id).trim();
+    });
+  }
+  const items = {};
+  getSheetDataAsObjects('Items').forEach(function (it) {
+    if (it && it.id) items[String(it.id)] = it;
+  });
+  return { maquinas: maquinas, implementos: implementos, lotes: lotes, campanas: campanas, clientes: clientes, items: items };
+}
+
+function dupResolverExpenseItemId_2026(rawItemId, descripcion, modulo) {
+  const cleanId = String(rawItemId || '').trim();
+  const items = getSheetDataAsObjects('Items');
+  if (cleanId) {
+    const found = items.find(function (it) { return it && String(it.id || '').trim() === cleanId; });
+    if (found) return String(found.id).trim();
+  }
+  const normDesc = dupNormText_2026(descripcion);
+  if (!normDesc) return cleanId;
+  const modUp = String(modulo || '').trim().toUpperCase();
+  const matching = items.filter(function (it) {
+    if (!it) return false;
+    const cls = String(it.clase || '').trim().toUpperCase();
+    if (cls && cls !== 'GASTO') return false;
+    const mod = String(it.modulo || '').trim().toUpperCase();
+    if (modUp && mod && mod !== modUp) return false;
+    return dupNormText_2026(it.nombre) === normDesc;
+  });
+  if (matching.length === 1 && matching[0].id) {
+    return String(matching[0].id).trim();
+  }
+  return cleanId;
+}
+
+function dupTrabajoCustomerKey_2026(clienteId, cliente, clientePendiente) {
+  const cid = String(clienteId || '').trim();
+  const cname = dupNormText_2026(cliente);
+  const pend = finParseBool_2026(clientePendiente, false) || (!cid && !cname);
+  if (pend) return 'PENDING';
+  if (cid) return 'ID:' + cid;
+  return 'NAME:' + cname;
+}
+
+function dupTrabajoCustomersMatch_2026(cand, row) {
+  const candCid = String(cand.clienteId || '').trim();
+  const candName = dupNormText_2026(cand.cliente);
+  const candPend = finParseBool_2026(cand.clientePendiente, false) || (!candCid && !candName);
+
+  const rowCid = String(row.clienteId || '').trim();
+  const rowName = dupNormText_2026(row.cliente);
+  const rowPend = finParseBool_2026(row.clientePendiente, false) || (!rowCid && !rowName);
+
+  if (candPend && rowPend) return true;
+  if (candPend !== rowPend) return false;
+  if (candCid && rowCid) return candCid === rowCid;
+  if (candName && rowName) return candName === rowName;
+  return false;
+}
+
+function dupTrabajoFingerprint_2026(cand) {
+  const dest = String(cand.destino || 'TERCERO').trim().toUpperCase();
+  const fecha = finToIsoDate_2026(cand.fecha) || '';
+  const maqId = String(cand.maquinaId || '').trim();
+  const impId = String(cand.implementoId || '').trim();
+  const qty = dupNormNumStr_2026(cand.cantidad, 4);
+  const unit = dupNormWorkUnit_2026(cand.unidad);
+  if (dest === 'PROPIEDAD') {
+    const loteId = String(cand.loteId || '').trim();
+    return ['JOB_PROP', fecha, maqId, impId, loteId, qty, unit].join('|');
+  }
+  const custKey = dupTrabajoCustomerKey_2026(cand.clienteId, cand.cliente, cand.clientePendiente);
+  return ['JOB_EXT', fecha, maqId, impId, custKey, qty, unit].join('|');
+}
+
+function dupCheckTrabajo_2026(cand, excludeId, duplicateConfirmation) {
+  const dest = String(cand.destino || 'TERCERO').trim().toUpperCase();
+  const entityType = dest === 'PROPIEDAD' ? 'job_property' : 'service_external';
+  const fechaIso = finToIsoDate_2026(cand.fecha);
+  if (!fechaIso) return null;
+
+  const maqId = String(cand.maquinaId || '').trim();
+  const impId = String(cand.implementoId || '').trim();
+  const loteId = String(cand.loteId || '').trim();
+  const qtyStr = dupNormNumStr_2026(cand.cantidad, 4);
+  const unitNorm = dupNormWorkUnit_2026(cand.unidad);
+  const excl = String(excludeId || '').trim();
+
+  const rows = getSheetDataAsObjects('Trabajos');
+  const rawMatches = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || dupIsRowAnnulledOrDeleted_2026(r)) continue;
+    const rid = String(r.id || '').trim();
+    if (!rid || (excl && rid === excl)) continue;
+    const rDest = String(r.destino || 'TERCERO').trim().toUpperCase();
+    if (rDest !== dest) continue;
+    if (!dupIsWithinWindow_2026(fechaIso, r.fecha)) continue;
+    if (String(r.maquinaId || '').trim() !== maqId) continue;
+    const rImpId = String(r.implementoId || r.trabajoTipoId || '').trim();
+    if (rImpId !== impId) continue;
+    if (dupNormNumStr_2026(r.cantidad, 4) !== qtyStr) continue;
+    if (dupNormWorkUnit_2026(r.unidad) !== unitNorm) continue;
+
+    if (dest === 'PROPIEDAD') {
+      if (String(r.loteId || '').trim() !== loteId) continue;
+    } else {
+      if (!dupTrabajoCustomersMatch_2026(cand, r)) continue;
+    }
+    rawMatches.push(r);
+  }
+
+  if (rawMatches.length === 0) return null;
+
+  const lookups = dupBuildCatalogLookup_2026();
+  const matches = rawMatches.map(function (r) {
+    const rImpId = String(r.implementoId || r.trabajoTipoId || '').trim();
+    const rCid = String(r.clienteId || '').trim();
+    const rCname = String(r.cliente || (rCid && lookups.clientes[rCid]) || '').trim();
+    const rPend = finParseBool_2026(r.clientePendiente, false) || (!rCid && !rCname);
+    const rLoteId = String(r.loteId || '').trim();
+    const rCampId = String(r.campanaId || '').trim();
+    return {
+      id: String(r.id || '').trim(),
+      entityType: entityType,
+      fecha: finToIsoDate_2026(r.fecha) || String(r.fecha || ''),
+      campanaId: rCampId,
+      campanaNombre: lookups.campanas[rCampId] || '',
+      maquinariaNombre: lookups.maquinas[String(r.maquinaId || '').trim()] || String(r.maquinaId || ''),
+      implementoNombre: rImpId ? (lookups.implementos[rImpId] || String(r.trabajoNombre || '').trim()) : '',
+      clienteNombre: dest === 'TERCERO' ? (rPend ? '' : rCname) : '',
+      clientePendiente: dest === 'TERCERO' ? rPend : false,
+      loteNombre: dest === 'PROPIEDAD' ? (lookups.lotes[rLoteId] || rLoteId) : '',
+      cantidad: Number(r.cantidad) || 0,
+      unidad: dupNormWorkUnit_2026(r.unidad),
+      importe: Number(r.importe) || 0,
+      moneda: dupNormCurrency_2026(r.moneda)
+    };
+  });
+
+  const fingerprint = dupTrabajoFingerprint_2026(cand);
+  const matchSignature = dupBuildMatchSignature_2026(matches);
+  if (dupIsConfirmationValid_2026(duplicateConfirmation, fingerprint, matchSignature)) {
+    return null;
+  }
+  return dupBuildResponse_2026(entityType, fingerprint, matches);
+}
+
+function dupGastoFingerprint_2026(cand) {
+  const fecha = finToIsoDate_2026(cand.fecha) || '';
+  const mod = String(cand.modulo || 'PROPIEDAD').trim().toUpperCase();
+  const conceptKey = String(cand.itemId || '').trim()
+    ? ('ID:' + String(cand.itemId).trim())
+    : ('DESC:' + dupNormText_2026(cand.descripcion));
+  const maqId = String(cand.maquinaId || '').trim();
+  const impId = String(cand.implementoId || '').trim();
+  const loteId = String(cand.loteId || '').trim();
+  const amt = dupNormNumStr_2026(cand.importe, 2);
+  const mon = dupNormCurrency_2026(cand.moneda);
+  const hasQty = dupExpenseHasExplicitQty_2026(cand.cantidad, cand.unidad);
+  const qtyKey = hasQty
+    ? (dupNormNumStr_2026(cand.cantidad, 4) + ':' + dupNormExpenseUnit_2026(cand.unidad))
+    : 'FLAT';
+  return ['EXP', fecha, mod, conceptKey, maqId, impId, loteId, amt, mon, qtyKey].join('|');
+}
+
+function dupCheckGasto_2026(cand, excludeId, duplicateConfirmation) {
+  const fechaIso = finToIsoDate_2026(cand.fecha);
+  if (!fechaIso) return null;
+
+  const mod = String(cand.modulo || 'PROPIEDAD').trim().toUpperCase();
+  const candItemId = dupResolverExpenseItemId_2026(cand.itemId, cand.descripcion, mod);
+  const candDescNorm = dupNormText_2026(cand.descripcion);
+  const maqId = String(cand.maquinaId || '').trim();
+  const impId = String(cand.implementoId || '').trim();
+  const loteId = String(cand.loteId || '').trim();
+  const amtStr = dupNormNumStr_2026(cand.importe, 2);
+  const monNorm = dupNormCurrency_2026(cand.moneda);
+  const candHasQty = dupExpenseHasExplicitQty_2026(cand.cantidad, cand.unidad);
+  const candQtyStr = dupNormNumStr_2026(cand.cantidad, 4);
+  const candUnitNorm = dupNormExpenseUnit_2026(cand.unidad);
+  const excl = String(excludeId || '').trim();
+
+  const rows = getSheetDataAsObjects('Movimientos');
+  const rawMatches = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || dupIsRowAnnulledOrDeleted_2026(r)) continue;
+    const rid = String(r.id || '').trim();
+    if (!rid || (excl && rid === excl)) continue;
+    if (String(r.clase || '').trim().toUpperCase() !== 'GASTO') continue;
+    // Excluir gastos internos generados automáticamente por trabajos en propiedad propia
+    if (String(r.trabajoId || '').trim() !== '') continue;
+    const rMod = String(r.modulo || '').trim().toUpperCase();
+    if (rMod !== mod) continue;
+    if (!dupIsWithinWindow_2026(fechaIso, r.fecha)) continue;
+    if (String(r.maquinaId || '').trim() !== maqId) continue;
+    const rImpId = String(r.implementoId || '').trim();
+    if ((impId || rImpId) && rImpId !== impId) continue;
+    if (String(r.loteId || '').trim() !== loteId) continue;
+    if (dupNormNumStr_2026(r.importe, 2) !== amtStr) continue;
+    if (dupNormCurrency_2026(r.moneda) !== monNorm) continue;
+
+    // Concepto: comparar por itemId resuelto si ambos tienen ID, sino por descripción normalizada
+    const rItemId = dupResolverExpenseItemId_2026(r.itemId, r.descripcion, rMod);
+    if (candItemId && rItemId) {
+      if (candItemId !== rItemId) continue;
+    } else if (dupNormText_2026(r.descripcion) !== candDescNorm) {
+      continue;
+    }
+
+    // Cantidad y unidad cuando corresponda
+    const rHasQty = dupExpenseHasExplicitQty_2026(r.cantidad, r.unidad);
+    if (candHasQty || rHasQty) {
+      if (dupNormNumStr_2026(r.cantidad, 4) !== candQtyStr) continue;
+      if (dupNormExpenseUnit_2026(r.unidad) !== candUnitNorm) continue;
+    }
+
+    rawMatches.push(r);
+  }
+
+  if (rawMatches.length === 0) return null;
+
+  const lookups = dupBuildCatalogLookup_2026();
+  const matches = rawMatches.map(function (r) {
+    const rCampId = String(r.campanaId || '').trim();
+    const rMaqId = String(r.maquinaId || '').trim();
+    const rLoteId = String(r.loteId || '').trim();
+    const rItemId = String(r.itemId || '').trim();
+    const itemObj = rItemId ? lookups.items[rItemId] : null;
+    const rHasQty = dupExpenseHasExplicitQty_2026(r.cantidad, r.unidad);
+    return {
+      id: String(r.id || '').trim(),
+      entityType: 'expense',
+      fecha: finToIsoDate_2026(r.fecha) || String(r.fecha || ''),
+      campanaId: rCampId,
+      campanaNombre: lookups.campanas[rCampId] || '',
+      modulo: String(r.modulo || '').trim().toUpperCase(),
+      conceptoNombre: String((itemObj && itemObj.nombre) || r.descripcion || '').trim(),
+      maquinariaNombre: rMaqId ? (lookups.maquinas[rMaqId] || rMaqId) : '',
+      loteNombre: rLoteId ? (lookups.lotes[rLoteId] || rLoteId) : '',
+      cantidad: rHasQty ? (Number(r.cantidad) || 0) : undefined,
+      unidad: rHasQty ? String(r.unidad || '').trim() : undefined,
+      importe: Number(r.importe) || 0,
+      moneda: dupNormCurrency_2026(r.moneda)
+    };
+  });
+
+  const fingerprint = dupGastoFingerprint_2026({ ...cand, itemId: candItemId });
+  const matchSignature = dupBuildMatchSignature_2026(matches);
+  if (dupIsConfirmationValid_2026(duplicateConfirmation, fingerprint, matchSignature)) {
+    return null;
+  }
+  return dupBuildResponse_2026('expense', fingerprint, matches);
+}
+
+function dupGastoDistribuidoFingerprint_2026(cand) {
+  const fecha = finToIsoDate_2026(cand.fecha) || '';
+  const conceptKey = String(cand.itemId || '').trim()
+    ? ('ID:' + String(cand.itemId).trim())
+    : ('DESC:' + dupNormText_2026(cand.descripcion));
+  const amt = dupNormNumStr_2026(cand.importe, 2);
+  const mon = dupNormCurrency_2026(cand.moneda);
+  const lotsSig = (cand.partes || [])
+    .map(function (p) { return String(p.loteId || '').trim() + ':' + dupNormNumStr_2026(p.hectareas, 4); })
+    .sort()
+    .join(',');
+  return ['EXP_ALLOC', fecha, conceptKey, amt, mon, lotsSig].join('|');
+}
+
+function dupCheckGastoDistribuido_2026(cand, duplicateConfirmation) {
+  const fechaIso = finToIsoDate_2026(cand.fecha);
+  if (!fechaIso) return null;
+
+  const candItemId = dupResolverExpenseItemId_2026(cand.itemId, cand.descripcion, 'PROPIEDAD');
+  const candDescNorm = dupNormText_2026(cand.descripcion);
+  const amtStr = dupNormNumStr_2026(cand.importe, 2);
+  const monNorm = dupNormCurrency_2026(cand.moneda);
+  const candLotsSig = (cand.partes || [])
+    .map(function (p) { return String(p.loteId || '').trim() + ':' + dupNormNumStr_2026(p.hectareas, 4); })
+    .sort()
+    .join(',');
+
+  const distRows = findSheetIgnoreCase_('DistribucionesGasto') ? getSheetDataAsObjects('DistribucionesGasto') : [];
+  const movRows = getSheetDataAsObjects('Movimientos');
+  const movById = {};
+  movRows.forEach(function (m) {
+    if (m && m.id && !dupIsRowAnnulledOrDeleted_2026(m)) movById[String(m.id)] = m;
+  });
+
+  const groups = {};
+  distRows.forEach(function (d) {
+    if (!d || !d.grupoId || dupIsRowAnnulledOrDeleted_2026(d)) return;
+    const gid = String(d.grupoId).trim();
+    const mv = movById[String(d.movimientoId || '')];
+    if (!mv) return;
+    if (!groups[gid]) {
+      groups[gid] = {
+        grupoId: gid,
+        fecha: finToIsoDate_2026(d.fecha || mv.fecha) || '',
+        campanaId: String(d.campanaId || mv.campanaId || '').trim(),
+        itemId: String(mv.itemId || '').trim(),
+        descripcion: String(mv.descripcion || '').trim(),
+        moneda: dupNormCurrency_2026(d.moneda || mv.moneda),
+        totalImporte: 0,
+        partes: []
+      };
+    }
+    groups[gid].totalImporte += Number(d.importe || mv.importe || 0);
+    groups[gid].partes.push({
+      loteId: String(d.loteId || mv.loteId || '').trim(),
+      hectareas: Number(d.hectareas || mv.cantidad || 0)
+    });
+  });
+
+  const lookups = dupBuildCatalogLookup_2026();
+  const matches = [];
+  Object.keys(groups).forEach(function (gid) {
+    const g = groups[gid];
+    if (!dupIsWithinWindow_2026(fechaIso, g.fecha)) return;
+    if (dupNormNumStr_2026(g.totalImporte, 2) !== amtStr) return;
+    if (g.moneda !== monNorm) return;
+
+    const gItemId = dupResolverExpenseItemId_2026(g.itemId, g.descripcion, 'PROPIEDAD');
+    if (candItemId && gItemId) {
+      if (candItemId !== gItemId) return;
+    } else if (dupNormText_2026(g.descripcion) !== candDescNorm) {
+      return;
+    }
+
+    const gLotsSig = g.partes
+      .map(function (p) { return String(p.loteId || '').trim() + ':' + dupNormNumStr_2026(p.hectareas, 4); })
+      .sort()
+      .join(',');
+    if (gLotsSig !== candLotsSig) return;
+
+    const lotNames = g.partes.map(function (p) { return lookups.lotes[p.loteId] || p.loteId; });
+    const itemObj = gItemId ? lookups.items[gItemId] : null;
+    matches.push({
+      id: gid,
+      entityType: 'expense_allocated',
+      fecha: g.fecha,
+      campanaId: g.campanaId,
+      campanaNombre: lookups.campanas[g.campanaId] || '',
+      modulo: 'PROPIEDAD',
+      conceptoNombre: String((itemObj && itemObj.nombre) || g.descripcion || '').trim(),
+      lotesResumen: lotNames.join(', '),
+      cantidad: g.partes.reduce(function (s, p) { return s + (Number(p.hectareas) || 0); }, 0),
+      unidad: 'ha',
+      importe: redondear2_2026(g.totalImporte),
+      moneda: g.moneda
+    });
+  });
+
+  if (matches.length === 0) return null;
+
+  const fingerprint = dupGastoDistribuidoFingerprint_2026({ ...cand, itemId: candItemId });
+  const matchSignature = dupBuildMatchSignature_2026(matches);
+  if (dupIsConfirmationValid_2026(duplicateConfirmation, fingerprint, matchSignature)) {
+    return null;
+  }
+  return dupBuildResponse_2026('expense_allocated', fingerprint, matches);
+}
+
+function dupCosechaFingerprint_2026(cand) {
+  const fecha = finToIsoDate_2026(cand.fecha) || '';
+  const allItems = almacenObtenerItems_2026();
+  const res = almacenResolverConceptoIngreso_2026(cand.conceptoId, cand.producto, allItems);
+  const prodKey = res.conceptoId
+    ? ('ID:' + String(res.conceptoId).trim())
+    : ('PROD:' + almacenNormalizarProducto_2026(cand.producto));
+  const loteId = String(cand.loteId || '').trim();
+  const qty = dupNormNumStr_2026(cand.toneladas, 4);
+  const unit = almacenNormalizarUnidad_2026(cand.unidad).canonicalUnit;
+  return ['HARV', fecha, prodKey, loteId, qty, unit].join('|');
+}
+
+function dupCheckCosecha_2026(cand, excludeId, duplicateConfirmation) {
+  const fechaIso = finToIsoDate_2026(cand.fecha);
+  if (!fechaIso) return null;
+
+  const allItems = almacenObtenerItems_2026();
+  const candRes = almacenResolverConceptoIngreso_2026(cand.conceptoId, cand.producto, allItems);
+  const candCid = String(candRes.conceptoId || cand.conceptoId || '').trim();
+  const candProdNorm = almacenNormalizarProducto_2026(cand.producto);
+  const loteId = String(cand.loteId || '').trim();
+  const qtyStr = dupNormNumStr_2026(cand.toneladas, 4);
+  const unitCanon = almacenNormalizarUnidad_2026(cand.unidad).canonicalUnit;
+  const excl = String(excludeId || '').trim();
+
+  const rows = findSheetIgnoreCase_('Cosechas') ? getSheetDataAsObjects('Cosechas') : [];
+  const rawMatches = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || dupIsRowAnnulledOrDeleted_2026(r)) continue;
+    const rid = String(r.id || '').trim();
+    if (!rid || (excl && rid === excl)) continue;
+    if (!dupIsWithinWindow_2026(fechaIso, r.fecha)) continue;
+    if (String(r.loteId || '').trim() !== loteId) continue;
+    const rUnit = almacenNormalizarUnidad_2026(r.unidad).canonicalUnit;
+    if (rUnit !== unitCanon) continue;
+    if (dupNormNumStr_2026(r.toneladas, 4) !== qtyStr) continue;
+
+    const rRes = almacenResolverConceptoIngreso_2026(r.conceptoId, r.producto, allItems);
+    const rCid = String(rRes.conceptoId || r.conceptoId || '').trim();
+    if (candCid && rCid) {
+      if (candCid !== rCid) continue;
+    } else if (almacenNormalizarProducto_2026(r.producto) !== candProdNorm) {
+      continue;
+    }
+
+    rawMatches.push(r);
+  }
+
+  if (rawMatches.length === 0) return null;
+
+  const lookups = dupBuildCatalogLookup_2026();
+  const matches = rawMatches.map(function (r) {
+    const rCampId = String(r.campanaId || '').trim();
+    const rLoteId = String(r.loteId || '').trim();
+    const rRes = almacenResolverConceptoIngreso_2026(r.conceptoId, r.producto, allItems);
+    return {
+      id: String(r.id || '').trim(),
+      entityType: 'harvest',
+      fecha: finToIsoDate_2026(r.fecha) || String(r.fecha || ''),
+      campanaId: rCampId,
+      campanaNombre: lookups.campanas[rCampId] || '',
+      productoNombre: String(rRes.conceptoNombre || r.producto || '').trim(),
+      loteNombre: lookups.lotes[rLoteId] || rLoteId,
+      cantidad: Number(r.toneladas) || 0,
+      unidad: almacenNormalizarUnidad_2026(r.unidad).canonicalUnit
+    };
+  });
+
+  const fingerprint = dupCosechaFingerprint_2026(cand);
+  const matchSignature = dupBuildMatchSignature_2026(matches);
+  if (dupIsConfirmationValid_2026(duplicateConfirmation, fingerprint, matchSignature)) {
+    return null;
+  }
+  return dupBuildResponse_2026('harvest', fingerprint, matches);
+}
+
 
 
 

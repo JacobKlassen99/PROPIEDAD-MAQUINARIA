@@ -4,11 +4,19 @@ import {
   ExchangeRateConfig,
   Expense,
   Income,
+  ItemConfig,
   MachineryJob,
 } from '../types';
 import { toBoliviaIsoDate } from './boliviaDate';
 import { getCurrentLanguage } from './i18n';
 import { formatNumberLocale } from './formatters';
+import { IconCategory } from './iconCatalog';
+import { AppLanguage } from './translations';
+import {
+  isPropertyIncomeConcept,
+  normalizeConceptText,
+  resolveAgriculturalConcept,
+} from './agriculturalProducts';
 
 export interface ModuleOperationalResult {
   ingresos: number;
@@ -280,3 +288,644 @@ export function computeOperationalSummaries(params: {
     },
   };
 }
+
+// ============================================================================
+// CONCEPT BREAKDOWN ENGINE (SINGLE SOURCE OF TRUTH FOR GENERAL, MAQUINARIAS, PROPIEDAD)
+// ============================================================================
+
+export interface ConceptBreakdownRow {
+  key: string;
+  conceptId?: string;
+  label: string;
+  sublabel?: string;
+  iconId?: string;
+  iconCategory: IconCategory;
+  amount: number;
+  count: number;
+  modulo?: 'maquinarias' | 'propiedad';
+  isUnlinked?: boolean;
+  isInactive?: boolean;
+  isSystem?: boolean;
+}
+
+export interface ModuleConceptBreakdowns {
+  ingresosPorConcepto: ConceptBreakdownRow[];
+  gastosPorConcepto: ConceptBreakdownRow[];
+  totalIngresos: number;
+  totalGastos: number;
+}
+
+const GENERIC_EXPENSE_LABELS = new Set([
+  '',
+  'gasto',
+  'gastos',
+  'gasto directo',
+  'otros gastos',
+  'expense',
+  'expenses',
+  'direct expense',
+  'other expenses',
+]);
+
+const GENERIC_INCOME_LABELS = new Set([
+  '',
+  'ingreso',
+  'ingresos',
+  'ingreso cosecha',
+  'venta agricola',
+  'venta',
+  'otros ingresos',
+  'income',
+  'farm sale',
+  'other income',
+]);
+
+function cleanBreakdownLabel(raw: string | undefined | null): string {
+  if (!raw) return '';
+  let clean = String(raw).trim();
+  if (!clean) return '';
+  clean = clean.replace(/^Servicio\s+Maquinaria\s+Propia\s*-\s*/i, '');
+  clean = clean.replace(/^Servicio\s+Maquinaria\s+Propia\s*/i, '');
+  clean = clean.replace(/^Servicio\s+a\s+terceros\s*-\s*/i, '');
+  clean = clean.replace(/^Trabajo\s+en\s+propiedad\s*-\s*/i, '');
+  clean = clean.replace(/^Trabajo\s+de\s+maquinaria\s*-\s*/i, '');
+  clean = clean.replace(/^Labores?\s+de\s+maquinaria\s*-\s*/i, '');
+  clean = clean.replace(/^con\s+/i, '');
+  if (clean.length > 0) {
+    clean = clean.charAt(0).toUpperCase() + clean.slice(1);
+  }
+  return clean;
+}
+
+function getItemModule(item: ItemConfig): 'maquinarias' | 'propiedad' | '' {
+  const mod = String(item.modulo || '').trim().toUpperCase();
+  const tipo = String(item.tipo || '').trim().toLowerCase();
+  if (mod === 'MAQUINARIAS' || tipo.includes('maquinaria')) return 'maquinarias';
+  if (mod === 'PROPIEDAD' || tipo.includes('propiedad')) return 'propiedad';
+  return '';
+}
+
+function isExpenseItemConfig(item: ItemConfig | null | undefined): boolean {
+  if (!item) return false;
+  const cls = String(item.clase || '').trim().toUpperCase();
+  const tipo = String(item.tipo || '').trim().toLowerCase();
+  if (cls) return cls === 'GASTO';
+  return tipo.startsWith('gasto_');
+}
+
+function normalizeConceptIcon(iconId: string | undefined | null): string | undefined {
+  const raw = String(iconId || '').trim();
+  if (!raw || raw.toLowerCase() === 'tag') return undefined;
+  return raw;
+}
+
+/**
+ * Resolves an Expense movement to its registered concept in Administration -> Concepts -> Expenses
+ * using stable ID priority (preserving inactive concepts). Falls back to unambiguous exact name
+ * match for legacy movements without itemId, and never invents associations for unlinked rows.
+ */
+export function resolveExpenseConceptMeta(
+  expense: Expense,
+  itemsConfig: ItemConfig[],
+  lang: AppLanguage = getCurrentLanguage()
+): Omit<ConceptBreakdownRow, 'amount' | 'count'> {
+  const safeItems = Array.isArray(itemsConfig) ? itemsConfig.filter(Boolean) : [];
+  const rawItemId = String(expense.itemId || '').trim();
+
+  // 1. Stable ID match (works even when concept is renamed or inactive)
+  if (rawItemId) {
+    const byId = safeItems.find((it) => String(it.id || '').trim() === rawItemId);
+    if (byId) {
+      return {
+        key: `cid:${byId.id}`,
+        conceptId: String(byId.id),
+        label: byId.nombre,
+        iconId: normalizeConceptIcon(byId.icono),
+        iconCategory: 'gasto',
+        modulo: expense.modulo,
+        isInactive: byId.activo === false,
+      };
+    }
+  }
+
+  // 2. Unambiguous exact normalized name match among registered Expense concepts
+  const rawText = cleanBreakdownLabel(
+    expense.itemGasto || (expense as any).rubro || (expense as any).categoria
+  );
+  const normText = normalizeConceptText(rawText);
+
+  if (normText && safeItems.length > 0) {
+    const expenseItems = safeItems.filter(isExpenseItemConfig);
+    const sameModMatches = expenseItems.filter(
+      (it) => getItemModule(it) === expense.modulo && normalizeConceptText(it.nombre) === normText
+    );
+    const pickUnique = (candidates: ItemConfig[]): ItemConfig | null => {
+      if (candidates.length === 1) return candidates[0];
+      if (candidates.length > 1) {
+        const active = candidates.filter((c) => c.activo !== false);
+        if (active.length === 1) return active[0];
+      }
+      return null;
+    };
+
+    const matched =
+      pickUnique(sameModMatches) ||
+      pickUnique(expenseItems.filter((it) => normalizeConceptText(it.nombre) === normText));
+
+    if (matched) {
+      return {
+        key: `cid:${matched.id}`,
+        conceptId: String(matched.id),
+        label: matched.nombre,
+        iconId: normalizeConceptIcon(matched.icono),
+        iconCategory: 'gasto',
+        modulo: expense.modulo,
+        isInactive: matched.activo === false,
+      };
+    }
+  }
+
+  // 3. Historical movement without a linked concept — identifiable, never omitted, never falsely merged
+  if (!normText || GENERIC_EXPENSE_LABELS.has(normText)) {
+    return {
+      key: 'unlinked:expense',
+      label: lang === 'en' ? 'Unlinked expenses' : 'Gastos sin concepto vinculado',
+      iconId: 'otros-gastos',
+      iconCategory: 'gasto',
+      modulo: expense.modulo,
+      isUnlinked: true,
+    };
+  }
+
+  return {
+    key: `unlinked:expense:${normText}`,
+    label: rawText,
+    iconId: 'otros-gastos',
+    iconCategory: 'gasto',
+    modulo: expense.modulo,
+    isUnlinked: true,
+  };
+}
+
+/**
+ * Resolves a Property Income movement (harvest sales, direct incomes, or collected late-payment interest)
+ * to its registered concept in Administration -> Concepts -> Income using stable ID priority.
+ */
+export function resolvePropertyIncomeConceptMeta(
+  income: Income,
+  itemsConfig: ItemConfig[],
+  lang: AppLanguage = getCurrentLanguage()
+): Omit<ConceptBreakdownRow, 'amount' | 'count'> {
+  const safeItems = Array.isArray(itemsConfig) ? itemsConfig.filter(Boolean) : [];
+
+  if (isInterestIncome(income)) {
+    const sysConcept = safeItems.find(
+      (it) => String(it.id || '').trim().toUpperCase() === 'SYS_INTERES_MORA'
+    );
+    return {
+      key: 'sys:interest_mora',
+      conceptId: sysConcept?.id || 'SYS_INTERES_MORA',
+      label:
+        sysConcept?.nombre ||
+        (lang === 'en' ? 'Late-payment interest' : 'Interés por mora'),
+      iconId: normalizeConceptIcon(sysConcept?.icono) || 'otros-ingresos',
+      iconCategory: 'ingreso',
+      modulo: income.modulo || 'propiedad',
+      isSystem: true,
+    };
+  }
+
+  const rawItemId = String(income.itemId || '').trim();
+  // 1. Stable ID match (works even when concept is renamed or inactive)
+  if (rawItemId) {
+    const byId = safeItems.find((it) => String(it.id || '').trim() === rawItemId);
+    if (byId) {
+      return {
+        key: `cid:${byId.id}`,
+        conceptId: String(byId.id),
+        label: byId.nombre,
+        iconId: normalizeConceptIcon(byId.icono),
+        iconCategory: 'ingreso',
+        modulo: 'propiedad',
+        isInactive: byId.activo === false,
+      };
+    }
+  }
+
+  const rawLabel = cleanBreakdownLabel(income.concepto || (income as any).rubro);
+  // Strip legacy " (Buyer)" suffix if present only for unambiguous registered concept resolution
+  const withoutBuyer = rawLabel.replace(/\s*\([^)]*\)\s*$/, '').trim();
+  const normWithoutBuyer = normalizeConceptText(withoutBuyer);
+
+  if (safeItems.length > 0 && withoutBuyer) {
+    // 2. Agricultural & property income concept resolution (handles legacy "Soya" -> "Venta de Soya" unambiguously)
+    const agriRes = resolveAgriculturalConcept(
+      { conceptoId: rawItemId, producto: withoutBuyer },
+      safeItems
+    );
+    if (agriRes.concept) {
+      return {
+        key: `cid:${agriRes.concept.id}`,
+        conceptId: String(agriRes.concept.id),
+        label: agriRes.concept.nombre,
+        iconId: normalizeConceptIcon(agriRes.concept.icono),
+        iconCategory: 'ingreso',
+        modulo: 'propiedad',
+        isInactive: agriRes.concept.activo === false,
+      };
+    }
+
+    // 3. Exact match against all registered Property income concepts (including non-harvest incomes)
+    const propIncomeItems = safeItems.filter(isPropertyIncomeConcept);
+    const exactMatches = propIncomeItems.filter(
+      (it) => normalizeConceptText(it.nombre) === normWithoutBuyer
+    );
+    const uniqueExact =
+      exactMatches.length === 1
+        ? exactMatches[0]
+        : exactMatches.filter((it) => it.activo !== false).length === 1
+        ? exactMatches.filter((it) => it.activo !== false)[0]
+        : null;
+
+    if (uniqueExact) {
+      return {
+        key: `cid:${uniqueExact.id}`,
+        conceptId: String(uniqueExact.id),
+        label: uniqueExact.nombre,
+        iconId: normalizeConceptIcon(uniqueExact.icono),
+        iconCategory: 'ingreso',
+        modulo: 'propiedad',
+        isInactive: uniqueExact.activo === false,
+      };
+    }
+  }
+
+  // 4. Historical unlinked income — identifiable, never omitted, never falsely merged
+  if (!normWithoutBuyer || GENERIC_INCOME_LABELS.has(normWithoutBuyer)) {
+    return {
+      key: 'unlinked:income',
+      label: lang === 'en' ? 'Unlinked income' : 'Ingresos sin concepto vinculado',
+      iconId: 'otros-ingresos',
+      iconCategory: 'ingreso',
+      modulo: 'propiedad',
+      isUnlinked: true,
+    };
+  }
+
+  return {
+    key: `unlinked:income:${normWithoutBuyer}`,
+    label: withoutBuyer,
+    iconId: 'otros-ingresos',
+    iconCategory: 'ingreso',
+    modulo: 'propiedad',
+    isUnlinked: true,
+  };
+}
+
+function addConceptAmount(
+  map: Map<string, ConceptBreakdownRow>,
+  meta: Omit<ConceptBreakdownRow, 'amount' | 'count'>,
+  amount: number
+) {
+  const prev = map.get(meta.key);
+  if (prev) {
+    prev.amount += amount;
+    prev.count += 1;
+  } else {
+    map.set(meta.key, { ...meta, amount, count: 1 });
+  }
+}
+
+function finalizeConceptRows(map: Map<string, ConceptBreakdownRow>): ConceptBreakdownRow[] {
+  return Array.from(map.values())
+    .filter((r) => r.count > 0 && Math.abs(r.amount) > 0.0001)
+    .sort((a, b) => b.amount - a.amount);
+}
+
+/**
+ * Disambiguates rows in General consolidated view ONLY when two distinct concept IDs
+ * (from Maquinarias vs Propiedad) share the exact same display label.
+ */
+function disambiguateCollidingLabels(
+  rows: ConceptBreakdownRow[],
+  lang: AppLanguage
+): ConceptBreakdownRow[] {
+  const counts = new Map<string, number>();
+  rows.forEach((r) => {
+    const k = normalizeConceptText(r.label);
+    counts.set(k, (counts.get(k) || 0) + 1);
+  });
+  return rows.map((r) => {
+    const k = normalizeConceptText(r.label);
+    if ((counts.get(k) || 0) > 1 && r.modulo && !r.sublabel) {
+      return {
+        ...r,
+        sublabel:
+          r.modulo === 'maquinarias'
+            ? lang === 'en'
+              ? 'Machinery'
+              : 'Maquinarias'
+            : lang === 'en'
+            ? 'Property'
+            : 'Propiedad',
+      };
+    }
+    return r;
+  });
+}
+
+/**
+ * Builds Ingresos por concepto and Gastos por concepto for Maquinarias.
+ * Totals match machinery accounting summary 100% using historical exchange rates.
+ */
+export function buildMachineryConceptBreakdowns(params: {
+  jobs: MachineryJob[];
+  expenses: Expense[];
+  interestIncomes: Income[];
+  itemsConfig: ItemConfig[];
+  currency: Currency;
+  exchangeRate: ExchangeRateConfig | null;
+  lang?: AppLanguage;
+}): ModuleConceptBreakdowns {
+  const { jobs, expenses, interestIncomes, itemsConfig, currency, exchangeRate } = params;
+  const lang = params.lang || getCurrentLanguage();
+
+  const incMap = new Map<string, ConceptBreakdownRow>();
+  jobs.forEach((j) => {
+    const val = convertHistoricalAmount(
+      Number(j.total) || 0,
+      j.moneda,
+      currency,
+      j.tipoCambio || j.tc,
+      exchangeRate
+    );
+    if (j.tipoTrabajo === 'propiedad') {
+      addConceptAmount(
+        incMap,
+        {
+          key: 'sys:mach_prop_jobs',
+          label: lang === 'en' ? 'Own property jobs' : 'Trabajos en propiedad propia',
+          iconId: 'sembradora',
+          iconCategory: 'implemento',
+          modulo: 'maquinarias',
+          isSystem: true,
+        },
+        val
+      );
+    } else {
+      addConceptAmount(
+        incMap,
+        {
+          key: 'sys:mach_ext_services',
+          label: lang === 'en' ? 'External client services' : 'Servicios a terceros',
+          iconId: 'tractor',
+          iconCategory: 'maquinaria',
+          modulo: 'maquinarias',
+          isSystem: true,
+        },
+        val
+      );
+    }
+  });
+
+  interestIncomes.forEach((inc) => {
+    const val = convertHistoricalAmount(
+      Number(inc.total) || 0,
+      inc.moneda,
+      currency,
+      inc.tipoCambio || inc.tc,
+      exchangeRate
+    );
+    const meta = resolvePropertyIncomeConceptMeta(inc, itemsConfig, lang);
+    addConceptAmount(incMap, { ...meta, modulo: 'maquinarias' }, val);
+  });
+
+  const expMap = new Map<string, ConceptBreakdownRow>();
+  expenses
+    .filter((e) => e.modulo === 'maquinarias')
+    .forEach((e) => {
+      const val = convertHistoricalAmount(
+        Number(e.total) || 0,
+        e.moneda,
+        currency,
+        e.tipoCambio || e.tc,
+        exchangeRate
+      );
+      const meta = resolveExpenseConceptMeta(e, itemsConfig, lang);
+      addConceptAmount(expMap, meta, val);
+    });
+
+  const ingresosPorConcepto = finalizeConceptRows(incMap);
+  const gastosPorConcepto = finalizeConceptRows(expMap);
+  return {
+    ingresosPorConcepto,
+    gastosPorConcepto,
+    totalIngresos: ingresosPorConcepto.reduce((s, r) => s + r.amount, 0),
+    totalGastos: gastosPorConcepto.reduce((s, r) => s + r.amount, 0),
+  };
+}
+
+/**
+ * Builds Ingresos por concepto and Gastos por concepto for Propiedad.
+ * Includes own-machinery jobs once under "Trabajos de maquinaria propia" without double-counting
+ * internal mirror expense rows. Totals match property accounting summary 100%.
+ */
+export function buildPropertyConceptBreakdowns(params: {
+  directIncomes: Income[];
+  interestIncomes: Income[];
+  directExpenses: Expense[];
+  internalJobs: MachineryJob[];
+  itemsConfig: ItemConfig[];
+  currency: Currency;
+  exchangeRate: ExchangeRateConfig | null;
+  lang?: AppLanguage;
+}): ModuleConceptBreakdowns {
+  const {
+    directIncomes,
+    interestIncomes,
+    directExpenses,
+    internalJobs,
+    itemsConfig,
+    currency,
+    exchangeRate,
+  } = params;
+  const lang = params.lang || getCurrentLanguage();
+
+  const incMap = new Map<string, ConceptBreakdownRow>();
+  directIncomes.forEach((inc) => {
+    const val = convertHistoricalAmount(
+      Number(inc.total) || 0,
+      inc.moneda,
+      currency,
+      inc.tipoCambio || inc.tc,
+      exchangeRate
+    );
+    const meta = resolvePropertyIncomeConceptMeta(inc, itemsConfig, lang);
+    addConceptAmount(incMap, meta, val);
+  });
+
+  interestIncomes.forEach((inc) => {
+    const val = convertHistoricalAmount(
+      Number(inc.total) || 0,
+      inc.moneda,
+      currency,
+      inc.tipoCambio || inc.tc,
+      exchangeRate
+    );
+    const meta = resolvePropertyIncomeConceptMeta(inc, itemsConfig, lang);
+    addConceptAmount(incMap, meta, val);
+  });
+
+  const expMap = new Map<string, ConceptBreakdownRow>();
+  directExpenses
+    .filter((e) => e.modulo === 'propiedad' && !isInternalMachineryJobExpense(e))
+    .forEach((e) => {
+      const val = convertHistoricalAmount(
+        Number(e.total) || 0,
+        e.moneda,
+        currency,
+        e.tipoCambio || e.tc,
+        exchangeRate
+      );
+      const meta = resolveExpenseConceptMeta(e, itemsConfig, lang);
+      addConceptAmount(expMap, meta, val);
+    });
+
+  internalJobs
+    .filter((j) => j.tipoTrabajo === 'propiedad')
+    .forEach((j) => {
+      const val = convertHistoricalAmount(
+        Number(j.total) || 0,
+        j.moneda,
+        currency,
+        j.tipoCambio || j.tc,
+        exchangeRate
+      );
+      addConceptAmount(
+        expMap,
+        {
+          key: 'sys:machinery_own_jobs',
+          label: lang === 'en' ? 'Own machinery jobs' : 'Trabajos de maquinaria propia',
+          iconId: 'tractor',
+          iconCategory: 'maquinaria',
+          modulo: 'propiedad',
+          isSystem: true,
+        },
+        val
+      );
+    });
+
+  const ingresosPorConcepto = finalizeConceptRows(incMap);
+  const gastosPorConcepto = finalizeConceptRows(expMap);
+  return {
+    ingresosPorConcepto,
+    gastosPorConcepto,
+    totalIngresos: ingresosPorConcepto.reduce((s, r) => s + r.amount, 0),
+    totalGastos: gastosPorConcepto.reduce((s, r) => s + r.amount, 0),
+  };
+}
+
+/**
+ * Builds consolidated Ingresos por concepto and Gastos por concepto for General.
+ * Strictly excludes internal operations between Maquinarias and Propiedad from both totals and breakdowns.
+ */
+export function buildGeneralConceptBreakdowns(params: {
+  jobs: MachineryJob[];
+  expenses: Expense[];
+  incomes: Income[];
+  itemsConfig: ItemConfig[];
+  currency: Currency;
+  exchangeRate: ExchangeRateConfig | null;
+  lang?: AppLanguage;
+}): ModuleConceptBreakdowns {
+  const { jobs, expenses, incomes, itemsConfig, currency, exchangeRate } = params;
+  const lang = params.lang || getCurrentLanguage();
+
+  const incMap = new Map<string, ConceptBreakdownRow>();
+
+  // External machinery services ONLY (internal property jobs excluded!)
+  jobs
+    .filter((j) => j.tipoTrabajo === 'tercero')
+    .forEach((j) => {
+      const val = convertHistoricalAmount(
+        Number(j.total) || 0,
+        j.moneda,
+        currency,
+        j.tipoCambio || j.tc,
+        exchangeRate
+      );
+      addConceptAmount(
+        incMap,
+        {
+          key: 'sys:mach_ext_services',
+          label:
+            lang === 'en'
+              ? 'External machinery services'
+              : 'Servicios de maquinaria a terceros',
+          iconId: 'tractor',
+          iconCategory: 'maquinaria',
+          modulo: 'maquinarias',
+          isSystem: true,
+        },
+        val
+      );
+    });
+
+  // Direct property incomes (harvest sales & other property income)
+  incomes.filter(isDirectPropertyIncome).forEach((inc) => {
+    const val = convertHistoricalAmount(
+      Number(inc.total) || 0,
+      inc.moneda,
+      currency,
+      inc.tipoCambio || inc.tc,
+      exchangeRate
+    );
+    const meta = resolvePropertyIncomeConceptMeta(inc, itemsConfig, lang);
+    addConceptAmount(incMap, meta, val);
+  });
+
+  // Collected late-payment interest (both modules)
+  incomes
+    .filter((i) => isMachineryInterestIncome(i) || isPropertyInterestIncome(i))
+    .forEach((inc) => {
+      const val = convertHistoricalAmount(
+        Number(inc.total) || 0,
+        inc.moneda,
+        currency,
+        inc.tipoCambio || inc.tc,
+        exchangeRate
+      );
+      const meta = resolvePropertyIncomeConceptMeta(inc, itemsConfig, lang);
+      addConceptAmount(incMap, meta, val);
+    });
+
+  // Consolidated expenses: Machinery expenses + Direct property expenses (internal jobs excluded!)
+  const expMap = new Map<string, ConceptBreakdownRow>();
+  expenses
+    .filter(
+      (e) =>
+        e.modulo === 'maquinarias' ||
+        (e.modulo === 'propiedad' && !isInternalMachineryJobExpense(e))
+    )
+    .forEach((e) => {
+      const val = convertHistoricalAmount(
+        Number(e.total) || 0,
+        e.moneda,
+        currency,
+        e.tipoCambio || e.tc,
+        exchangeRate
+      );
+      const meta = resolveExpenseConceptMeta(e, itemsConfig, lang);
+      addConceptAmount(expMap, meta, val);
+    });
+
+  const ingresosPorConcepto = disambiguateCollidingLabels(finalizeConceptRows(incMap), lang);
+  const gastosPorConcepto = disambiguateCollidingLabels(finalizeConceptRows(expMap), lang);
+  return {
+    ingresosPorConcepto,
+    gastosPorConcepto,
+    totalIngresos: ingresosPorConcepto.reduce((s, r) => s + r.amount, 0),
+    totalGastos: gastosPorConcepto.reduce((s, r) => s + r.amount, 0),
+  };
+}
+

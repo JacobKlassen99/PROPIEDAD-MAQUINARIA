@@ -202,18 +202,18 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2">
+            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-1">
               {(!required || allowNone) && (
                 <button
                   type="button"
                   onClick={() => handleChoose('', undefined)}
-                  className={`w-full flex items-center justify-between p-3 rounded-xl border text-left transition cursor-pointer ${
+                  className={`w-full flex items-center justify-between px-3 py-1.5 rounded-xl border text-left transition cursor-pointer ${
                     !currentId
                       ? 'border-emerald-600 bg-emerald-50/90 shadow-xs'
                       : 'border-stone-200 bg-white hover:bg-stone-50'
                   }`}
                 >
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2.5">
                     <div className="w-9 h-9 rounded-lg bg-stone-100 flex items-center justify-center text-sm font-bold text-stone-500">
                       —
                     </div>
@@ -239,13 +239,13 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
                     key={m.id}
                     type="button"
                     onClick={() => handleChoose(m.id, m)}
-                    className={`w-full flex items-center justify-between p-3 rounded-xl border text-left transition cursor-pointer ${
+                    className={`w-full flex items-center justify-between px-3 py-1.5 rounded-xl border text-left transition cursor-pointer ${
                       isSelected
                         ? 'border-emerald-600 bg-emerald-50/90 ring-2 ring-emerald-500/20 shadow-xs'
                         : 'border-stone-200 bg-white hover:bg-stone-50'
                     }`}
                   >
-                    <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex items-center gap-2.5 min-w-0">
                       <div className="p-1 rounded-lg bg-white border border-stone-200 shrink-0">
                         <VisualIcon
                           iconId={m.icono}
@@ -263,7 +263,7 @@ export const VisualMachinePicker: React.FC<MachinePickerProps> = ({
                             </span>
                           )}
                         </div>
-                        <p className="text-xs text-stone-500 mt-0.5">
+                        <p className="text-[11px] text-stone-500 leading-tight">
                           {m.tipo || t('common.machine')} ·{' '}
                           <span className="font-semibold text-emerald-800">
                             {m.moneda === 'USD' ? 'USD' : 'Bs'} {m.tarifa}/{m.unidad === 'ha' || m.unidad === 'hectarea' ? 'ha' : 'h'}
@@ -437,24 +437,24 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2">
+            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-1">
               {(allowNone || !required) && (
                 <button
                   type="button"
                   onClick={() => handleChoose(null)}
-                  className={`w-full flex items-center justify-between p-3 rounded-xl border text-left transition cursor-pointer ${
+                  className={`w-full flex items-center justify-between px-3 py-1.5 rounded-xl border text-left transition cursor-pointer ${
                     !currentId
                       ? 'border-emerald-600 bg-emerald-50/90 ring-2 ring-emerald-500/20 shadow-xs'
                       : 'border-stone-200 bg-white hover:bg-stone-50'
                   }`}
                 >
-                  <div className="flex items-center gap-3 min-w-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     <div className="w-9 h-9 rounded-lg bg-stone-100 flex items-center justify-center text-sm font-bold text-stone-500 shrink-0">
                       —
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-bold text-stone-900">{resolvedNoneLabel}</p>
-                      <p className="text-xs text-stone-500 mt-0.5">
+                      <p className="text-[11px] text-stone-500 leading-tight">
                         {bi(
                           'Aplica únicamente la tarifa propia de la máquina',
                           'Applies only the machine base rate'
@@ -477,13 +477,13 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
                     key={j.id}
                     type="button"
                     onClick={() => handleChoose(j)}
-                    className={`w-full flex items-center justify-between p-3 rounded-xl border text-left transition cursor-pointer ${
+                    className={`w-full flex items-center justify-between px-3 py-1.5 rounded-xl border text-left transition cursor-pointer ${
                       isSelected
                         ? 'border-emerald-600 bg-emerald-50/90 ring-2 ring-emerald-500/20 shadow-xs'
                         : 'border-stone-200 bg-white hover:bg-stone-50'
                     }`}
                   >
-                    <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex items-center gap-2.5 min-w-0">
                       <div className="p-1 rounded-lg bg-white border border-stone-200 shrink-0">
                         <VisualIcon
                           iconId={j.icono}
@@ -494,7 +494,7 @@ export const VisualJobTypePicker: React.FC<JobTypePickerProps> = ({
                       </div>
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-bold text-stone-900">{j.nombre}</p>
-                        <p className="text-xs text-stone-500 mt-0.5">
+                        <p className="text-[11px] text-stone-500 leading-tight">
                           {bi('Tarifa', 'Rate')}:{' '}
                           <span className="font-bold text-emerald-800 tabular-nums">
                             {j.moneda === 'USD' ? 'USD' : 'Bs'} {j.tarifa}/{j.unidad === 'ha' || j.unidad === 'hectarea' ? 'ha' : 'h'}
@@ -664,7 +664,7 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2">
+            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-1">
               {filteredItems.map((item) => {
                 const isSelected = currentName.toLowerCase() === item.nombre.toLowerCase();
                 return (
@@ -672,13 +672,13 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
                     key={item.id || item.nombre}
                     type="button"
                     onClick={() => handleChoose(item)}
-                    className={`w-full flex items-center justify-between p-3 rounded-xl border text-left transition cursor-pointer ${
+                    className={`w-full flex items-center justify-between px-3 py-1.5 rounded-xl border text-left transition cursor-pointer ${
                       isSelected
                         ? 'border-emerald-600 bg-emerald-50/90 ring-2 ring-emerald-500/20 shadow-xs'
                         : 'border-stone-200 bg-white hover:bg-stone-50'
                     }`}
                   >
-                    <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex items-center gap-2.5 min-w-0">
                       <div className="p-1 rounded-lg bg-white border border-stone-200 shrink-0">
                         <VisualIcon
                           iconId={item.icono}
@@ -689,7 +689,7 @@ export const VisualExpenseItemPicker: React.FC<ExpenseItemPickerProps> = ({
                       </div>
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-bold text-stone-900">{item.nombre}</p>
-                        <p className="text-xs text-stone-500 mt-0.5">
+                        <p className="text-[11px] text-stone-500 leading-tight">
                           {item.unidad && `${t('common.unit')}: ${translateUnit(item.unidad)}`}
                           {item.precioPredeterminado ? ` • Ref: ${item.moneda} ${item.precioPredeterminado}` : ''}
                         </p>
@@ -912,7 +912,7 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
               </div>
             )}
 
-            <div className="flex-1 overflow-y-auto px-4 py-2.5 space-y-2">
+            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-1">
               {filteredItems.length === 0 ? (
                 <div className="rounded-xl border border-stone-200 bg-stone-50/70 px-4 py-5 text-center space-y-1">
                   <p className="text-sm font-semibold text-stone-700">
@@ -943,13 +943,13 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
                       key={item.id || item.nombre}
                       type="button"
                       onClick={() => handleChoose(item)}
-                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl border text-left transition cursor-pointer ${
+                      className={`w-full flex items-center justify-between px-3 py-1.5 rounded-xl border text-left transition cursor-pointer ${
                         isSelected
                           ? 'border-[#24875B] bg-[#EAF5EE]/85 ring-2 ring-[#24875B]/15 shadow-xs'
                           : 'border-stone-200 bg-white hover:bg-stone-50'
                       }`}
                     >
-                      <div className="flex items-center gap-3 min-w-0">
+                      <div className="flex items-center gap-2.5 min-w-0">
                         <div className="w-10 h-10 rounded-xl bg-white border border-stone-200 flex items-center justify-center shrink-0">
                           <VisualIcon
                             iconId={item.icono}
@@ -961,7 +961,7 @@ export const VisualIncomeItemPicker: React.FC<IncomeItemPickerProps> = ({
                         <div className="min-w-0 flex-1">
                           <p className="text-sm font-bold text-[#1F2D25] truncate">{item.nombre}</p>
                           {item.unidad && (
-                            <p className="text-xs text-[#64746B] mt-0.5 truncate">
+                            <p className="text-[11px] text-[#64746B] leading-tight truncate">
                               {t('common.unit')}: {translateUnit(item.unidad)}
                             </p>
                           )}
@@ -1124,7 +1124,7 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2">
+            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-1">
               {filteredLots.map((l) => {
                 const isSelected = currentId === l.id;
                 return (
@@ -1132,19 +1132,19 @@ export const VisualLotPicker: React.FC<LotPickerProps> = ({
                     key={l.id}
                     type="button"
                     onClick={() => handleChoose(l)}
-                    className={`w-full flex items-center justify-between p-3 rounded-xl border text-left transition cursor-pointer ${
+                    className={`w-full flex items-center justify-between px-3 py-1.5 rounded-xl border text-left transition cursor-pointer ${
                       isSelected
                         ? 'border-emerald-600 bg-emerald-50/90 ring-2 ring-emerald-500/20 shadow-xs'
                         : 'border-stone-200 bg-white hover:bg-stone-50'
                     }`}
                   >
-                    <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex items-center gap-2.5 min-w-0">
                       <div className="p-2 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-100 shrink-0">
                         <LandPlot className="h-4 w-4" />
                       </div>
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-bold text-stone-900">{l.nombre}</p>
-                        <p className="text-xs text-stone-500 mt-0.5">
+                        <p className="text-[11px] text-stone-500 leading-tight">
                           {l.superficieHectareas || l.superficie || 0} ha
                           {l.cultivoActual
                             ? ` • ${bi('Cultivo', 'Crop')}: ${l.cultivoActual}`
@@ -1300,7 +1300,7 @@ export const VisualModulePicker: React.FC<ModulePickerProps> = ({
               </button>
             </div>
 
-            <div className="px-4 py-3 space-y-2">
+            <div className="px-4 py-2 space-y-1">
               {moduleOptions.map((opt) => {
                 const isSelected = value === opt.value;
                 return (
@@ -1308,13 +1308,13 @@ export const VisualModulePicker: React.FC<ModulePickerProps> = ({
                     key={opt.value}
                     type="button"
                     onClick={() => handleChoose(opt.value)}
-                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl border text-left transition cursor-pointer ${
+                    className={`w-full flex items-center justify-between px-3 py-1.5 rounded-xl border text-left transition cursor-pointer ${
                       isSelected
                         ? 'border-[#24875B] bg-[#EAF5EE]/85 ring-2 ring-[#24875B]/15 shadow-xs'
                         : 'border-stone-200 bg-white hover:bg-stone-50'
                     }`}
                   >
-                    <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex items-center gap-2.5 min-w-0">
                       <div
                         className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
                           isSelected

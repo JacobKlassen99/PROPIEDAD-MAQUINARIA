@@ -37,6 +37,12 @@ import {
   isInternalMachineryJobExpense,
   convertHistoricalAmount,
   formatCurrencyAmount,
+  ConceptBreakdownRow,
+  buildMachineryConceptBreakdowns,
+  buildPropertyConceptBreakdowns,
+  buildGeneralConceptBreakdowns,
+  resolveExpenseConceptMeta,
+  resolvePropertyIncomeConceptMeta,
 } from '../services/financialSummary';
 import {
   formatDateDDMMAAAA,
@@ -47,12 +53,17 @@ import {
 import { cacheKeys, getCachedQuery, revalidateQuery } from '../services/dataCache';
 import { fetchNormalizedHarvestSalesBundle } from '../services/preloader';
 import { computeHarvestAvailability, roundPct2, roundTons } from '../services/harvestAvailability';
-import { resolveAgriculturalConcept } from '../services/agriculturalProducts';
 import { formatNumberLocale, formatPercentMax1 } from '../services/formatters';
 import { resolveJobDisplay } from '../services/jobDisplay';
 import { CompactFilter } from '../components/CompactListUI';
 import { Switch } from '../components/Switch';
 import { SlidingSelector } from '../components/SlidingSelector';
+import { VisualIcon } from '../components/VisualIcon';
+import {
+  ConceptBreakdownSection,
+  PropertyAccountingSummaryCard,
+  PerHectareIndicatorsSection,
+} from '../components/FinanceBreakdownSections';
 import { usePersistedMemoryState } from '../hooks/useSwrQuery';
 import { getCurrentLanguage, useI18n } from '../services/i18n';
 
@@ -212,6 +223,17 @@ interface GroupedAmountRow {
   count: number;
 }
 
+interface MachineSummaryResult {
+  machineId: string;
+  machineName: string;
+  iconId?: string;
+  ingresos: number;
+  gastos: number;
+  resultado: number;
+  canShowNet: boolean;
+  jobsCount: number;
+}
+
 interface LotDetailedResult {
   lotId: string;
   lotName: string;
@@ -230,9 +252,9 @@ interface LotDetailedResult {
   ingresoPorHa: number | null;
   gastoPorHa: number | null;
   utilidadPorHa: number | null;
-  gastosDirectosPorConcepto: GroupedAmountRow[];
+  gastosDirectosPorConcepto: ConceptBreakdownRow[];
   trabajosMaquinariaPorLabor: GroupedAmountRow[];
-  ingresosPorConcepto: GroupedAmountRow[];
+  ingresosPorConcepto: ConceptBreakdownRow[];
 }
 
 // ============================================================================
@@ -294,13 +316,6 @@ const ReportsViewInner: React.FC<Props> = ({
     () => (Array.isArray(itemsConfig) ? itemsConfig.filter(Boolean) : []),
     [itemsConfig]
   );
-  const itemConfigById = useMemo(() => {
-    const map = new Map<string, ItemConfig>();
-    safeItemsConfig.forEach((it) => {
-      if (it?.id) map.set(String(it.id).trim(), it);
-    });
-    return map;
-  }, [safeItemsConfig]);
   const safeExchangeRate = useMemo(
     () =>
       exchangeRate && typeof exchangeRate === 'object'
@@ -581,28 +596,76 @@ const ReportsViewInner: React.FC<Props> = ({
       (a, b) => b.amount - a.amount
     );
 
-    // Expenses grouped by concept
-    const expByConceptMap = new Map<string, GroupedAmountRow>();
-    scopedExpenses.forEach((e) => {
-      const concept = cleanConceptLabel(
-        e.itemGasto || (e as any).rubro || (e as any).categoria,
-        bi('Otros gastos', 'Other expenses')
-      );
-      const key = concept.toLowerCase();
-      const val = toView(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc);
-      const prev = expByConceptMap.get(key);
-      if (prev) {
-        prev.amount += val;
-        prev.count += 1;
-      } else {
-        expByConceptMap.set(key, { key, label: concept, amount: val, count: 1 });
-      }
+    // Concept breakdowns (single source of truth matching totals 100%)
+    const conceptBreakdowns = buildMachineryConceptBreakdowns({
+      jobs: scopedJobs,
+      expenses: scopedExpenses,
+      interestIncomes: machInterestRows,
+      itemsConfig: safeItemsConfig,
+      currency: activeCurrency,
+      exchangeRate: safeExchangeRate,
+      lang,
     });
 
-    const gastosPorConcepto = Array.from(expByConceptMap.values()).sort(
-      (a, b) => b.amount - a.amount
-    );
-    const totalGastos = gastosPorConcepto.reduce((sum, r) => sum + r.amount, 0);
+    const gastosPorConcepto = conceptBreakdowns.gastosPorConcepto;
+    const totalGastos = conceptBreakdowns.totalGastos;
+
+    // Per-machine summary (only shows individual net result when no general unassigned expenses exist)
+    const machineMap = new Map<string, MachineSummaryResult>();
+    const ensureMachine = (mId: string, fallbackName?: string) => {
+      let entry = machineMap.get(mId);
+      if (!entry) {
+        const catalogMachine = safeMachines.find((m) => String(m.id) === String(mId));
+        entry = {
+          machineId: mId,
+          machineName: catalogMachine?.nombre || getMachineName(mId, fallbackName),
+          iconId: catalogMachine?.icono,
+          ingresos: 0,
+          gastos: 0,
+          resultado: 0,
+          canShowNet: false,
+          jobsCount: 0,
+        };
+        machineMap.set(mId, entry);
+      }
+      return entry;
+    };
+
+    scopedJobs.forEach((j) => {
+      const mId = String(j.maquinariaId || (j as any).maquinaId || 'sin_maquina');
+      const val = toView(Number(j.total) || 0, j.moneda, j.tipoCambio || j.tc);
+      const entry = ensureMachine(mId, j.maquinariaNombre);
+      entry.ingresos += val;
+      entry.jobsCount += 1;
+    });
+
+    machInterestRows.forEach((inc) => {
+      const mId = String((inc as any).maquinariaId || (inc as any).maquinaId || '');
+      if (!mId) return;
+      const val = toView(Number(inc.total) || 0, inc.moneda, inc.tipoCambio || inc.tc);
+      const entry = ensureMachine(mId);
+      entry.ingresos += val;
+    });
+
+    scopedExpenses.forEach((e) => {
+      const mId = String(e.maquinariaId || (e as any).maquinaId || '');
+      if (!mId) return;
+      const val = toView(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc);
+      const entry = ensureMachine(mId, e.maquinariaNombre);
+      entry.gastos += val;
+    });
+
+    const machineResults: MachineSummaryResult[] = Array.from(machineMap.values())
+      .filter((m) => m.ingresos > 0.004 || m.gastos > 0.004)
+      .map((m) => ({
+        ...m,
+        resultado: m.ingresos - m.gastos,
+        canShowNet: unassignedMachExpenses.length === 0 && m.gastos > 0.004,
+      }))
+      .sort((a, b) => {
+        if (Math.abs(b.ingresos - a.ingresos) > 0.01) return b.ingresos - a.ingresos;
+        return naturalCompare(a.machineName, b.machineName);
+      });
 
     // Per requirement: do not show individual machine net profit when there are no individualized expenses
     // or when general unallocated expenses exist that would distort individual profitability.
@@ -621,8 +684,10 @@ const ReportsViewInner: React.FC<Props> = ({
       extJobsCount: extJobs.length,
       propJobsCount: propJobs.length,
       totalIngresos,
+      ingresosPorConcepto: conceptBreakdowns.ingresosPorConcepto,
       ingresosPorMaquina,
       ingresosPorMaquinaEquipo,
+      machineResults,
       gastosPorConcepto,
       totalGastos,
       resultadoNeto: totalIngresos - totalGastos,
@@ -640,6 +705,7 @@ const ReportsViewInner: React.FC<Props> = ({
     activeCurrency,
     safeExchangeRate,
     safeMachines,
+    safeItemsConfig,
     lang,
   ]);
 
@@ -671,9 +737,9 @@ const ReportsViewInner: React.FC<Props> = ({
         ingresos: number;
         gastosDirectos: number;
         gastosMaquinaria: number;
-        directosByConcept: Map<string, GroupedAmountRow>;
+        directosByConcept: Map<string, ConceptBreakdownRow>;
         maquinariaByLabor: Map<string, GroupedAmountRow>;
-        ingresosByConcept: Map<string, GroupedAmountRow>;
+        ingresosByConcept: Map<string, ConceptBreakdownRow>;
       }
     >();
 
@@ -720,33 +786,13 @@ const ReportsViewInner: React.FC<Props> = ({
       const val = toView(Number(inc.total) || 0, inc.moneda, inc.tipoCambio || inc.tc);
       entry.ingresosCosechas += val;
       entry.ingresos += val;
-      const rawItemId = String(inc.itemId || '').trim();
-      const matchedById = rawItemId ? itemConfigById.get(rawItemId) : undefined;
-      let concept = matchedById?.nombre || '';
-      let key = matchedById ? `cid:${matchedById.id}` : '';
-      if (!concept) {
-        const rawLabel = cleanConceptLabel(inc.concepto || (inc as any).rubro, bi('Venta agrícola', 'Farm sale'));
-        const isHarvestMovement = String(inc.trabajoId || '').trim().toUpperCase().startsWith('COSECHA:');
-        if (isHarvestMovement && safeItemsConfig.length > 0) {
-          // Strip legacy " (Cliente)" suffix if present only for unambiguous concept lookup
-          const withoutBuyer = rawLabel.replace(/\s*\([^)]*\)\s*$/, '').trim();
-          const res = resolveAgriculturalConcept({ conceptoId: rawItemId, producto: withoutBuyer }, safeItemsConfig);
-          if (res.concept) {
-            concept = res.concept.nombre;
-            key = `cid:${res.concept.id}`;
-          }
-        }
-        if (!concept) {
-          concept = rawLabel;
-          key = concept.toLowerCase();
-        }
-      }
-      const prev = entry.ingresosByConcept.get(key);
+      const meta = resolvePropertyIncomeConceptMeta(inc, safeItemsConfig, lang);
+      const prev = entry.ingresosByConcept.get(meta.key);
       if (prev) {
         prev.amount += val;
         prev.count += 1;
       } else {
-        entry.ingresosByConcept.set(key, { key, label: concept, amount: val, count: 1 });
+        entry.ingresosByConcept.set(meta.key, { ...meta, amount: val, count: 1 });
       }
     });
 
@@ -755,14 +801,13 @@ const ReportsViewInner: React.FC<Props> = ({
       const val = toView(Number(inc.total) || 0, inc.moneda, inc.tipoCambio || inc.tc);
       entry.ingresosIntereses += val;
       entry.ingresos += val;
-      const concept = t('finances.lateInterestConcept');
-      const key = 'sys_interes_mora';
-      const prev = entry.ingresosByConcept.get(key);
+      const meta = resolvePropertyIncomeConceptMeta(inc, safeItemsConfig, lang);
+      const prev = entry.ingresosByConcept.get(meta.key);
       if (prev) {
         prev.amount += val;
         prev.count += 1;
       } else {
-        entry.ingresosByConcept.set(key, { key, label: concept, amount: val, count: 1 });
+        entry.ingresosByConcept.set(meta.key, { ...meta, amount: val, count: 1 });
       }
     });
 
@@ -770,17 +815,13 @@ const ReportsViewInner: React.FC<Props> = ({
       const entry = ensureLot(exp.loteId, exp.loteNombre);
       const val = toView(Number(exp.total) || 0, exp.moneda, exp.tipoCambio || exp.tc);
       entry.gastosDirectos += val;
-      const concept = cleanConceptLabel(
-        exp.itemGasto || (exp as any).rubro || (exp as any).categoria,
-        bi('Gasto directo', 'Direct expense')
-      );
-      const key = concept.toLowerCase();
-      const prev = entry.directosByConcept.get(key);
+      const meta = resolveExpenseConceptMeta(exp, safeItemsConfig, lang);
+      const prev = entry.directosByConcept.get(meta.key);
       if (prev) {
         prev.amount += val;
         prev.count += 1;
       } else {
-        entry.directosByConcept.set(key, { key, label: concept, amount: val, count: 1 });
+        entry.directosByConcept.set(meta.key, { ...meta, amount: val, count: 1 });
       }
     });
 
@@ -840,15 +881,15 @@ const ReportsViewInner: React.FC<Props> = ({
           ingresoPorHa,
           gastoPorHa,
           utilidadPorHa,
-          gastosDirectosPorConcepto: Array.from(entry.directosByConcept.values()).sort(
-            (a, b) => b.amount - a.amount
-          ),
+          gastosDirectosPorConcepto: Array.from(entry.directosByConcept.values())
+            .filter((r) => Math.abs(r.amount) > 0.0001)
+            .sort((a, b) => b.amount - a.amount),
           trabajosMaquinariaPorLabor: Array.from(entry.maquinariaByLabor.values()).sort(
             (a, b) => b.amount - a.amount
           ),
-          ingresosPorConcepto: Array.from(entry.ingresosByConcept.values()).sort(
-            (a, b) => b.amount - a.amount
-          ),
+          ingresosPorConcepto: Array.from(entry.ingresosByConcept.values())
+            .filter((r) => Math.abs(r.amount) > 0.0001)
+            .sort((a, b) => b.amount - a.amount),
         };
       })
       .sort((a, b) => {
@@ -874,8 +915,23 @@ const ReportsViewInner: React.FC<Props> = ({
     const resultadoNeto = totalIngresos - totalGastos;
     const totalHectares = allLotResults.reduce((sum, l) => sum + l.hectares, 0);
 
+    // Concept breakdowns for Propiedad (scoped to selected lot when filtered so sums match 100%)
+    const matchesScopedLot = (rec: { loteId?: string; loteNombre?: string }) =>
+      !isFilteredByLot || getLotInfo(rec.loteId, rec.loteNombre).id === String(selectedLotId);
+
+    const conceptBreakdowns = buildPropertyConceptBreakdowns({
+      directIncomes: directIncomes.filter(matchesScopedLot),
+      interestIncomes: interestIncomes.filter(matchesScopedLot),
+      directExpenses: directExpenses.filter(matchesScopedLot),
+      internalJobs: internalJobs.filter(matchesScopedLot),
+      itemsConfig: safeItemsConfig,
+      currency: activeCurrency,
+      exchangeRate: safeExchangeRate,
+      lang,
+    });
+
     // Aggregated direct expenses by concept across selected lots
-    const aggDirectExp = new Map<string, GroupedAmountRow>();
+    const aggDirectExp = new Map<string, ConceptBreakdownRow>();
     allLotResults.forEach((lot) => {
       lot.gastosDirectosPorConcepto.forEach((row) => {
         const prev = aggDirectExp.get(row.key);
@@ -920,6 +976,8 @@ const ReportsViewInner: React.FC<Props> = ({
       ingresoPorHaGlobal: totalHectares > 0 ? totalIngresos / totalHectares : null,
       gastoPorHaGlobal: totalHectares > 0 ? totalGastos / totalHectares : null,
       utilidadPorHaGlobal: totalHectares > 0 ? resultadoNeto / totalHectares : null,
+      ingresosPorConcepto: conceptBreakdowns.ingresosPorConcepto,
+      gastosPorConcepto: conceptBreakdowns.gastosPorConcepto,
       gastosDirectosPorConcepto: Array.from(aggDirectExp.values()).sort(
         (a, b) => b.amount - a.amount
       ),
@@ -936,7 +994,6 @@ const ReportsViewInner: React.FC<Props> = ({
     safeMachines,
     safeMachineJobTypes,
     safeItemsConfig,
-    itemConfigById,
     activeScope,
     selectedLotId,
     activeCurrency,
@@ -1006,25 +1063,34 @@ const ReportsViewInner: React.FC<Props> = ({
     const diferenciaConciliacion = Math.abs(sumaResultadosModulos - resultadoConsolidado);
     const conciliacionExacta = diferenciaConciliacion < 0.01;
 
-    // Detailed groupings for Consolidated Detallado
-    const groupExpenses = (list: Expense[]): GroupedAmountRow[] => {
-      const m = new Map<string, GroupedAmountRow>();
+    // Consolidated concept breakdowns (strictly excluding internal operations)
+    const conceptBreakdowns = buildGeneralConceptBreakdowns({
+      jobs: campaignJobs,
+      expenses: campaignExpenses,
+      incomes: campaignIncomes,
+      itemsConfig: safeItemsConfig,
+      currency: activeCurrency,
+      exchangeRate: safeExchangeRate,
+      lang,
+    });
+
+    // Detailed groupings for Consolidated Detallado (using stable concept metadata & icons)
+    const groupExpenses = (list: Expense[]): ConceptBreakdownRow[] => {
+      const m = new Map<string, ConceptBreakdownRow>();
       list.forEach((e) => {
-        const label = cleanConceptLabel(
-          e.itemGasto || (e as any).rubro || (e as any).categoria,
-          bi('Otros gastos', 'Other expenses')
-        );
-        const key = label.toLowerCase();
+        const meta = resolveExpenseConceptMeta(e, safeItemsConfig, lang);
         const val = toView(Number(e.total) || 0, e.moneda, e.tipoCambio || e.tc);
-        const prev = m.get(key);
+        const prev = m.get(meta.key);
         if (prev) {
           prev.amount += val;
           prev.count += 1;
         } else {
-          m.set(key, { key, label, amount: val, count: 1 });
+          m.set(meta.key, { ...meta, amount: val, count: 1 });
         }
       });
-      return Array.from(m.values()).sort((a, b) => b.amount - a.amount);
+      return Array.from(m.values())
+        .filter((r) => Math.abs(r.amount) > 0.0001)
+        .sort((a, b) => b.amount - a.amount);
     };
 
     const ingresosPropPorLoteMap = new Map<string, GroupedAmountRow>();
@@ -1079,6 +1145,8 @@ const ReportsViewInner: React.FC<Props> = ({
       resultadoConsolidado,
       sumaResultadosModulos,
       conciliacionExacta,
+      ingresosPorConcepto: conceptBreakdowns.ingresosPorConcepto,
+      gastosPorConcepto: conceptBreakdowns.gastosPorConcepto,
       gastosMaqPorConcepto: groupExpenses(machExpenses),
       gastosPropPorConcepto: groupExpenses(propDirectExpenses),
       ingresosPropPorLote: Array.from(ingresosPropPorLoteMap.values()).sort((a, b) =>
@@ -1088,7 +1156,17 @@ const ReportsViewInner: React.FC<Props> = ({
         (a, b) => b.amount - a.amount
       ),
     };
-  }, [campaignJobs, campaignExpenses, campaignIncomes, activeCurrency, safeExchangeRate, safeLots, safeMachines, lang]);
+  }, [
+    campaignJobs,
+    campaignExpenses,
+    campaignIncomes,
+    activeCurrency,
+    safeExchangeRate,
+    safeLots,
+    safeMachines,
+    safeItemsConfig,
+    lang,
+  ]);
 
   // ==========================================================================
   // PRINT & EXCEL HEADERS (NO LOGO, NO COMPANY NAME)
@@ -1154,69 +1232,116 @@ const ReportsViewInner: React.FC<Props> = ({
       [],
     ];
 
+    const formatConceptExcelLabel = (row: ConceptBreakdownRow) => {
+      const parts = [row.label];
+      if (row.sublabel) parts.push(`(${row.sublabel})`);
+      if (row.isInactive) parts.push(`(${bi('Inactivo', 'Inactive')})`);
+      return parts.join(' ');
+    };
+
     if (activeScope === 'maquinarias') {
-      if (detailLevel === 'resumido') {
-        rows.push([t('common.concept'), `${t('common.amount')} (${currencyLabel})`]);
-        rows.push([t('finances.serviceIncome'), Number(machineryData.ingresosServicios.toFixed(2))]);
-        if (machineryData.ingresosIntereses > 0.004) {
-          rows.push([t('finances.interestIncome'), Number(machineryData.ingresosIntereses.toFixed(2))]);
-        }
-        rows.push([bi('Total de ingresos', 'Total income'), Number(machineryData.totalIngresos.toFixed(2))]);
-        rows.push([bi('Total de gastos', 'Total expenses'), Number(machineryData.totalGastos.toFixed(2))]);
-        if (machineryData.canShowNetResult) {
-          rows.push([t('reports.netResult'), Number(machineryData.resultadoNeto.toFixed(2))]);
-        } else {
-          rows.push([
-            bi('Nota', 'Note'),
-            bi(
-              'Los gastos generales no se atribuyen a una máquina individual.',
-              'General expenses are not attributed to an individual machine.'
-            ),
-          ]);
-        }
-      } else {
-        rows.push([bi('Sección', 'Section'), t('common.concept'), `${t('common.amount')} (${currencyLabel})`]);
-        rows.push([t('reports.incomes'), bi('Trabajos para propiedad propia', 'Own property jobs'), Number(machineryData.ingresosPropiedad.toFixed(2))]);
-        rows.push([t('reports.incomes'), bi('Servicios para clientes externos', 'External client services'), Number(machineryData.ingresosTerceros.toFixed(2))]);
-        if (machineryData.ingresosIntereses > 0.004) {
-          rows.push([t('reports.incomes'), t('finances.interestIncome'), Number(machineryData.ingresosIntereses.toFixed(2))]);
-        }
-        rows.push([t('reports.incomes'), bi('Total de ingresos', 'Total income'), Number(machineryData.totalIngresos.toFixed(2))]);
-        rows.push([]);
+      rows.push([bi('Ingresos por concepto', 'Income by concept'), `${t('common.amount')} (${currencyLabel})`]);
+      machineryData.ingresosPorConcepto.forEach((r) => {
+        rows.push([formatConceptExcelLabel(r), Number(r.amount.toFixed(2))]);
+      });
+      rows.push([bi('Total ingresos', 'Total income'), Number(machineryData.totalIngresos.toFixed(2))]);
+      rows.push([]);
+
+      rows.push([
+        machineryData.isFilteredByMachine
+          ? bi('Gastos asignados por concepto', 'Assigned expenses by concept')
+          : bi('Gastos por concepto', 'Expenses by concept'),
+        `${t('common.amount')} (${currencyLabel})`,
+      ]);
+      machineryData.gastosPorConcepto.forEach((r) => {
+        rows.push([formatConceptExcelLabel(r), Number(r.amount.toFixed(2))]);
+      });
+      rows.push([bi('Total gastos', 'Total expenses'), Number(machineryData.totalGastos.toFixed(2))]);
+      rows.push([]);
+
+      if (!machineryData.isFilteredByMachine && machineryData.machineResults.length > 0) {
         rows.push([
-          bi(
-            'Desglose por máquina e implemento agrícola (contabilizado una sola vez)',
-            'Breakdown by machine & implement (counted once)'
-          ),
-          t('common.detail'),
+          bi('Resultados por máquina', 'Results by machine'),
+          `${t('reports.incomes')} (${currencyLabel})`,
+          `${t('reports.expenses')} (${currencyLabel})`,
+          `${t('reports.netResult')} (${currencyLabel})`,
+        ]);
+        machineryData.machineResults.forEach((m) => {
+          rows.push([
+            m.machineName,
+            Number(m.ingresos.toFixed(2)),
+            Number(m.gastos.toFixed(2)),
+            m.canShowNet ? Number(m.resultado.toFixed(2)) : '—',
+          ]);
+        });
+        rows.push([]);
+      }
+
+      if (detailLevel === 'detallado' && machineryData.ingresosPorMaquinaEquipo.length > 0) {
+        rows.push([
+          bi('Ingresos por máquina e implemento', 'Income by machine & implement'),
           `${t('common.amount')} (${currencyLabel})`,
         ]);
         machineryData.ingresosPorMaquinaEquipo.forEach((r) => {
-          rows.push([bi('Máquina / Implemento', 'Machine / Implement'), r.label, Number(r.amount.toFixed(2))]);
+          rows.push([r.label, Number(r.amount.toFixed(2))]);
         });
         rows.push([]);
-        rows.push([bi('Gastos por concepto', 'Expenses by concept'), t('common.concept'), `${t('common.amount')} (${currencyLabel})`]);
-        machineryData.gastosPorConcepto.forEach((r) => {
-          rows.push([t('reports.expenses'), r.label, Number(r.amount.toFixed(2))]);
-        });
-        rows.push([t('reports.expenses'), bi('Total de gastos', 'Total expenses'), Number(machineryData.totalGastos.toFixed(2))]);
-        if (machineryData.canShowNetResult) {
-          rows.push([]);
-          rows.push([bi('Resultado', 'Result'), t('reports.netResult'), Number(machineryData.resultadoNeto.toFixed(2))]);
-        }
+      }
+
+      rows.push([bi('Resumen contable', 'Accounting summary'), `${t('common.amount')} (${currencyLabel})`]);
+      rows.push([bi('Total de ingresos', 'Total income'), Number(machineryData.totalIngresos.toFixed(2))]);
+      rows.push([
+        machineryData.isFilteredByMachine
+          ? bi('Gastos asignados', 'Assigned expenses')
+          : bi('Total de gastos', 'Total expenses'),
+        Number(machineryData.totalGastos.toFixed(2)),
+      ]);
+      if (machineryData.canShowNetResult) {
+        rows.push([t('reports.netResult'), Number(machineryData.resultadoNeto.toFixed(2))]);
+      } else {
+        rows.push([
+          bi('Nota', 'Note'),
+          bi(
+            'Los gastos generales no se atribuyen a una máquina individual.',
+            'General expenses are not attributed to an individual machine.'
+          ),
+        ]);
       }
     } else if (activeScope === 'propiedad') {
+      rows.push([bi('Ingresos por concepto', 'Income by concept'), `${t('common.amount')} (${currencyLabel})`]);
+      propertyData.ingresosPorConcepto.forEach((r) => {
+        rows.push([formatConceptExcelLabel(r), Number(r.amount.toFixed(2))]);
+      });
+      rows.push([bi('Total ingresos', 'Total income'), Number(propertyData.totalIngresos.toFixed(2))]);
+      rows.push([]);
+
+      rows.push([bi('Gastos por concepto', 'Expenses by concept'), `${t('common.amount')} (${currencyLabel})`]);
+      propertyData.gastosPorConcepto.forEach((r) => {
+        rows.push([formatConceptExcelLabel(r), Number(r.amount.toFixed(2))]);
+      });
+      rows.push([bi('Total gastos', 'Total expenses'), Number(propertyData.totalGastos.toFixed(2))]);
+      rows.push([]);
+
       if (detailLevel === 'resumido') {
-        rows.push([t('common.concept'), `${t('common.amount')} (${currencyLabel})`]);
-        rows.push([t('finances.harvestIncome'), Number(propertyData.totalIngresosCosechas.toFixed(2))]);
-        if (propertyData.totalIngresosIntereses > 0.004) {
-          rows.push([t('finances.interestIncome'), Number(propertyData.totalIngresosIntereses.toFixed(2))]);
+        if (propertyData.lotResults.length > 0) {
+          rows.push([
+            bi('Resultados por lote', 'Results by lot'),
+            bi('Superficie (ha)', 'Area (ha)'),
+            `${t('reports.incomes')} (${currencyLabel})`,
+            `${bi('Gasto total', 'Total expense')} (${currencyLabel})`,
+            `${t('reports.netResult')} (${currencyLabel})`,
+          ]);
+          propertyData.lotResults.forEach((lot) => {
+            rows.push([
+              lot.lotName,
+              Number(lot.hectares.toFixed(2)),
+              Number(lot.ingresos.toFixed(2)),
+              Number(lot.gastosTotales.toFixed(2)),
+              Number(lot.resultadoNeto.toFixed(2)),
+            ]);
+          });
+          rows.push([]);
         }
-        rows.push([bi('Total de ingresos', 'Total income'), Number(propertyData.totalIngresos.toFixed(2))]);
-        rows.push([bi('Gastos directos', 'Direct expenses'), Number(propertyData.totalGastosDirectos.toFixed(2))]);
-        rows.push([bi('Gastos por maquinaria recibida', 'Machinery received expenses'), Number(propertyData.totalGastosMaquinaria.toFixed(2))]);
-        rows.push([bi('Gastos totales', 'Total expenses'), Number(propertyData.totalGastos.toFixed(2))]);
-        rows.push([t('reports.netResult'), Number(propertyData.resultadoNeto.toFixed(2))]);
       } else {
         rows.push([
           t('common.lot'),
@@ -1269,19 +1394,56 @@ const ReportsViewInner: React.FC<Props> = ({
           propertyData.utilidadPorHaGlobal !== null ? Number(propertyData.utilidadPorHaGlobal.toFixed(2)) : '—',
         ]);
         rows.push([]);
-        rows.push([bi('Gastos directos por concepto', 'Direct expenses by concept'), `${t('common.amount')} (${currencyLabel})`]);
-        propertyData.gastosDirectosPorConcepto.forEach((r) => {
-          rows.push([r.label, Number(r.amount.toFixed(2))]);
-        });
+        if (propertyData.trabajosMaquinariaPorLabor.length > 0) {
+          rows.push([bi('Trabajos de maquinaria recibidos', 'Machinery jobs received'), `${t('common.amount')} (${currencyLabel})`]);
+          propertyData.trabajosMaquinariaPorLabor.forEach((r) => {
+            rows.push([r.label, Number(r.amount.toFixed(2))]);
+          });
+          rows.push([]);
+        }
+      }
+
+      rows.push([bi('Resumen contable', 'Accounting summary'), `${t('common.amount')} (${currencyLabel})`]);
+      rows.push([t('reports.incomes'), Number(propertyData.totalIngresos.toFixed(2))]);
+      rows.push([bi('Gastos directos', 'Direct expenses'), Number(propertyData.totalGastosDirectos.toFixed(2))]);
+      rows.push([bi('Maquinaria recibida', 'Machinery received'), Number(propertyData.totalGastosMaquinaria.toFixed(2))]);
+      rows.push([bi('Gastos totales', 'Total expenses'), Number(propertyData.totalGastos.toFixed(2))]);
+      rows.push([t('reports.netResult'), Number(propertyData.resultadoNeto.toFixed(2))]);
+
+      if (propertyData.totalHectares > 0) {
         rows.push([]);
-        rows.push([bi('Trabajos de maquinaria recibidos', 'Machinery jobs received'), `${t('common.amount')} (${currencyLabel})`]);
-        propertyData.trabajosMaquinariaPorLabor.forEach((r) => {
-          rows.push([r.label, Number(r.amount.toFixed(2))]);
-        });
+        rows.push([bi('Indicadores por hectárea', 'Per-hectare indicators'), `${t('common.amount')} (${currencyLabel})`]);
+        rows.push([bi('Superficie total (ha)', 'Total area (ha)'), Number(propertyData.totalHectares.toFixed(2))]);
+        rows.push([
+          bi('Ingreso/ha', 'Income/ha'),
+          propertyData.ingresoPorHaGlobal !== null ? Number(propertyData.ingresoPorHaGlobal.toFixed(2)) : '—',
+        ]);
+        rows.push([
+          bi('Gasto/ha', 'Expense/ha'),
+          propertyData.gastoPorHaGlobal !== null ? Number(propertyData.gastoPorHaGlobal.toFixed(2)) : '—',
+        ]);
+        rows.push([
+          bi('Resultado/ha', 'Result/ha'),
+          propertyData.utilidadPorHaGlobal !== null ? Number(propertyData.utilidadPorHaGlobal.toFixed(2)) : '—',
+        ]);
       }
     } else {
+      rows.push([bi('Ingresos por concepto', 'Income by concept'), `${t('common.amount')} (${currencyLabel})`]);
+      consolidatedData.ingresosPorConcepto.forEach((r) => {
+        rows.push([formatConceptExcelLabel(r), Number(r.amount.toFixed(2))]);
+      });
+      rows.push([bi('Total ingresos', 'Total income'), Number(consolidatedData.ingresosConsolidados.toFixed(2))]);
+      rows.push([]);
+
+      rows.push([bi('Gastos por concepto', 'Expenses by concept'), `${t('common.amount')} (${currencyLabel})`]);
+      consolidatedData.gastosPorConcepto.forEach((r) => {
+        rows.push([formatConceptExcelLabel(r), Number(r.amount.toFixed(2))]);
+      });
+      rows.push([bi('Total gastos', 'Total expenses'), Number(consolidatedData.gastosConsolidados.toFixed(2))]);
+      rows.push([]);
+
       rows.push([
-        bi('Módulo / Concepto', 'Module / Concept'),
+        bi('Resultados por módulo', 'Results by module'),
         `${t('reports.incomes')} (${currencyLabel})`,
         `${t('reports.expenses')} (${currencyLabel})`,
         `${t('reports.netResult')} (${currencyLabel})`,
@@ -1548,49 +1710,156 @@ const ReportsViewInner: React.FC<Props> = ({
       {/* ==================================================================== */}
       {activeScope === 'maquinarias' && (
         <div className="space-y-3">
+          {/* 1. INGRESOS POR CONCEPTO */}
+          <ConceptBreakdownSection
+            title={bi('Ingresos por concepto', 'Income by concept')}
+            variant="income"
+            rows={machineryData.ingresosPorConcepto}
+            total={machineryData.totalIngresos}
+            totalLabel={bi('Total ingresos', 'Total income')}
+            emptyText={bi('Sin ingresos registrados en este período.', 'No income recorded in this period.')}
+            fmt={fmt}
+          />
+
+          {/* 2. GASTOS POR CONCEPTO */}
+          <ConceptBreakdownSection
+            title={
+              machineryData.isFilteredByMachine
+                ? bi('Gastos asignados por concepto', 'Assigned expenses by concept')
+                : bi('Gastos por concepto', 'Expenses by concept')
+            }
+            variant="expense"
+            rows={machineryData.gastosPorConcepto}
+            total={machineryData.totalGastos}
+            totalLabel={bi('Total gastos', 'Total expenses')}
+            emptyText={bi('Sin gastos registrados en este período.', 'No expenses recorded in this period.')}
+            fmt={fmt}
+          />
+
+          {/* 3. RESULTADOS POR MÁQUINA (EN RESUMEN) O DESGLOSE POR MÁQUINA E IMPLEMENTO (EN DETALLADO) */}
           {detailLevel === 'resumido' ? (
-            <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden divide-y divide-[#EFF2EF]">
-              {machineryData.ingresosIntereses > 0.004 && (
-                <>
-                  <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs sm:text-sm">
-                    <span className="text-[#5E6D64]">{t('finances.serviceIncome')}</span>
-                    <span className="font-semibold text-[#24875B] tabular-nums">
-                      {fmt(machineryData.ingresosServicios)}
+            !machineryData.isFilteredByMachine && machineryData.machineResults.length > 0 && (
+              <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden print:break-inside-avoid">
+                <div className="px-3.5 py-2 border-b border-[#EFF2EF] bg-[#F8FAF8] flex items-center justify-between gap-2">
+                  <h3 className="text-xs sm:text-sm font-bold text-[#26352D]">
+                    {bi('Resultados por máquina', 'Results by machine')} ({machineryData.machineResults.length})
+                  </h3>
+                </div>
+                <div className="divide-y divide-[#EFF2EF] tabular-nums">
+                  {machineryData.machineResults.map((m) => (
+                    <div
+                      key={m.machineId}
+                      className="px-3.5 py-2 flex items-center justify-between gap-2.5 text-xs sm:text-sm"
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <VisualIcon
+                          iconId={m.iconId}
+                          nameHint={m.machineName}
+                          category="maquinaria"
+                          size={26}
+                          className="shrink-0"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="font-semibold text-[#26352D] truncate leading-tight">
+                            {m.machineName}
+                          </p>
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] mt-0.5">
+                            <span className="text-[#24875B] font-medium">
+                              {bi('Ing', 'Inc')}: {fmt(m.ingresos)}
+                            </span>
+                            {m.gastos > 0.004 && (
+                              <span className="text-[#C44545] font-medium">
+                                {bi('Gas', 'Exp')}: {fmt(m.gastos)}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <span
+                        className={`font-bold shrink-0 ${
+                          m.canShowNet ? getNetColorClass(m.resultado) : 'text-[#24875B]'
+                        }`}
+                      >
+                        {m.canShowNet ? fmt(m.resultado) : fmt(m.ingresos)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {machineryData.unassignedMachExpensesCount > 0 && (
+                  <div className="px-3.5 py-2 bg-[#FAFBF8] border-t border-[#EFF2EF] flex items-start gap-1.5 text-[11px] text-[#5E6D64]">
+                    <Info className="h-3.5 w-3.5 text-[#7A8780] shrink-0 mt-0.5" />
+                    <span>
+                      {bi(
+                        `Existen gastos generales (${fmt(machineryData.unassignedMachExpensesTotal)}) contabilizados a nivel módulo.`,
+                        `General expenses (${fmt(machineryData.unassignedMachExpensesTotal)}) are accounted at module level.`
+                      )}
                     </span>
                   </div>
-                  <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs sm:text-sm">
-                    <span className="text-[#5E6D64]">{t('finances.interestIncome')}</span>
-                    <span className="font-semibold text-[#24875B] tabular-nums">
-                      {fmt(machineryData.ingresosIntereses)}
-                    </span>
-                  </div>
-                </>
+                )}
+              </div>
+            )
+          ) : (
+            <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden print:break-inside-avoid">
+              <div className="px-3.5 py-2 border-b border-[#EFF2EF] bg-[#F8FAF8] flex items-center justify-between gap-2">
+                <h3 className="text-xs sm:text-sm font-bold text-[#26352D]">
+                  {bi('Ingresos por máquina e implemento', 'Income by machine & implement')}
+                </h3>
+                <span className="text-xs sm:text-sm font-extrabold text-[#24875B] tabular-nums">
+                  {fmt(machineryData.ingresosServicios)}
+                </span>
+              </div>
+              {machineryData.ingresosPorMaquinaEquipo.length > 0 ? (
+                <div className="divide-y divide-[#EFF2EF] text-xs sm:text-sm">
+                  {machineryData.ingresosPorMaquinaEquipo.map((row) => (
+                    <div key={row.key} className="px-3.5 py-2 flex items-center justify-between gap-2">
+                      <span className="font-medium text-[#26352D] truncate">{row.label}</span>
+                      <span className="font-semibold text-[#24875B] tabular-nums shrink-0">
+                        {fmt(row.amount)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="px-3.5 py-4 text-xs text-[#7A8780] text-center">
+                  {bi('Sin ingresos de maquinaria en esta selección.', 'No machinery income in this selection.')}
+                </p>
               )}
-              <div className="px-4 py-3 flex items-center justify-between gap-2 text-sm">
+            </div>
+          )}
+
+          {/* 4. RESUMEN CONTABLE */}
+          <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden print:break-inside-avoid">
+            <div className="px-3.5 py-2 border-b border-[#EFF2EF] bg-[#F8FAF8] flex items-center justify-between gap-2">
+              <h3 className="text-xs sm:text-sm font-bold text-[#26352D]">
+                {bi('Resumen contable', 'Accounting summary')}
+              </h3>
+            </div>
+            <div className="divide-y divide-[#EFF2EF] text-xs sm:text-sm">
+              <div className="px-3.5 py-2.5 flex items-center justify-between gap-2">
                 <span className="font-medium text-[#26352D]">{bi('Total de ingresos', 'Total income')}</span>
-                <span className="font-bold text-[#24875B] tabular-nums">
+                <span className="font-bold text-[#24875B] tabular-nums shrink-0">
                   {fmt(machineryData.totalIngresos)}
                 </span>
               </div>
-              <div className="px-4 py-3 flex items-center justify-between gap-2 text-sm">
-                <span className="font-medium text-[#26352D]">
+              <div className="px-3.5 py-2.5 bg-[#FCECEC]/40 flex items-center justify-between gap-2">
+                <span className="font-bold text-[#C44545]">
                   {machineryData.isFilteredByMachine
                     ? bi('Gastos asignados', 'Assigned expenses')
-                    : bi('Total de gastos', 'Total expenses')}
+                    : bi('Gastos totales', 'Total expenses')}
                 </span>
-                <span className="font-bold text-[#C44545] tabular-nums">
+                <span className="font-extrabold text-[#C44545] tabular-nums shrink-0">
                   {fmt(machineryData.totalGastos)}
                 </span>
               </div>
               {machineryData.canShowNetResult ? (
                 <div
-                  className={`px-4 py-3.5 flex items-center justify-between gap-2 text-sm ${getNetBgClass(
+                  className={`px-3.5 py-3 flex items-center justify-between gap-2 ${getNetBgClass(
                     machineryData.resultadoNeto
                   )}`}
                 >
                   <span className="font-bold text-[#26352D]">{t('reports.netResult')}</span>
                   <span
-                    className={`text-base font-extrabold tabular-nums ${getNetColorClass(
+                    className={`text-sm sm:text-base font-extrabold tabular-nums shrink-0 ${getNetColorClass(
                       machineryData.resultadoNeto
                     )}`}
                   >
@@ -1598,7 +1867,7 @@ const ReportsViewInner: React.FC<Props> = ({
                   </span>
                 </div>
               ) : (
-                <div className="px-4 py-3 bg-[#FAFBF8] flex items-start gap-2 text-xs text-[#5E6D64]">
+                <div className="px-3.5 py-2.5 bg-[#FAFBF8] flex items-start gap-2 text-xs text-[#5E6D64]">
                   <Info className="h-4 w-4 text-[#7A8780] shrink-0 mt-0.5" />
                   <span>
                     {bi(
@@ -1609,142 +1878,7 @@ const ReportsViewInner: React.FC<Props> = ({
                 </div>
               )}
             </div>
-          ) : (
-            <div className="space-y-3">
-              {/* INGRESOS AGRUPADOS */}
-              <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
-                <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#EAF5EE]/55 flex items-center justify-between">
-                  <h3 className="text-xs sm:text-sm font-bold text-[#24875B]">{t('reports.incomes')}</h3>
-                  <span className="text-xs sm:text-sm font-extrabold text-[#24875B] tabular-nums">
-                    {fmt(machineryData.totalIngresos)}
-                  </span>
-                </div>
-                <div className="divide-y divide-[#EFF2EF] text-xs sm:text-sm">
-                  <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                    <span className="font-medium text-[#26352D]">
-                      {bi('Trabajos en propiedad propia', 'Own property jobs')}{' '}
-                      <span className="text-[11px] text-[#7A8780] font-normal">
-                        ({machineryData.propJobsCount})
-                      </span>
-                    </span>
-                    <span className="font-bold text-[#24875B] tabular-nums shrink-0">
-                      {fmt(machineryData.ingresosPropiedad)}
-                    </span>
-                  </div>
-                  <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                    <span className="font-medium text-[#26352D]">
-                      {bi('Servicios a clientes externos', 'External client services')}{' '}
-                      <span className="text-[11px] text-[#7A8780] font-normal">
-                        ({machineryData.extJobsCount})
-                      </span>
-                    </span>
-                    <span className="font-bold text-[#24875B] tabular-nums shrink-0">
-                      {fmt(machineryData.ingresosTerceros)}
-                    </span>
-                  </div>
-                  {machineryData.ingresosIntereses > 0.004 && (
-                    <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                      <span className="font-medium text-[#26352D]">
-                        {t('finances.interestIncome')}{' '}
-                        <span className="text-[11px] text-[#7A8780] font-normal">
-                          ({machineryData.interesesCount})
-                        </span>
-                      </span>
-                      <span className="font-bold text-[#24875B] tabular-nums shrink-0">
-                        {fmt(machineryData.ingresosIntereses)}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* DESGLOSE POR MÁQUINA E IMPLEMENTO AGRÍCOLA */}
-              <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
-                <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#F8FAF8] flex items-center justify-between gap-2">
-                  <h3 className="text-xs sm:text-sm font-bold text-[#26352D]">
-                    {bi('Ingresos por máquina e implemento', 'Income by machine & implement')}
-                  </h3>
-                  <span className="text-xs sm:text-sm font-extrabold text-[#24875B] tabular-nums">
-                    {fmt(machineryData.totalIngresos)}
-                  </span>
-                </div>
-                {machineryData.ingresosPorMaquinaEquipo.length > 0 ? (
-                  <div className="divide-y divide-[#EFF2EF] text-xs sm:text-sm">
-                    {machineryData.ingresosPorMaquinaEquipo.map((row) => (
-                      <div key={row.key} className="px-4 py-2.5 flex items-center justify-between gap-2">
-                        <span className="font-medium text-[#26352D] truncate">{row.label}</span>
-                        <span className="font-bold text-[#24875B] tabular-nums shrink-0">
-                          {fmt(row.amount)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="px-4 py-5 text-xs text-[#7A8780] text-center">
-                    {bi('Sin ingresos de maquinaria en esta selección.', 'No machinery income in this selection.')}
-                  </p>
-                )}
-              </div>
-
-              {/* GASTOS AGRUPADOS POR CONCEPTO */}
-              <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
-                <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#FCECEC]/55 flex items-center justify-between">
-                  <h3 className="text-xs sm:text-sm font-bold text-[#C44545]">
-                    {machineryData.isFilteredByMachine
-                      ? bi('Gastos asignados por concepto', 'Assigned expenses by concept')
-                      : bi('Gastos por concepto', 'Expenses by concept')}
-                  </h3>
-                  <span className="text-xs sm:text-sm font-extrabold text-[#C44545] tabular-nums">
-                    {fmt(machineryData.totalGastos)}
-                  </span>
-                </div>
-                {machineryData.gastosPorConcepto.length > 0 ? (
-                  <div className="divide-y divide-[#EFF2EF] text-xs sm:text-sm">
-                    {machineryData.gastosPorConcepto.map((row) => (
-                      <div key={row.key} className="px-4 py-2.5 flex items-center justify-between gap-2">
-                        <span className="font-medium text-[#26352D] truncate">{row.label}</span>
-                        <span className="font-bold text-[#C44545] tabular-nums shrink-0">
-                          {fmt(row.amount)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="px-4 py-5 text-xs text-[#7A8780] text-center">
-                    {bi('Sin gastos registrados en esta selección.', 'No expenses recorded in this selection.')}
-                  </p>
-                )}
-              </div>
-
-              {/* RESULTADO NETO */}
-              {machineryData.canShowNetResult ? (
-                <div
-                  className={`rounded-2xl border px-4 py-3 flex items-center justify-between gap-3 ${getNetBgClass(
-                    machineryData.resultadoNeto
-                  )}`}
-                >
-                  <span className="text-sm font-bold text-[#26352D]">{t('reports.netResult')}</span>
-                  <span
-                    className={`text-base sm:text-lg font-extrabold tabular-nums ${getNetColorClass(
-                      machineryData.resultadoNeto
-                    )}`}
-                  >
-                    {fmt(machineryData.resultadoNeto)}
-                  </span>
-                </div>
-              ) : (
-                <div className="rounded-2xl border border-[#E2E7E3] bg-white px-4 py-3 text-xs text-[#5E6D64] flex items-start gap-2">
-                  <Info className="h-4 w-4 text-[#7A8780] shrink-0 mt-0.5" />
-                  <span>
-                    {bi(
-                      `Los gastos generales (${fmt(machineryData.unassignedMachExpensesTotal)}) no se atribuyen a una máquina individual, por lo que no se muestra utilidad neta para ${machineryData.selectedMachineName}.`,
-                      `General expenses (${fmt(machineryData.unassignedMachExpensesTotal)}) are not attributed to an individual machine, so net profit is not shown for ${machineryData.selectedMachineName}.`
-                    )}
-                  </span>
-                </div>
-              )}
-            </div>
-          )}
+          </div>
         </div>
       )}
 
@@ -1753,100 +1887,33 @@ const ReportsViewInner: React.FC<Props> = ({
       {/* ==================================================================== */}
       {activeScope === 'propiedad' && (
         <div className="space-y-3">
+          {/* 1. INGRESOS POR CONCEPTO */}
+          <ConceptBreakdownSection
+            title={bi('Ingresos por concepto', 'Income by concept')}
+            variant="income"
+            rows={propertyData.ingresosPorConcepto}
+            total={propertyData.totalIngresos}
+            totalLabel={bi('Total ingresos', 'Total income')}
+            emptyText={bi('Sin ingresos registrados en este período.', 'No income recorded in this period.')}
+            fmt={fmt}
+          />
+
+          {/* 2. GASTOS POR CONCEPTO (INCLUYE TRABAJOS DE MAQUINARIA PROPIA SIN DUPLICAR) */}
+          <ConceptBreakdownSection
+            title={bi('Gastos por concepto', 'Expenses by concept')}
+            variant="expense"
+            rows={propertyData.gastosPorConcepto}
+            total={propertyData.totalGastos}
+            totalLabel={bi('Total gastos', 'Total expenses')}
+            emptyText={bi('Sin gastos registrados en este período.', 'No expenses recorded in this period.')}
+            fmt={fmt}
+          />
+
+          {/* 3. RESULTADOS POR LOTE */}
           {detailLevel === 'resumido' ? (
-            <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden divide-y divide-[#EFF2EF] text-sm">
-              {propertyData.totalIngresosIntereses > 0.004 && (
-                <>
-                  <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs sm:text-sm">
-                    <span className="text-[#5E6D64]">{t('finances.harvestIncome')}</span>
-                    <span className="font-semibold text-[#24875B] tabular-nums">
-                      {fmt(propertyData.totalIngresosCosechas)}
-                    </span>
-                  </div>
-                  <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs sm:text-sm">
-                    <span className="text-[#5E6D64]">{t('finances.interestIncome')}</span>
-                    <span className="font-semibold text-[#24875B] tabular-nums">
-                      {fmt(propertyData.totalIngresosIntereses)}
-                    </span>
-                  </div>
-                </>
-              )}
-              <div className="px-4 py-3 flex items-center justify-between gap-2">
-                <span className="font-medium text-[#26352D]">{t('reports.incomes')}</span>
-                <span className="font-bold text-[#24875B] tabular-nums">
-                  {fmt(propertyData.totalIngresos)}
-                </span>
-              </div>
-              <div className="px-4 py-3 flex items-center justify-between gap-2">
-                <span className="text-[#5E6D64]">{bi('Gastos directos', 'Direct expenses')}</span>
-                <span className="font-semibold text-[#C44545] tabular-nums">
-                  {fmt(propertyData.totalGastosDirectos)}
-                </span>
-              </div>
-              <div className="px-4 py-3 flex items-center justify-between gap-2">
-                <span className="text-[#5E6D64]">{bi('Maquinaria recibida', 'Machinery received')}</span>
-                <span className="font-semibold text-[#C44545] tabular-nums">
-                  {fmt(propertyData.totalGastosMaquinaria)}
-                </span>
-              </div>
-              <div className="px-4 py-3 bg-[#FCECEC]/40 flex items-center justify-between gap-2">
-                <span className="font-bold text-[#C44545]">{bi('Gastos totales', 'Total expenses')}</span>
-                <span className="font-extrabold text-[#C44545] tabular-nums">
-                  {fmt(propertyData.totalGastos)}
-                </span>
-              </div>
-              {propertyData.ingresoPorHaGlobal !== null && (
-                <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs">
-                  <span className="text-[#5E6D64]">
-                    {bi('Ingreso / ha', 'Income / ha')} ({formatNumberEs(propertyData.totalHectares, 1)} ha)
-                  </span>
-                  <span className="font-semibold text-[#24875B] tabular-nums">
-                    {fmt(propertyData.ingresoPorHaGlobal)}
-                  </span>
-                </div>
-              )}
-              {propertyData.gastoPorHaGlobal !== null && (
-                <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs">
-                  <span className="text-[#5E6D64]">
-                    {bi('Gasto / ha', 'Expense / ha')} ({formatNumberEs(propertyData.totalHectares, 1)} ha)
-                  </span>
-                  <span className="font-semibold text-[#C44545] tabular-nums">
-                    {fmt(propertyData.gastoPorHaGlobal)}
-                  </span>
-                </div>
-              )}
-              {propertyData.utilidadPorHaGlobal !== null && (
-                <div className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs">
-                  <span className="text-[#5E6D64]">{bi('Resultado / ha', 'Result / ha')}</span>
-                  <span
-                    className={`font-semibold tabular-nums ${getNetColorClass(
-                      propertyData.utilidadPorHaGlobal
-                    )}`}
-                  >
-                    {fmt(propertyData.utilidadPorHaGlobal)}
-                  </span>
-                </div>
-              )}
-              <div
-                className={`px-4 py-3.5 flex items-center justify-between gap-2 ${getNetBgClass(
-                  propertyData.resultadoNeto
-                )}`}
-              >
-                <span className="font-bold text-[#26352D]">{t('reports.netResult')}</span>
-                <span
-                  className={`text-base font-extrabold tabular-nums ${getNetColorClass(
-                    propertyData.resultadoNeto
-                  )}`}
-                >
-                  {fmt(propertyData.resultadoNeto)}
-                </span>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {/* RESULTADOS POR LOTE */}
-              <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
-                <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#F8FAF8] flex items-center justify-between">
+            propertyData.lotResults.length > 0 && (
+              <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden print:break-inside-avoid">
+                <div className="px-3.5 py-2 border-b border-[#EFF2EF] bg-[#F8FAF8] flex items-center justify-between gap-2">
                   <h3 className="text-xs sm:text-sm font-bold text-[#26352D]">
                     {bi('Resultados por lote', 'Results by lot')} ({propertyData.lotResults.length})
                   </h3>
@@ -1856,319 +1923,305 @@ const ReportsViewInner: React.FC<Props> = ({
                     </span>
                   )}
                 </div>
-
-                {propertyData.lotResults.length > 0 ? (
-                  <div className="divide-y divide-[#EFF2EF]">
-                    {propertyData.lotResults.map((lot) => {
-                      const isLotExpanded = expandedReportLotId === lot.lotId;
-                      return (
-                        <div key={lot.lotId} className="bg-white">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setExpandedReportLotId(isLotExpanded ? null : lot.lotId)
-                            }
-                            aria-expanded={isLotExpanded}
-                            className="w-full px-4 py-3 flex items-center justify-between gap-2.5 hover:bg-[#F8FAF8] active:bg-[#F1F5F2] transition text-left cursor-pointer"
-                          >
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-baseline gap-1.5 min-w-0">
-                                <span className="text-sm font-bold text-[#26352D] truncate">
-                                  {lot.lotName}
-                                </span>
-                                {lot.hectares > 0 && (
-                                  <span className="text-[11px] font-medium text-[#7A8780] tabular-nums shrink-0">
-                                    · {formatNumberEs(lot.hectares, 1)} ha
-                                  </span>
-                                )}
-                              </div>
-                              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] tabular-nums mt-0.5">
-                                <span className="text-[#24875B] font-semibold">
-                                  {bi('Ing', 'Inc')}: {fmt(lot.ingresos)}
-                                </span>
-                                <span className="text-[#C44545] font-semibold">
-                                  {bi('Gas', 'Exp')}: {fmt(lot.gastosTotales)}
-                                </span>
-                                {lot.toneladasCosechadas > 0.0001 && (
-                                  <span className="text-[#5E6D64] font-medium">
-                                    · {formatNumberEs(lot.toneladasVendidas, 1)}/{formatNumberEs(lot.toneladasCosechadas, 1)} t ({formatPercentMax1(lot.porcentajeVendido, lang)})
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <span
-                                className={`text-sm font-extrabold tabular-nums ${getNetColorClass(
-                                  lot.resultadoNeto
-                                )}`}
-                              >
-                                {fmt(lot.resultadoNeto)}
-                              </span>
-                              <span className="no-print text-[#8A968F]">
-                                {isLotExpanded ? (
-                                  <ChevronUp className="h-4 w-4" />
-                                ) : (
-                                  <ChevronDown className="h-4 w-4" />
-                                )}
-                              </span>
-                            </div>
-                          </button>
-
-                          <div
-                            className={`${
-                              isLotExpanded ? 'block' : 'hidden print:block'
-                            } px-4 pb-3 pt-2 bg-[#FAFBF8] border-t border-[#EFF2EF] space-y-2.5 text-xs`}
-                          >
-                            {lot.toneladasCosechadas > 0.0001 && (
-                              <div className="rounded-xl bg-white border border-[#E2E7E3] p-2.5 space-y-2">
-                                <div className="flex items-center justify-between text-[11px] font-bold text-[#26352D]">
-                                  <span>{bi('Producción y ventas', 'Production & sales')}</span>
-                                  <span className="text-[#1D704B] tabular-nums">
-                                    {formatPercentMax1(lot.porcentajeVendido, lang)} {bi('vendido', 'sold')}
-                                  </span>
-                                </div>
-                                <div className="h-1.5 w-full rounded-full bg-[#E8EFEA] overflow-hidden">
-                                  <div
-                                    className="h-full rounded-full bg-[#24875B]"
-                                    style={{ width: `${Math.min(100, Math.max(0, lot.porcentajeVendido))}%` }}
-                                  />
-                                </div>
-                                <div className="grid grid-cols-3 gap-2 text-center tabular-nums">
-                                  <div>
-                                    <span className="block text-[10px] text-[#5E6D64]">{bi('Cosechado', 'Harvested')}</span>
-                                    <strong className="text-[#26352D]">{formatNumberEs(lot.toneladasCosechadas, 2)} t</strong>
-                                  </div>
-                                  <div>
-                                    <span className="block text-[10px] text-[#5E6D64]">{bi('Vendido', 'Sold')}</span>
-                                    <strong className="text-[#26352D]">{formatNumberEs(lot.toneladasVendidas, 2)} t</strong>
-                                  </div>
-                                  <div>
-                                    <span className="block text-[10px] text-[#5E6D64]">{bi('Disponible', 'Available')}</span>
-                                    <strong className="text-[#1D704B]">{formatNumberEs(lot.toneladasDisponibles, 2)} t</strong>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-
-                            {(lot.ingresoPorHa !== null ||
-                              lot.gastoPorHa !== null ||
-                              lot.utilidadPorHa !== null) && (
-                              <div className="grid grid-cols-3 gap-2 pb-2 border-b border-[#EFF2EF] tabular-nums text-center">
-                                <div className="rounded-lg bg-white border border-[#E2E7E3] px-2 py-1.5">
-                                  <span className="block text-[10px] text-[#5E6D64]">{bi('Ingreso/ha', 'Income/ha')}</span>
-                                  <strong className="text-[#24875B]">
-                                    {lot.ingresoPorHa !== null ? fmt(lot.ingresoPorHa) : '—'}
-                                  </strong>
-                                </div>
-                                <div className="rounded-lg bg-white border border-[#E2E7E3] px-2 py-1.5">
-                                  <span className="block text-[10px] text-[#5E6D64]">{bi('Gasto/ha', 'Expense/ha')}</span>
-                                  <strong className="text-[#C44545]">
-                                    {lot.gastoPorHa !== null ? fmt(lot.gastoPorHa) : '—'}
-                                  </strong>
-                                </div>
-                                <div className="rounded-lg bg-white border border-[#E2E7E3] px-2 py-1.5">
-                                  <span className="block text-[10px] text-[#5E6D64]">{bi('Resultado/ha', 'Result/ha')}</span>
-                                  <strong
-                                    className={
-                                      lot.utilidadPorHa !== null
-                                        ? getNetColorClass(lot.utilidadPorHa)
-                                        : 'text-[#5E6D64]'
-                                    }
-                                  >
-                                    {lot.utilidadPorHa !== null ? fmt(lot.utilidadPorHa) : '—'}
-                                  </strong>
-                                </div>
-                              </div>
-                            )}
-
-                            {lot.ingresosPorConcepto.length > 0 && (
-                              <div className="space-y-1">
-                                <div className="flex items-center justify-between font-bold text-[#24875B]">
-                                  <span>{bi('Ingresos de cosecha / ventas', 'Harvest / sales income')}</span>
-                                  <span className="tabular-nums">{fmt(lot.ingresos)}</span>
-                                </div>
-                                <div className="divide-y divide-[#EFF2EF] rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
-                                  {lot.ingresosPorConcepto.map((c) => (
-                                    <div
-                                      key={c.key}
-                                      className="px-3 py-1.5 flex items-center justify-between gap-2"
-                                    >
-                                      <span className="text-[#26352D] truncate">{c.label}</span>
-                                      <span className="font-semibold text-[#24875B] tabular-nums shrink-0">
-                                        {fmt(c.amount)}
-                                      </span>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-
-                            {lot.gastosDirectosPorConcepto.length > 0 && (
-                              <div className="space-y-1">
-                                <div className="flex items-center justify-between font-bold text-[#C44545]">
-                                  <span>{bi('Gastos directos', 'Direct expenses')}</span>
-                                  <span className="tabular-nums">{fmt(lot.gastosDirectos)}</span>
-                                </div>
-                                <div className="divide-y divide-[#EFF2EF] rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
-                                  {lot.gastosDirectosPorConcepto.map((c) => (
-                                    <div
-                                      key={c.key}
-                                      className="px-3 py-1.5 flex items-center justify-between gap-2"
-                                    >
-                                      <span className="text-[#26352D] truncate">{c.label}</span>
-                                      <span className="font-semibold text-[#C44545] tabular-nums shrink-0">
-                                        {fmt(c.amount)}
-                                      </span>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-
-                            {lot.trabajosMaquinariaPorLabor.length > 0 && (
-                              <div className="space-y-1">
-                                <div className="flex items-center justify-between font-bold text-[#C44545]">
-                                  <span>{bi('Trabajos de maquinaria recibidos', 'Machinery jobs received')}</span>
-                                  <span className="tabular-nums">{fmt(lot.gastosMaquinaria)}</span>
-                                </div>
-                                <div className="divide-y divide-[#EFF2EF] rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
-                                  {lot.trabajosMaquinariaPorLabor.map((m) => (
-                                    <div
-                                      key={m.key}
-                                      className="px-3 py-1.5 flex items-center justify-between gap-2"
-                                    >
-                                      <span className="text-[#26352D] truncate">{m.label}</span>
-                                      <span className="font-semibold text-[#C44545] tabular-nums shrink-0">
-                                        {fmt(m.amount)}
-                                      </span>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-
-                            {lot.gastosDirectosPorConcepto.length === 0 &&
-                              lot.trabajosMaquinariaPorLabor.length === 0 &&
-                              lot.ingresos === 0 && (
-                                <p className="text-[11px] text-[#7A8780]">
-                                  {bi(
-                                    'Sin movimientos registrados en esta campaña.',
-                                    'No movements recorded in this campaign.'
-                                  )}
-                                </p>
-                              )}
-                          </div>
+                <div className="divide-y divide-[#EFF2EF] tabular-nums">
+                  {propertyData.lotResults.map((lot) => (
+                    <div
+                      key={lot.lotId}
+                      className="px-3.5 py-2 flex items-center justify-between gap-2 text-xs sm:text-sm"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline gap-1.5 min-w-0">
+                          <span className="font-semibold text-[#26352D] truncate">
+                            {lot.lotName}
+                          </span>
+                          {lot.hectares > 0 && (
+                            <span className="text-[11px] text-[#7A8780] shrink-0">
+                              · {formatNumberEs(lot.hectares, 1)} ha
+                            </span>
+                          )}
                         </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <p className="px-4 py-5 text-xs text-[#7A8780] text-center">
-                    {bi('Sin datos de lotes en esta campaña.', 'No lot data in this campaign.')}
-                  </p>
+                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] mt-0.5">
+                          <span className="text-[#24875B] font-medium">
+                            {bi('Ing', 'Inc')}: {fmt(lot.ingresos)}
+                          </span>
+                          <span className="text-[#C44545] font-medium">
+                            {bi('Gas', 'Exp')}: {fmt(lot.gastosTotales)}
+                          </span>
+                        </div>
+                      </div>
+                      <span
+                        className={`font-bold shrink-0 ${getNetColorClass(lot.resultadoNeto)}`}
+                      >
+                        {fmt(lot.resultadoNeto)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
+          ) : (
+            <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
+              <div className="px-3.5 py-2 border-b border-[#EFF2EF] bg-[#F8FAF8] flex items-center justify-between">
+                <h3 className="text-xs sm:text-sm font-bold text-[#26352D]">
+                  {bi('Resultados por lote', 'Results by lot')} ({propertyData.lotResults.length})
+                </h3>
+                {propertyData.totalHectares > 0 && (
+                  <span className="text-[11px] font-semibold text-[#5E6D64] tabular-nums">
+                    {formatNumberEs(propertyData.totalHectares, 1)} ha
+                  </span>
                 )}
               </div>
 
-              {/* RESUMEN DE PROPIEDAD */}
-              <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
-                <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#F8FAF8] flex items-center justify-between">
-                  <h3 className="text-xs sm:text-sm font-bold text-[#26352D]">
-                    {bi('Resumen de Propiedad', 'Property Summary')}
-                  </h3>
-                  {propertyData.totalHectares > 0 && (
-                    <span className="text-[11px] font-semibold text-[#5E6D64] tabular-nums">
-                      {formatNumberEs(propertyData.totalHectares, 1)} ha
-                    </span>
-                  )}
-                </div>
-                <div className="divide-y divide-[#EFF2EF] text-xs sm:text-sm">
-                  {propertyData.totalIngresosIntereses > 0.004 && (
-                    <>
-                      <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                        <span className="text-[#5E6D64]">{t('finances.harvestIncome')}</span>
-                        <span className="font-semibold text-[#24875B] tabular-nums">
-                          {fmt(propertyData.totalIngresosCosechas)}
-                        </span>
+              {propertyData.lotResults.length > 0 ? (
+                <div className="divide-y divide-[#EFF2EF]">
+                  {propertyData.lotResults.map((lot) => {
+                    const isLotExpanded = expandedReportLotId === lot.lotId;
+                    return (
+                      <div key={lot.lotId} className="bg-white print:break-inside-avoid">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedReportLotId(isLotExpanded ? null : lot.lotId)
+                          }
+                          aria-expanded={isLotExpanded}
+                          className="w-full px-3.5 py-2.5 flex items-center justify-between gap-2.5 hover:bg-[#F8FAF8] active:bg-[#F1F5F2] transition text-left cursor-pointer"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-baseline gap-1.5 min-w-0">
+                              <span className="text-sm font-bold text-[#26352D] truncate">
+                                {lot.lotName}
+                              </span>
+                              {lot.hectares > 0 && (
+                                <span className="text-[11px] font-medium text-[#7A8780] tabular-nums shrink-0">
+                                  · {formatNumberEs(lot.hectares, 1)} ha
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] tabular-nums mt-0.5">
+                              <span className="text-[#24875B] font-semibold">
+                                {bi('Ing', 'Inc')}: {fmt(lot.ingresos)}
+                              </span>
+                              <span className="text-[#C44545] font-semibold">
+                                {bi('Gas', 'Exp')}: {fmt(lot.gastosTotales)}
+                              </span>
+                              {lot.toneladasCosechadas > 0.0001 && (
+                                <span className="text-[#5E6D64] font-medium">
+                                  · {formatNumberEs(lot.toneladasVendidas, 1)}/{formatNumberEs(lot.toneladasCosechadas, 1)} t ({formatPercentMax1(lot.porcentajeVendido, lang)})
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <span
+                              className={`text-sm font-extrabold tabular-nums ${getNetColorClass(
+                                lot.resultadoNeto
+                              )}`}
+                            >
+                              {fmt(lot.resultadoNeto)}
+                            </span>
+                            <span className="no-print text-[#8A968F]">
+                              {isLotExpanded ? (
+                                <ChevronUp className="h-4 w-4" />
+                              ) : (
+                                <ChevronDown className="h-4 w-4" />
+                              )}
+                            </span>
+                          </div>
+                        </button>
+
+                        <div
+                          className={`${
+                            isLotExpanded ? 'block' : 'hidden print:block'
+                          } px-3.5 pb-3 pt-2 bg-[#FAFBF8] border-t border-[#EFF2EF] space-y-2.5 text-xs`}
+                        >
+                          {lot.toneladasCosechadas > 0.0001 && (
+                            <div className="rounded-xl bg-white border border-[#E2E7E3] p-2.5 space-y-2">
+                              <div className="flex items-center justify-between text-[11px] font-bold text-[#26352D]">
+                                <span>{bi('Producción y ventas', 'Production & sales')}</span>
+                                <span className="text-[#1D704B] tabular-nums">
+                                  {formatPercentMax1(lot.porcentajeVendido, lang)} {bi('vendido', 'sold')}
+                                </span>
+                              </div>
+                              <div className="h-1.5 w-full rounded-full bg-[#E8EFEA] overflow-hidden">
+                                <div
+                                  className="h-full rounded-full bg-[#24875B]"
+                                  style={{ width: `${Math.min(100, Math.max(0, lot.porcentajeVendido))}%` }}
+                                />
+                              </div>
+                              <div className="grid grid-cols-3 gap-2 text-center tabular-nums">
+                                <div>
+                                  <span className="block text-[10px] text-[#5E6D64]">{bi('Cosechado', 'Harvested')}</span>
+                                  <strong className="text-[#26352D]">{formatNumberEs(lot.toneladasCosechadas, 2)} t</strong>
+                                </div>
+                                <div>
+                                  <span className="block text-[10px] text-[#5E6D64]">{bi('Vendido', 'Sold')}</span>
+                                  <strong className="text-[#26352D]">{formatNumberEs(lot.toneladasVendidas, 2)} t</strong>
+                                </div>
+                                <div>
+                                  <span className="block text-[10px] text-[#5E6D64]">{bi('Disponible', 'Available')}</span>
+                                  <strong className="text-[#1D704B]">{formatNumberEs(lot.toneladasDisponibles, 2)} t</strong>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {(lot.ingresoPorHa !== null ||
+                            lot.gastoPorHa !== null ||
+                            lot.utilidadPorHa !== null) && (
+                            <div className="grid grid-cols-3 gap-2 pb-2 border-b border-[#EFF2EF] tabular-nums text-center">
+                              <div className="rounded-lg bg-white border border-[#E2E7E3] px-2 py-1.5">
+                                <span className="block text-[10px] text-[#5E6D64]">{bi('Ingreso/ha', 'Income/ha')}</span>
+                                <strong className="text-[#24875B]">
+                                  {lot.ingresoPorHa !== null ? fmt(lot.ingresoPorHa) : '—'}
+                                </strong>
+                              </div>
+                              <div className="rounded-lg bg-white border border-[#E2E7E3] px-2 py-1.5">
+                                <span className="block text-[10px] text-[#5E6D64]">{bi('Gasto/ha', 'Expense/ha')}</span>
+                                <strong className="text-[#C44545]">
+                                  {lot.gastoPorHa !== null ? fmt(lot.gastoPorHa) : '—'}
+                                </strong>
+                              </div>
+                              <div className="rounded-lg bg-white border border-[#E2E7E3] px-2 py-1.5">
+                                <span className="block text-[10px] text-[#5E6D64]">{bi('Resultado/ha', 'Result/ha')}</span>
+                                <strong
+                                  className={
+                                    lot.utilidadPorHa !== null
+                                      ? getNetColorClass(lot.utilidadPorHa)
+                                      : 'text-[#5E6D64]'
+                                  }
+                                >
+                                  {lot.utilidadPorHa !== null ? fmt(lot.utilidadPorHa) : '—'}
+                                </strong>
+                              </div>
+                            </div>
+                          )}
+
+                          {lot.ingresosPorConcepto.length > 0 && (
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between font-bold text-[#24875B]">
+                                <span>{bi('Ingresos por concepto', 'Income by concept')}</span>
+                                <span className="tabular-nums">{fmt(lot.ingresos)}</span>
+                              </div>
+                              <div className="divide-y divide-[#EFF2EF] rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
+                                {lot.ingresosPorConcepto.map((c) => (
+                                  <div
+                                    key={c.key}
+                                    className="px-3 py-1.5 flex items-center justify-between gap-2"
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                                      <VisualIcon
+                                        iconId={c.iconId}
+                                        nameHint={c.label}
+                                        category={c.iconCategory}
+                                        size={20}
+                                        className="shrink-0"
+                                      />
+                                      <span className="text-[#26352D] truncate">{c.label}</span>
+                                    </div>
+                                    <span className="font-semibold text-[#24875B] tabular-nums shrink-0">
+                                      {fmt(c.amount)}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {lot.gastosDirectosPorConcepto.length > 0 && (
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between font-bold text-[#C44545]">
+                                <span>{bi('Gastos directos', 'Direct expenses')}</span>
+                                <span className="tabular-nums">{fmt(lot.gastosDirectos)}</span>
+                              </div>
+                              <div className="divide-y divide-[#EFF2EF] rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
+                                {lot.gastosDirectosPorConcepto.map((c) => (
+                                  <div
+                                    key={c.key}
+                                    className="px-3 py-1.5 flex items-center justify-between gap-2"
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                                      <VisualIcon
+                                        iconId={c.iconId}
+                                        nameHint={c.label}
+                                        category={c.iconCategory}
+                                        size={20}
+                                        className="shrink-0"
+                                      />
+                                      <span className="text-[#26352D] truncate">{c.label}</span>
+                                    </div>
+                                    <span className="font-semibold text-[#C44545] tabular-nums shrink-0">
+                                      {fmt(c.amount)}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {lot.trabajosMaquinariaPorLabor.length > 0 && (
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between font-bold text-[#C44545]">
+                                <span>{bi('Trabajos de maquinaria recibidos', 'Machinery jobs received')}</span>
+                                <span className="tabular-nums">{fmt(lot.gastosMaquinaria)}</span>
+                              </div>
+                              <div className="divide-y divide-[#EFF2EF] rounded-xl border border-[#E2E7E3] bg-white overflow-hidden">
+                                {lot.trabajosMaquinariaPorLabor.map((m) => (
+                                  <div
+                                    key={m.key}
+                                    className="px-3 py-1.5 flex items-center justify-between gap-2"
+                                  >
+                                    <span className="text-[#26352D] truncate">{m.label}</span>
+                                    <span className="font-semibold text-[#C44545] tabular-nums shrink-0">
+                                      {fmt(m.amount)}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {lot.gastosDirectosPorConcepto.length === 0 &&
+                            lot.trabajosMaquinariaPorLabor.length === 0 &&
+                            lot.ingresos === 0 && (
+                              <p className="text-[11px] text-[#7A8780]">
+                                {bi(
+                                  'Sin movimientos registrados en esta campaña.',
+                                  'No movements recorded in this campaign.'
+                                )}
+                              </p>
+                            )}
+                        </div>
                       </div>
-                      <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                        <span className="text-[#5E6D64]">{t('finances.interestIncome')}</span>
-                        <span className="font-semibold text-[#24875B] tabular-nums">
-                          {fmt(propertyData.totalIngresosIntereses)}
-                        </span>
-                      </div>
-                    </>
-                  )}
-                  <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                    <span className="text-[#26352D]">{t('reports.incomes')}</span>
-                    <span className="font-bold text-[#24875B] tabular-nums">
-                      {fmt(propertyData.totalIngresos)}
-                    </span>
-                  </div>
-                  <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                    <span className="text-[#5E6D64]">{bi('Gastos directos', 'Direct expenses')}</span>
-                    <span className="font-semibold text-[#C44545] tabular-nums">
-                      {fmt(propertyData.totalGastosDirectos)}
-                    </span>
-                  </div>
-                  <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                    <span className="text-[#5E6D64]">{bi('Maquinaria recibida', 'Machinery received')}</span>
-                    <span className="font-semibold text-[#C44545] tabular-nums">
-                      {fmt(propertyData.totalGastosMaquinaria)}
-                    </span>
-                  </div>
-                  <div className="px-4 py-2.5 flex items-center justify-between gap-2 bg-[#FCECEC]/35">
-                    <span className="font-bold text-[#C44545]">{bi('Gastos totales', 'Total expenses')}</span>
-                    <span className="font-extrabold text-[#C44545] tabular-nums">
-                      {fmt(propertyData.totalGastos)}
-                    </span>
-                  </div>
-                  {propertyData.ingresoPorHaGlobal !== null && (
-                    <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                      <span className="text-[#5E6D64]">{bi('Ingreso / ha', 'Income / ha')}</span>
-                      <span className="font-semibold text-[#24875B] tabular-nums">
-                        {fmt(propertyData.ingresoPorHaGlobal)}
-                      </span>
-                    </div>
-                  )}
-                  {propertyData.gastoPorHaGlobal !== null && (
-                    <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                      <span className="text-[#5E6D64]">{bi('Gasto / ha', 'Expense / ha')}</span>
-                      <span className="font-semibold text-[#C44545] tabular-nums">
-                        {fmt(propertyData.gastoPorHaGlobal)}
-                      </span>
-                    </div>
-                  )}
-                  {propertyData.utilidadPorHaGlobal !== null && (
-                    <div className="px-4 py-2.5 flex items-center justify-between gap-2">
-                      <span className="text-[#5E6D64]">{bi('Resultado / ha', 'Result / ha')}</span>
-                      <span
-                        className={`font-semibold tabular-nums ${getNetColorClass(
-                          propertyData.utilidadPorHaGlobal
-                        )}`}
-                      >
-                        {fmt(propertyData.utilidadPorHaGlobal)}
-                      </span>
-                    </div>
-                  )}
-                  <div
-                    className={`px-4 py-3 flex items-center justify-between gap-2 ${getNetBgClass(
-                      propertyData.resultadoNeto
-                    )}`}
-                  >
-                    <span className="font-bold text-[#26352D]">{t('reports.netResult')}</span>
-                    <span
-                      className={`text-base font-extrabold tabular-nums ${getNetColorClass(
-                        propertyData.resultadoNeto
-                      )}`}
-                    >
-                      {fmt(propertyData.resultadoNeto)}
-                    </span>
-                  </div>
+                    );
+                  })}
                 </div>
-              </div>
+              ) : (
+                <p className="px-4 py-5 text-xs text-[#7A8780] text-center">
+                  {bi('Sin datos de lotes en esta campaña.', 'No lot data in this campaign.')}
+                </p>
+              )}
             </div>
           )}
+
+          {/* 4. RESUMEN CONTABLE (SIN INDICADORES POR HECTÁREA ENTRE GASTOS TOTALES Y RESULTADO NETO) */}
+          <PropertyAccountingSummaryCard
+            totalIngresos={propertyData.totalIngresos}
+            totalGastosDirectos={propertyData.totalGastosDirectos}
+            totalGastosMaquinaria={propertyData.totalGastosMaquinaria}
+            totalGastos={propertyData.totalGastos}
+            resultadoNeto={propertyData.resultadoNeto}
+            fmt={fmt}
+          />
+
+          {/* 5. INDICADORES POR HECTÁREA (SECCIÓN INDEPENDIENTE Y COMPACTA EN UNA SOLA FILA) */}
+          <PerHectareIndicatorsSection
+            totalHectares={propertyData.totalHectares}
+            ingresoPorHa={propertyData.ingresoPorHaGlobal}
+            gastoPorHa={propertyData.gastoPorHaGlobal}
+            resultadoPorHa={propertyData.utilidadPorHaGlobal}
+            fmt={fmt}
+          />
         </div>
       )}
 
@@ -2177,11 +2230,39 @@ const ReportsViewInner: React.FC<Props> = ({
       {/* ==================================================================== */}
       {activeScope === 'consolidado' && (
         <div className="space-y-3">
-          <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
+          {/* 1. INGRESOS POR CONCEPTO CONSOLIDADOS (SIN OPERACIONES INTERNAS) */}
+          <ConceptBreakdownSection
+            title={bi('Ingresos por concepto', 'Income by concept')}
+            variant="income"
+            rows={consolidatedData.ingresosPorConcepto}
+            total={consolidatedData.ingresosConsolidados}
+            totalLabel={bi('Total ingresos', 'Total income')}
+            emptyText={bi('Sin ingresos registrados en este período.', 'No income recorded in this period.')}
+            fmt={fmt}
+          />
+
+          {/* 2. GASTOS POR CONCEPTO CONSOLIDADOS (SIN OPERACIONES INTERNAS) */}
+          <ConceptBreakdownSection
+            title={bi('Gastos por concepto', 'Expenses by concept')}
+            variant="expense"
+            rows={consolidatedData.gastosPorConcepto}
+            total={consolidatedData.gastosConsolidados}
+            totalLabel={bi('Total gastos', 'Total expenses')}
+            emptyText={bi('Sin gastos registrados en este período.', 'No expenses recorded in this period.')}
+            fmt={fmt}
+          />
+
+          {/* 3. RESULTADOS POR MÓDULO */}
+          <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden print:break-inside-avoid">
+            <div className="px-3.5 py-2 border-b border-[#EFF2EF] bg-[#F8FAF8]">
+              <h3 className="text-xs sm:text-sm font-bold text-[#26352D]">
+                {bi('Resultados por módulo', 'Results by module')}
+              </h3>
+            </div>
             <div className="divide-y divide-[#EFF2EF] tabular-nums">
-              <div className="px-4 py-3 flex items-center justify-between gap-2">
+              <div className="px-3.5 py-2.5 flex items-center justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-bold text-[#26352D] flex items-center gap-1.5">
+                  <p className="text-xs sm:text-sm font-bold text-[#26352D] flex items-center gap-1.5">
                     <Tractor className="h-4 w-4 text-[#526058] shrink-0" />
                     <span className="truncate">{t('nav.machinery')}</span>
                   </p>
@@ -2195,7 +2276,7 @@ const ReportsViewInner: React.FC<Props> = ({
                   </div>
                 </div>
                 <span
-                  className={`text-sm sm:text-base font-extrabold shrink-0 ${getNetColorClass(
+                  className={`text-sm font-extrabold shrink-0 ${getNetColorClass(
                     consolidatedData.machResultado
                   )}`}
                 >
@@ -2203,9 +2284,9 @@ const ReportsViewInner: React.FC<Props> = ({
                 </span>
               </div>
 
-              <div className="px-4 py-3 flex items-center justify-between gap-2">
+              <div className="px-3.5 py-2.5 flex items-center justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-bold text-[#26352D] flex items-center gap-1.5">
+                  <p className="text-xs sm:text-sm font-bold text-[#26352D] flex items-center gap-1.5">
                     <Sprout className="h-4 w-4 text-[#526058] shrink-0" />
                     <span className="truncate">{t('nav.property')}</span>
                   </p>
@@ -2219,37 +2300,51 @@ const ReportsViewInner: React.FC<Props> = ({
                   </div>
                 </div>
                 <span
-                  className={`text-sm sm:text-base font-extrabold shrink-0 ${getNetColorClass(
+                  className={`text-sm font-extrabold shrink-0 ${getNetColorClass(
                     consolidatedData.propResultado
                   )}`}
                 >
                   {fmt(consolidatedData.propResultado)}
                 </span>
               </div>
+            </div>
+          </div>
 
+          {/* 4. RESUMEN CONTABLE CONSOLIDADO */}
+          <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden print:break-inside-avoid">
+            <div className="px-3.5 py-2 border-b border-[#EFF2EF] bg-[#F8FAF8]">
+              <h3 className="text-xs sm:text-sm font-bold text-[#26352D]">
+                {bi('Resumen contable consolidado', 'Consolidated accounting summary')}
+              </h3>
+            </div>
+            <div className="divide-y divide-[#EFF2EF] text-xs sm:text-sm tabular-nums">
+              <div className="px-3.5 py-2.5 flex items-center justify-between gap-2">
+                <span className="font-medium text-[#26352D]">
+                  {bi('Ingresos consolidados', 'Consolidated income')}
+                </span>
+                <span className="font-bold text-[#24875B] shrink-0">
+                  {fmt(consolidatedData.ingresosConsolidados)}
+                </span>
+              </div>
+              <div className="px-3.5 py-2.5 bg-[#FCECEC]/40 flex items-center justify-between gap-2">
+                <span className="font-bold text-[#C44545]">
+                  {bi('Gastos consolidados', 'Consolidated expenses')}
+                </span>
+                <span className="font-extrabold text-[#C44545] shrink-0">
+                  {fmt(consolidatedData.gastosConsolidados)}
+                </span>
+              </div>
               <div
-                className={`px-4 py-3.5 flex items-center justify-between gap-2 ${getNetBgClass(
+                className={`px-3.5 py-3 flex items-center justify-between gap-2 ${getNetBgClass(
                   consolidatedData.resultadoConsolidado
                 )}`}
               >
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-extrabold text-[#26352D] flex items-center gap-1.5">
-                    <BarChart3 className="h-4 w-4 text-[#24875B] shrink-0" />
-                    <span className="truncate">
-                      {bi('Consolidado general', 'General consolidated')}
-                    </span>
-                  </p>
-                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] mt-0.5">
-                    <span className="text-[#24875B] font-bold">
-                      {bi('Ing', 'Inc')}: {fmt(consolidatedData.ingresosConsolidados)}
-                    </span>
-                    <span className="text-[#C44545] font-bold">
-                      {bi('Gas', 'Exp')}: {fmt(consolidatedData.gastosConsolidados)}
-                    </span>
-                  </div>
-                </div>
+                <span className="font-bold text-[#26352D] flex items-center gap-1.5">
+                  <BarChart3 className="h-4 w-4 text-[#24875B] shrink-0" />
+                  <span>{t('reports.netResult')}</span>
+                </span>
                 <span
-                  className={`text-base sm:text-lg font-extrabold shrink-0 ${getNetColorClass(
+                  className={`text-sm sm:text-base font-extrabold shrink-0 ${getNetColorClass(
                     consolidatedData.resultadoConsolidado
                   )}`}
                 >
@@ -2261,10 +2356,10 @@ const ReportsViewInner: React.FC<Props> = ({
 
           {detailLevel === 'detallado' && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
-                <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#EAF5EE]/55 flex items-center justify-between">
+              <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden print:break-inside-avoid">
+                <div className="px-3.5 py-2 border-b border-[#EFF2EF] bg-[#EAF5EE]/55 flex items-center justify-between">
                   <h4 className="text-xs sm:text-sm font-bold text-[#24875B]">
-                    {t('reports.incomes')}
+                    {bi('Detalle por origen — Ingresos', 'Detail by source — Income')}
                   </h4>
                   <span className="text-xs sm:text-sm font-extrabold text-[#24875B] tabular-nums">
                     {fmt(consolidatedData.ingresosConsolidados)}
@@ -2272,7 +2367,7 @@ const ReportsViewInner: React.FC<Props> = ({
                 </div>
                 <div className="divide-y divide-[#EFF2EF] text-xs sm:text-sm tabular-nums">
                   {consolidatedData.ingresosExtPorMaquina.map((r) => (
-                    <div key={`ext_${r.key}`} className="px-4 py-2.5 flex items-center justify-between gap-2">
+                    <div key={`ext_${r.key}`} className="px-3.5 py-2 flex items-center justify-between gap-2">
                       <span className="text-[#26352D] truncate">{t('nav.machinery')} · {r.label}</span>
                       <span className="font-semibold text-[#24875B] shrink-0">
                         {fmt(r.amount)}
@@ -2280,7 +2375,7 @@ const ReportsViewInner: React.FC<Props> = ({
                     </div>
                   ))}
                   {consolidatedData.ingresosPropPorLote.map((r) => (
-                    <div key={`prop_${r.key}`} className="px-4 py-2.5 flex items-center justify-between gap-2">
+                    <div key={`prop_${r.key}`} className="px-3.5 py-2 flex items-center justify-between gap-2">
                       <span className="text-[#26352D] truncate">{t('nav.property')} · {r.label}</span>
                       <span className="font-semibold text-[#24875B] shrink-0">
                         {fmt(r.amount)}
@@ -2288,7 +2383,7 @@ const ReportsViewInner: React.FC<Props> = ({
                     </div>
                   ))}
                   {consolidatedData.machIngresosIntereses > 0.004 && (
-                    <div className="px-4 py-2.5 flex items-center justify-between gap-2">
+                    <div className="px-3.5 py-2 flex items-center justify-between gap-2">
                       <span className="text-[#26352D] truncate">
                         {t('nav.machinery')} · {t('finances.interestIncome')}
                       </span>
@@ -2298,7 +2393,7 @@ const ReportsViewInner: React.FC<Props> = ({
                     </div>
                   )}
                   {consolidatedData.propIngresosIntereses > 0.004 && (
-                    <div className="px-4 py-2.5 flex items-center justify-between gap-2">
+                    <div className="px-3.5 py-2 flex items-center justify-between gap-2">
                       <span className="text-[#26352D] truncate">
                         {t('nav.property')} · {t('finances.interestIncome')}
                       </span>
@@ -2310,7 +2405,7 @@ const ReportsViewInner: React.FC<Props> = ({
                   {consolidatedData.ingresosExtPorMaquina.length === 0 &&
                     consolidatedData.ingresosPropPorLote.length === 0 &&
                     consolidatedData.ingresosInteresesTotales <= 0.004 && (
-                      <p className="px-4 py-5 text-center text-xs text-[#7A8780]">
+                      <p className="px-3.5 py-4 text-center text-xs text-[#7A8780]">
                         {bi(
                           'No hay ingresos en esta campaña.',
                           'No income in this campaign.'
@@ -2320,10 +2415,10 @@ const ReportsViewInner: React.FC<Props> = ({
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden">
-                <div className="px-4 py-2.5 border-b border-[#EFF2EF] bg-[#FCECEC]/55 flex items-center justify-between">
+              <div className="rounded-2xl border border-[#E2E7E3] bg-white overflow-hidden print:break-inside-avoid">
+                <div className="px-3.5 py-2 border-b border-[#EFF2EF] bg-[#FCECEC]/55 flex items-center justify-between">
                   <h4 className="text-xs sm:text-sm font-bold text-[#C44545]">
-                    {t('reports.expenses')}
+                    {bi('Detalle por módulo — Gastos', 'Detail by module — Expenses')}
                   </h4>
                   <span className="text-xs sm:text-sm font-extrabold text-[#C44545] tabular-nums">
                     {fmt(consolidatedData.gastosConsolidados)}
@@ -2331,16 +2426,34 @@ const ReportsViewInner: React.FC<Props> = ({
                 </div>
                 <div className="divide-y divide-[#EFF2EF] text-xs sm:text-sm tabular-nums">
                   {consolidatedData.gastosMaqPorConcepto.map((r) => (
-                    <div key={`gm_${r.key}`} className="px-4 py-2.5 flex items-center justify-between gap-2">
-                      <span className="text-[#26352D] truncate">{t('nav.machinery')} · {r.label}</span>
+                    <div key={`gm_${r.key}`} className="px-3.5 py-2 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <VisualIcon
+                          iconId={r.iconId}
+                          nameHint={r.label}
+                          category={r.iconCategory}
+                          size={20}
+                          className="shrink-0"
+                        />
+                        <span className="text-[#26352D] truncate">{t('nav.machinery')} · {r.label}</span>
+                      </div>
                       <span className="font-semibold text-[#C44545] shrink-0">
                         {fmt(r.amount)}
                       </span>
                     </div>
                   ))}
                   {consolidatedData.gastosPropPorConcepto.map((r) => (
-                    <div key={`gp_${r.key}`} className="px-4 py-2.5 flex items-center justify-between gap-2">
-                      <span className="text-[#26352D] truncate">{t('nav.property')} · {r.label}</span>
+                    <div key={`gp_${r.key}`} className="px-3.5 py-2 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <VisualIcon
+                          iconId={r.iconId}
+                          nameHint={r.label}
+                          category={r.iconCategory}
+                          size={20}
+                          className="shrink-0"
+                        />
+                        <span className="text-[#26352D] truncate">{t('nav.property')} · {r.label}</span>
+                      </div>
                       <span className="font-semibold text-[#C44545] shrink-0">
                         {fmt(r.amount)}
                       </span>
@@ -2348,7 +2461,7 @@ const ReportsViewInner: React.FC<Props> = ({
                   ))}
                   {consolidatedData.gastosMaqPorConcepto.length === 0 &&
                     consolidatedData.gastosPropPorConcepto.length === 0 && (
-                      <p className="px-4 py-5 text-center text-xs text-[#7A8780]">
+                      <p className="px-3.5 py-4 text-center text-xs text-[#7A8780]">
                         {bi(
                           'No hay gastos en esta campaña.',
                           'No expenses in this campaign.'

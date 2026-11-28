@@ -34,6 +34,8 @@ import {
   DebitNoteRecord,
   PaymentReceiptLine,
   PaymentReceiptRecord,
+  DuplicateCheckResult,
+  DuplicateConfirmationPayload,
 } from '../types';
 import {
   getCacheSessionGeneration,
@@ -71,18 +73,30 @@ export class BackendError extends Error {
   readonly kind: BackendErrorKind;
   readonly status?: number;
   readonly code?: string;
+  readonly duplicateCheck?: DuplicateCheckResult;
 
   constructor(
     message: string,
     kind: BackendErrorKind = 'unknown',
-    options?: { status?: number; code?: string }
+    options?: { status?: number; code?: string; duplicateCheck?: DuplicateCheckResult }
   ) {
     super(message);
     this.name = 'BackendError';
     this.kind = kind;
     this.status = options?.status;
     this.code = options?.code;
+    this.duplicateCheck = options?.duplicateCheck;
   }
+}
+
+export function isPossibleDuplicateError(
+  err: unknown
+): err is BackendError & { duplicateCheck: DuplicateCheckResult } {
+  return (
+    err instanceof BackendError &&
+    err.code === 'POSSIBLE_DUPLICATE' &&
+    Boolean(err.duplicateCheck && Array.isArray(err.duplicateCheck.matches) && err.duplicateCheck.matches.length > 0)
+  );
 }
 
 function isLikelyCredentialErrorMessage(msg: string, code?: string): boolean {
@@ -651,7 +665,14 @@ async function callGAS<T>(action: string, payload: Record<string, any> = {}, use
         ? 'server'
         : 'unknown';
 
-      throw new BackendError(rawErrMsg, kind, { status: response.status, code });
+      throw new BackendError(rawErrMsg, kind, {
+        status: response.status,
+        code,
+        duplicateCheck:
+          code === 'POSSIBLE_DUPLICATE' && data.duplicateCheck && typeof data.duplicateCheck === 'object'
+            ? (data.duplicateCheck as DuplicateCheckResult)
+            : undefined,
+      });
     }
 
     // Preserve sibling fields (e.g. `harvests`, `distributions`) when an endpoint returns an array in `result`
@@ -1826,7 +1847,10 @@ export async function getMachineryJobs(campanaId?: string, useCache = true): Pro
   return list.map(normalizeMachineryJob);
 }
 
-export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise<MachineryJob> {
+export async function createMachineryJob(
+  job: Omit<MachineryJob, 'id'>,
+  options?: { idempotencyKey?: string; duplicateConfirmation?: DuplicateConfirmationPayload }
+): Promise<MachineryJob> {
   const rawU = String(job.unidad || '').toLowerCase();
   const codeUnidad: 'hora' | 'ha' = rawU.includes('hora') || rawU === 'h' ? 'hora' : 'ha';
   const cantNum = parseDecimalNumber(job.cantidad);
@@ -1887,6 +1911,8 @@ export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise
     tipoCambio: tcNum,
     observacion: finalObs,
     observaciones: finalObs,
+    ...(options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
+    ...(options?.duplicateConfirmation ? { duplicateConfirmation: options.duplicateConfirmation } : {}),
   };
 
   const payload = {
@@ -1907,7 +1933,8 @@ export async function createMachineryJob(job: Omit<MachineryJob, 'id'>): Promise
 
 export async function updateMachineryJob(
   id: string,
-  job: Partial<MachineryJob>
+  job: Partial<MachineryJob>,
+  options?: { duplicateConfirmation?: DuplicateConfirmationPayload }
 ): Promise<MachineryJob & { cuenta?: CobroCuenta | null }> {
   const rawU = String(job.unidad || '').toLowerCase();
   const codeUnidad: 'hora' | 'ha' = rawU.includes('hora') || rawU === 'h' ? 'hora' : 'ha';
@@ -1977,6 +2004,7 @@ export async function updateMachineryJob(
     ...(gasMoneda ? { moneda: gasMoneda } : {}),
     ...(tcNum !== undefined && tcNum > 0 ? { tc: tcNum, tipoCambio: tcNum } : {}),
     ...(finalObs !== undefined ? { observacion: finalObs, observaciones: finalObs } : {}),
+    ...(options?.duplicateConfirmation ? { duplicateConfirmation: options.duplicateConfirmation } : {}),
   };
 
   const payload = {
@@ -1990,6 +2018,7 @@ export async function updateMachineryJob(
   try {
     res = await callGAS<any>('work.update', payload);
   } catch (err: any) {
+    if (isPossibleDuplicateError(err)) throw err;
     const msg = String(err?.message || '').toLowerCase();
     if (msg.includes('acción no reconocida') || msg.includes('accion no reconocida') || msg.includes('unknown action')) {
       res = await callGAS<any>('work.save', payload);
@@ -2057,6 +2086,7 @@ export async function getExpenses(campanaId?: string, modulo?: 'maquinarias' | '
         maquinariaNombre: e.maquinariaNombre || undefined,
         loteId: e.loteId || undefined,
         loteNombre: e.loteNombre || undefined,
+        itemId: e.itemId ? String(e.itemId).trim() : undefined,
         itemGasto: String(e.descripcion || e.itemGasto || e.item || 'Gasto'),
         icono: e.icono ? String(e.icono).trim() : undefined,
         cantidad: cant,
@@ -2082,7 +2112,10 @@ export async function getExpenses(campanaId?: string, modulo?: 'maquinarias' | '
   return filtered;
 }
 
-export async function createExpense(expense: Omit<Expense, 'id'>): Promise<Expense> {
+export async function createExpense(
+  expense: Omit<Expense, 'id'>,
+  options?: { idempotencyKey?: string; duplicateConfirmation?: DuplicateConfirmationPayload }
+): Promise<Expense> {
   const cantNum = parseDecimalNumber(expense.cantidad) || 1;
   const precioNum = parseDecimalNumber(expense.precio);
   const totalNum = parseDecimalNumber(expense.total) || cantNum * precioNum;
@@ -2096,6 +2129,7 @@ export async function createExpense(expense: Omit<Expense, 'id'>): Promise<Expen
     tipo: 'gasto',
     fecha: expense.fecha,
     campanaId: expense.campanaId,
+    ...(expense.itemId ? { itemId: expense.itemId } : {}),
     descripcion: expense.itemGasto,
     item: expense.itemGasto,
     itemGasto: expense.itemGasto,
@@ -2112,6 +2146,8 @@ export async function createExpense(expense: Omit<Expense, 'id'>): Promise<Expen
     observacion: expense.observacion || '',
     ...(expense.maquinariaId ? { maquinaId: expense.maquinariaId, maquinariaId: expense.maquinariaId } : {}),
     ...(expense.loteId ? { loteId: expense.loteId } : {}),
+    ...(options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
+    ...(options?.duplicateConfirmation ? { duplicateConfirmation: options.duplicateConfirmation } : {}),
   };
 
   const res = await callGAS<any>('movement.save', payload);
@@ -2123,7 +2159,11 @@ export async function createExpense(expense: Omit<Expense, 'id'>): Promise<Expen
   };
 }
 
-export async function updateExpense(id: string, expense: Partial<Expense>): Promise<Expense> {
+export async function updateExpense(
+  id: string,
+  expense: Partial<Expense>,
+  options?: { duplicateConfirmation?: DuplicateConfirmationPayload }
+): Promise<Expense> {
   const cantNum = expense.cantidad !== undefined ? (parseDecimalNumber(expense.cantidad) || 1) : undefined;
   const precioNum = expense.precio !== undefined ? parseDecimalNumber(expense.precio) : undefined;
   const gasMoneda = expense.moneda ? (expense.moneda === 'USD' ? 'USD' : 'BS') : undefined;
@@ -2145,6 +2185,7 @@ export async function updateExpense(id: string, expense: Partial<Expense>): Prom
     ...(gasModulo ? { modulo: gasModulo } : {}),
     ...(expense.fecha ? { fecha: expense.fecha } : {}),
     ...(expense.campanaId ? { campanaId: expense.campanaId } : {}),
+    ...(expense.itemId !== undefined ? { itemId: expense.itemId } : {}),
     ...(expense.itemGasto ? { descripcion: expense.itemGasto, item: expense.itemGasto, itemGasto: expense.itemGasto } : {}),
     ...(cantNum !== undefined ? { cantidad: cantNum } : {}),
     ...(expense.unidad !== undefined ? { unidad: expense.unidad } : {}),
@@ -2155,15 +2196,18 @@ export async function updateExpense(id: string, expense: Partial<Expense>): Prom
     ...(expense.observacion !== undefined ? { observaciones: expense.observacion, observacion: expense.observacion } : {}),
     ...(expense.loteId !== undefined ? { loteId: expense.loteId } : {}),
     ...(expense.maquinariaId !== undefined ? { maquinaId: expense.maquinariaId, maquinariaId: expense.maquinariaId } : {}),
+    ...(options?.duplicateConfirmation ? { duplicateConfirmation: options.duplicateConfirmation } : {}),
   };
 
   let res: any;
   try {
     res = await callGAS<any>('updateExpense', payload);
-  } catch {
+  } catch (err1: any) {
+    if (isPossibleDuplicateError(err1)) throw err1;
     try {
       res = await callGAS<any>('movement.update', payload);
-    } catch {
+    } catch (err2: any) {
+      if (isPossibleDuplicateError(err2)) throw err2;
       res = await callGAS<any>('movement.save', payload);
     }
   }
@@ -3353,6 +3397,7 @@ export async function createHarvest(params: {
   unidad?: string;
   observacion?: string;
   idempotencyKey?: string;
+  duplicateConfirmation?: DuplicateConfirmationPayload;
 }): Promise<HarvestRecord> {
   const tons = parseDecimalNumber(params.toneladas);
   if (!params.campanaId) throw new Error('Selecciona la campaña de la cosecha.');
@@ -3372,6 +3417,9 @@ export async function createHarvest(params: {
   };
   if (params.conceptoId && params.conceptoId.trim()) {
     payload.conceptoId = params.conceptoId.trim();
+  }
+  if (params.duplicateConfirmation) {
+    payload.duplicateConfirmation = params.duplicateConfirmation;
   }
 
   const res = await callGAS<any>('harvest.create', payload, false);
@@ -3394,6 +3442,7 @@ export async function updateHarvest(
     toneladas?: number;
     unidad?: string;
     observacion?: string;
+    duplicateConfirmation?: DuplicateConfirmationPayload;
   }
 ): Promise<HarvestRecord> {
   if (!id || !id.trim()) {
@@ -3419,6 +3468,9 @@ export async function updateHarvest(
   }
   if (params.observacion !== undefined) {
     payload.observacion = params.observacion.trim();
+  }
+  if (params.duplicateConfirmation) {
+    payload.duplicateConfirmation = params.duplicateConfirmation;
   }
 
   const res = await callGAS<any>('harvest.update', payload, false);
@@ -3533,6 +3585,9 @@ export async function allocateExpense(params: {
   lotes: Array<{ loteId: string; hectareas: number }>;
   itemId?: string;
   observacion?: string;
+  grupoId?: string;
+  idempotencyKey?: string;
+  duplicateConfirmation?: DuplicateConfirmationPayload;
 }): Promise<{ grupo: ExpenseAllocationGroup | null; raw: any }> {
   const importeNum = parseDecimalNumber(params.importe);
   const tcNum = resolveEffectiveExchangeRate(params.tc);
@@ -3559,7 +3614,7 @@ export async function allocateExpense(params: {
   }
 
   const gasMoneda = params.moneda === 'USD' ? 'USD' : 'BOB';
-  const payload = {
+  const payload: Record<string, any> = {
     fecha: params.fecha,
     campanaId: params.campanaId,
     descripcion: params.descripcion.trim(),
@@ -3570,6 +3625,9 @@ export async function allocateExpense(params: {
     itemId: params.itemId || '',
     observacion: (params.observacion || '').trim(),
   };
+  if (params.grupoId) payload.grupoId = params.grupoId;
+  if (params.idempotencyKey) payload.idempotencyKey = params.idempotencyKey;
+  if (params.duplicateConfirmation) payload.duplicateConfirmation = params.duplicateConfirmation;
 
   // Single backend request: GAS generates the per-lot movements and allocation group
   const res = await callGAS<any>('expense.allocate', payload, false);

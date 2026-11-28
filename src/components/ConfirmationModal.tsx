@@ -25,6 +25,8 @@ export interface ConfirmationModalProps {
   confirmTone?: 'danger' | 'success' | 'amber';
   singleButton?: boolean;
   customActions?: React.ReactNode;
+  bodyContent?: React.ReactNode;
+  zIndexClass?: string;
 }
 
 export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
@@ -45,6 +47,8 @@ export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
   confirmTone = 'danger',
   singleButton = false,
   customActions,
+  bodyContent,
+  zIndexClass = 'z-50',
 }) => {
   const { t, bi } = useI18n();
   if (!isOpen) return null;
@@ -53,7 +57,7 @@ export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
   const iconBg = isDanger ? 'bg-[#FCECEC] text-[#C44545]' : 'bg-amber-50 text-amber-600';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26352D]/45 p-4 backdrop-blur-xs animate-fade-in">
+    <div className={`fixed inset-0 ${zIndexClass} flex items-center justify-center bg-[#26352D]/45 p-4 backdrop-blur-xs animate-fade-in`}>
       <div className="w-full max-w-sm sm:max-w-md rounded-2xl bg-white p-4 sm:p-5 shadow-xl border border-[#E2E7E3] space-y-3.5">
         {/* Header */}
         <div className="flex items-center gap-3">
@@ -86,6 +90,12 @@ export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
           </div>
         )}
 
+        {/* Bottom / Lead Message */}
+        {message && <p className="text-xs text-[#526058] leading-relaxed">{message}</p>}
+
+        {/* Optional Custom Body Slot (e.g. duplicate match list) */}
+        {bodyContent}
+
         {/* Error Banner */}
         {errorMsg && (
           <div className="rounded-xl border border-[#C44545]/30 bg-[#FCECEC] px-3 py-2.5 text-xs font-medium text-[#962D2D] flex items-start gap-2">
@@ -93,9 +103,6 @@ export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
             <span className="break-words">{errorMsg}</span>
           </div>
         )}
-
-        {/* Bottom Message */}
-        {message && <p className="text-xs text-[#526058] leading-relaxed">{message}</p>}
 
         {/* Actions / Buttons */}
         <div className="pt-1">

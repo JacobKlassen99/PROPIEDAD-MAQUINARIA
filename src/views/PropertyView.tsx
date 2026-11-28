@@ -65,6 +65,8 @@ import {
   MachineJobType,
   Customer,
   PaymentSettings,
+  DuplicateCheckResult,
+  DuplicateConfirmationPayload,
 } from '../types';
 import { HarvestSalesView } from './HarvestSalesView';
 import {
@@ -76,6 +78,7 @@ import {
   formatDateDDMMAAAA,
   hasAdminAuthorization,
   isTechnicalId,
+  isPossibleDuplicateError,
   parseDecimalNumber,
   getHarvests,
   getPendingHarvests,
@@ -91,6 +94,7 @@ import {
   toBoliviaIsoDate,
 } from '../services/backend';
 import { ConfirmationModal } from '../components/ConfirmationModal';
+import { DuplicateWarningModal } from '../components/DuplicateWarningModal';
 import { isDirectPropertyIncome } from '../services/financialSummary';
 import { countAvailableHarvests } from '../services/harvestAvailability';
 import {
@@ -264,6 +268,17 @@ export const PropertyView: React.FC<Props> = ({
   const [harvUnidad, setHarvUnidad] = useState('toneladas');
   const [harvObs, setHarvObs] = useState('');
   const harvIdempotencyRef = useRef<string>(`harv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  const expIdempotencyRef = useRef<string>(`pexp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  const allocGroupIdRef = useRef<string>(`alloc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+
+  // Duplicate warning modal state
+  const [pendingDuplicate, setPendingDuplicate] = useState<{
+    duplicateCheck: DuplicateCheckResult;
+    onConfirmAction: (confirmation: DuplicateConfirmationPayload) => Promise<void>;
+  } | null>(null);
+  const [confirmingDuplicate, setConfirmingDuplicate] = useState(false);
+  const [duplicateModalError, setDuplicateModalError] = useState<string | null>(null);
+  const confirmingDuplicateRef = useRef(false);
 
   // Filters for Pending / Listed Harvests (persisted in memory; data managed via shared SWR cache below)
   const [pendientesMode, setPendientesMode] = usePersistedMemoryState<'pendientes' | 'todas'>('property.pendientes.mode', 'pendientes');
@@ -354,7 +369,33 @@ export const PropertyView: React.FC<Props> = ({
         : ''
     );
     setExpObs('');
+    expIdempotencyRef.current = `pexp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    allocGroupIdRef.current = `alloc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     setErrorMsg(null);
+  };
+
+  const handleConfirmPendingDuplicate = async () => {
+    if (!pendingDuplicate || confirmingDuplicateRef.current) return;
+    confirmingDuplicateRef.current = true;
+    setConfirmingDuplicate(true);
+    setDuplicateModalError(null);
+    const confirmation: DuplicateConfirmationPayload = {
+      confirmed: true,
+      fingerprint: pendingDuplicate.duplicateCheck.fingerprint,
+      matchSignature: pendingDuplicate.duplicateCheck.matchSignature,
+    };
+    try {
+      await pendingDuplicate.onConfirmAction(confirmation);
+    } finally {
+      confirmingDuplicateRef.current = false;
+      setConfirmingDuplicate(false);
+    }
+  };
+
+  const handleCancelPendingDuplicate = () => {
+    if (confirmingDuplicateRef.current) return;
+    setPendingDuplicate(null);
+    setDuplicateModalError(null);
   };
 
   // Automatic USD <-> Bs conversion handlers across all property forms
@@ -780,48 +821,63 @@ export const PropertyView: React.FC<Props> = ({
       }
 
       const lotObj = lots.find((l) => l.id === expLotId);
-      setSaving(true);
-      try {
-        await createExpense({
-          fecha: expFecha,
-          campanaId: activeCampaign.id,
-          modulo: 'propiedad',
-          loteId: expLotId,
-          loteNombre: lotObj?.nombre,
-          itemGasto: expItem,
-          icono: selectedItemObj?.icono,
-          cantidad: cantNum,
-          unidad: expUnidad,
-          precio: Number(expPrecio),
-          moneda: expMoneda,
-          tipoCambio: tcNum,
-          total: totalExp,
-          observacion: expObs.trim(),
-        });
+      const submitSingleExpense = async (duplicateConfirmation?: DuplicateConfirmationPayload) => {
+        setSaving(true);
+        try {
+          await createExpense(
+            {
+              fecha: expFecha,
+              campanaId: activeCampaign.id,
+              modulo: 'propiedad',
+              loteId: expLotId,
+              loteNombre: lotObj?.nombre,
+              itemId: selectedItemObj?.id,
+              itemGasto: expItem,
+              icono: selectedItemObj?.icono,
+              cantidad: cantNum,
+              unidad: expUnidad,
+              precio: Number(expPrecio),
+              moneda: expMoneda,
+              tipoCambio: tcNum,
+              total: totalExp,
+              observacion: expObs.trim(),
+            },
+            {
+              idempotencyKey: expIdempotencyRef.current,
+              duplicateConfirmation,
+            }
+          );
 
-        setSuccessMsg(bi('Gasto agrícola registrado en el lote seleccionado.', 'Agricultural expense recorded for the selected lot.'));
-        setExpLotId('');
-        setExpItem('');
-        setExpCantidad(1);
-        setExpUnidad('');
-        setExpPrecio('');
-        setExpObs('');
-        setExpTc(
-          exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
-            ? String(exchangeRate.tasaBobPerUsd)
-            : ''
-        );
-        setCurrentScreen('main');
-        onRefreshData('movements');
-      } catch (err: unknown) {
-        setErrorMsg(
-          err instanceof Error
-            ? translateError(err.message)
-            : bi('Error al registrar el gasto agrícola', 'Error recording the agricultural expense')
-        );
-      } finally {
-        setSaving(false);
-      }
+          setPendingDuplicate(null);
+          setDuplicateModalError(null);
+          setSuccessMsg(bi('Gasto agrícola registrado en el lote seleccionado.', 'Agricultural expense recorded for the selected lot.'));
+          resetNewExpenseForm();
+          setCurrentScreen('main');
+          onRefreshData('movements');
+        } catch (err: unknown) {
+          if (isPossibleDuplicateError(err)) {
+            setDuplicateModalError(null);
+            setPendingDuplicate({
+              duplicateCheck: err.duplicateCheck,
+              onConfirmAction: submitSingleExpense,
+            });
+            return;
+          }
+          const translated =
+            err instanceof Error
+              ? translateError(err.message)
+              : bi('Error al registrar el gasto agrícola', 'Error recording the agricultural expense');
+          if (duplicateConfirmation) {
+            setDuplicateModalError(translated);
+          } else {
+            setErrorMsg(translated);
+          }
+        } finally {
+          setSaving(false);
+        }
+      };
+
+      await submitSingleExpense();
       return;
     }
 
@@ -860,73 +916,82 @@ export const PropertyView: React.FC<Props> = ({
       return;
     }
 
-    if (saving) return;
-    setSaving(true);
-    setSavingProgress(
-      bi(
-        `Distribuyendo gasto entre ${multiLotBreakdown.length} lotes...`,
-        `Distributing expense across ${multiLotBreakdown.length} lots...`
-      )
-    );
-    try {
-      await allocateExpense({
-        fecha: expFecha,
-        campanaId: activeCampaign.id,
-        descripcion: expItem.trim(),
-        importe: totalExp,
-        moneda: expMoneda,
-        tc: tcNum,
-        lotes: multiLotBreakdown.map((entry) => ({
-          loteId: entry.lot.id,
-          hectareas: entry.ha,
-        })),
-        itemId: selectedItemObj?.id || '',
-        observacion: expObs.trim(),
-      });
-
-      const formattedAmt = `${expMoneda === 'USD' ? 'USD' : 'Bs'} ${totalExp.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-      setSuccessMsg(
+    if (saving || confirmingDuplicateRef.current) return;
+    const submitAllocatedExpense = async (duplicateConfirmation?: DuplicateConfirmationPayload) => {
+      setSaving(true);
+      setSavingProgress(
         bi(
-          `Gasto distribuido proporcionalmente en ${multiLotBreakdown.length} lotes (${formattedAmt}).`,
-          `Expense proportionally distributed across ${multiLotBreakdown.length} lots (${formattedAmt}).`
+          `Distribuyendo gasto entre ${multiLotBreakdown.length} lotes...`,
+          `Distributing expense across ${multiLotBreakdown.length} lots...`
         )
       );
-      setExpLotId('');
-      setExpItem('');
-      setExpCantidad(1);
-      setExpUnidad('');
-      setExpPrecio('');
-      setExpObs('');
-      setExpMultiLotHa({});
-      setExpLotMode('single');
-      setExpTc(
-        exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
-          ? String(exchangeRate.tasaBobPerUsd)
-          : ''
-      );
-      setCurrentScreen('main');
-      invalidateQueries(['expense.allocations']);
-      onRefreshData('movements');
-      loadExpenseAllocations();
-    } catch (err: unknown) {
-      setErrorMsg(
-        err instanceof Error
-          ? translateError(err.message)
-          : bi(
-              'Error al registrar el gasto distribuido en el backend (expense.allocate).',
-              'Error recording distributed expense on the server (expense.allocate).'
-            )
-      );
-    } finally {
-      setSavingProgress(null);
-      setSaving(false);
-    }
+      try {
+        await allocateExpense({
+          fecha: expFecha,
+          campanaId: activeCampaign.id,
+          descripcion: expItem.trim(),
+          importe: totalExp,
+          moneda: expMoneda,
+          tc: tcNum,
+          lotes: multiLotBreakdown.map((entry) => ({
+            loteId: entry.lot.id,
+            hectareas: entry.ha,
+          })),
+          itemId: selectedItemObj?.id || '',
+          observacion: expObs.trim(),
+          grupoId: allocGroupIdRef.current,
+          idempotencyKey: allocGroupIdRef.current,
+          duplicateConfirmation,
+        });
+
+        setPendingDuplicate(null);
+        setDuplicateModalError(null);
+        const formattedAmt = `${expMoneda === 'USD' ? 'USD' : 'Bs'} ${totalExp.toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        setSuccessMsg(
+          bi(
+            `Gasto distribuido proporcionalmente en ${multiLotBreakdown.length} lotes (${formattedAmt}).`,
+            `Expense proportionally distributed across ${multiLotBreakdown.length} lots (${formattedAmt}).`
+          )
+        );
+        resetNewExpenseForm();
+        setCurrentScreen('main');
+        invalidateQueries(['expense.allocations']);
+        onRefreshData('movements');
+        loadExpenseAllocations();
+      } catch (err: unknown) {
+        if (isPossibleDuplicateError(err)) {
+          setDuplicateModalError(null);
+          setPendingDuplicate({
+            duplicateCheck: err.duplicateCheck,
+            onConfirmAction: submitAllocatedExpense,
+          });
+          return;
+        }
+        const translated =
+          err instanceof Error
+            ? translateError(err.message)
+            : bi(
+                'Error al registrar el gasto distribuido en el backend (expense.allocate).',
+                'Error recording distributed expense on the server (expense.allocate).'
+              );
+        if (duplicateConfirmation) {
+          setDuplicateModalError(translated);
+        } else {
+          setErrorMsg(translated);
+        }
+      } finally {
+        setSavingProgress(null);
+        setSaving(false);
+      }
+    };
+
+    await submitAllocatedExpense();
   };
 
   // Submit Cosecha (production only — increases warehouse stock, creates NO financial income)
   const handleCreateHarvestSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (saving) return;
+    if (saving || confirmingDuplicateRef.current) return;
     setErrorMsg(null);
     setSuccessMsg(null);
 
@@ -961,53 +1026,72 @@ export const PropertyView: React.FC<Props> = ({
 
     const unitToSave = (harvUnidad || 'toneladas').trim() || 'toneladas';
 
-    setSaving(true);
-    try {
-      const createdHarvest = await createHarvest({
-        fecha: harvFecha,
-        campanaId: targetCampId,
-        loteId: harvLotId,
-        conceptoId: selectedConcept.id,
-        producto: selectedConcept.nombre,
-        toneladas: qtyNum,
-        unidad: unitToSave,
-        observacion: harvObs.trim(),
-        idempotencyKey: harvIdempotencyRef.current,
-      });
+    const submitHarvestPayload = async (duplicateConfirmation?: DuplicateConfirmationPayload) => {
+      setSaving(true);
+      try {
+        const createdHarvest = await createHarvest({
+          fecha: harvFecha,
+          campanaId: targetCampId,
+          loteId: harvLotId,
+          conceptoId: selectedConcept.id,
+          producto: selectedConcept.nombre,
+          toneladas: qtyNum,
+          unidad: unitToSave,
+          observacion: harvObs.trim(),
+          idempotencyKey: harvIdempotencyRef.current,
+          duplicateConfirmation,
+        });
 
-      if (createdHarvest?.id) {
-        patchHarvestAcrossCaches(createdHarvest);
+        setPendingDuplicate(null);
+        setDuplicateModalError(null);
+        if (createdHarvest?.id) {
+          patchHarvestAcrossCaches(createdHarvest);
+        }
+        const qtyStr = (createdHarvest?.toneladas || qtyNum).toLocaleString('es-BO', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        });
+        const displayUnit = createdHarvest?.unidad || 't';
+        setSuccessMsg(
+          bi(
+            `Cosecha registrada en almacén (${qtyStr} ${displayUnit} de ${selectedConcept.nombre}).`,
+            `Harvest added to warehouse (${qtyStr} ${displayUnit} of ${selectedConcept.nombre}).`
+          )
+        );
+        resetNewHarvestForm();
+        setCurrentScreen('main');
+        invalidateQueries(['harvest.', 'harvestSale.', 'report.']);
+        await loadPendingHarvests();
+        if (allHarvestsQuery.hasLoaded) {
+          loadAllHarvests().catch(() => {});
+        }
+      } catch (err: unknown) {
+        if (isPossibleDuplicateError(err)) {
+          setDuplicateModalError(null);
+          setPendingDuplicate({
+            duplicateCheck: err.duplicateCheck,
+            onConfirmAction: submitHarvestPayload,
+          });
+          return;
+        }
+        const translated =
+          err instanceof Error
+            ? translateError(err.message)
+            : bi(
+                'Error al registrar cosecha (harvest.create).',
+                'Error recording harvest (harvest.create).'
+              );
+        if (duplicateConfirmation) {
+          setDuplicateModalError(translated);
+        } else {
+          setErrorMsg(translated);
+        }
+      } finally {
+        setSaving(false);
       }
-      const qtyStr = (createdHarvest?.toneladas || qtyNum).toLocaleString('es-BO', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      });
-      const displayUnit = createdHarvest?.unidad || 't';
-      setSuccessMsg(
-        bi(
-          `Cosecha registrada en almacén (${qtyStr} ${displayUnit} de ${selectedConcept.nombre}).`,
-          `Harvest added to warehouse (${qtyStr} ${displayUnit} of ${selectedConcept.nombre}).`
-        )
-      );
-      resetNewHarvestForm();
-      setCurrentScreen('main');
-      invalidateQueries(['harvest.', 'harvestSale.', 'report.']);
-      await loadPendingHarvests();
-      if (allHarvestsQuery.hasLoaded) {
-        loadAllHarvests().catch(() => {});
-      }
-    } catch (err: unknown) {
-      setErrorMsg(
-        err instanceof Error
-          ? translateError(err.message)
-          : bi(
-              'Error al registrar cosecha (harvest.create).',
-              'Error recording harvest (harvest.create).'
-            )
-      );
-    } finally {
-      setSaving(false);
-    }
+    };
+
+    await submitHarvestPayload();
   };
 
   const handleOpenAssignPrice = (harvest: HarvestRecord) => {
@@ -1208,40 +1292,59 @@ export const PropertyView: React.FC<Props> = ({
       return;
     }
 
-    setSavingEditHarvest(true);
-    try {
-      const updatedHarvest = await updateHarvest(editingHarvest.id, {
-        fecha: editHarvFecha,
-        campanaId: hasAsignaciones ? editingHarvest.campanaId : editHarvCampanaId,
-        loteId: hasAsignaciones ? editingHarvest.loteId : editHarvLotId,
-        conceptoId: hasAsignaciones ? editingHarvest.conceptoId : editHarvConceptoId || undefined,
-        producto: hasAsignaciones ? editingHarvest.producto : editHarvProducto.trim(),
-        unidad: hasAsignaciones ? (editingHarvest.unidad || 't') : (editHarvUnidad || 't'),
-        toneladas: tonsNum,
-        observacion: editHarvObs.trim(),
-      });
+    const submitEditHarvestPayload = async (duplicateConfirmation?: DuplicateConfirmationPayload) => {
+      setSavingEditHarvest(true);
+      try {
+        const updatedHarvest = await updateHarvest(editingHarvest.id, {
+          fecha: editHarvFecha,
+          campanaId: hasAsignaciones ? editingHarvest.campanaId : editHarvCampanaId,
+          loteId: hasAsignaciones ? editingHarvest.loteId : editHarvLotId,
+          conceptoId: hasAsignaciones ? editingHarvest.conceptoId : editHarvConceptoId || undefined,
+          producto: hasAsignaciones ? editingHarvest.producto : editHarvProducto.trim(),
+          unidad: hasAsignaciones ? (editingHarvest.unidad || 't') : (editHarvUnidad || 't'),
+          toneladas: tonsNum,
+          observacion: editHarvObs.trim(),
+          duplicateConfirmation,
+        });
 
-      if (updatedHarvest?.id) {
-        patchHarvestAcrossCaches(updatedHarvest);
+        setPendingDuplicate(null);
+        setDuplicateModalError(null);
+        if (updatedHarvest?.id) {
+          patchHarvestAcrossCaches(updatedHarvest);
+        }
+        setEditingHarvest(null);
+        setSuccessMsg(
+          bi(
+            'Cosecha actualizada correctamente en Google Sheets.',
+            'Harvest updated successfully in Google Sheets.'
+          )
+        );
+        invalidateQueries(['harvest.', 'harvestSale.', 'report.']);
+        await Promise.allSettled([loadPendingHarvests(), loadAllHarvests()]);
+      } catch (err: unknown) {
+        if (isPossibleDuplicateError(err)) {
+          setDuplicateModalError(null);
+          setPendingDuplicate({
+            duplicateCheck: err.duplicateCheck,
+            onConfirmAction: submitEditHarvestPayload,
+          });
+          return;
+        }
+        const translated =
+          err instanceof Error
+            ? translateError(err.message)
+            : bi('Error al actualizar la cosecha (harvest.update).', 'Error updating harvest (harvest.update).');
+        if (duplicateConfirmation) {
+          setDuplicateModalError(translated);
+        } else {
+          setEditHarvestError(translated);
+        }
+      } finally {
+        setSavingEditHarvest(false);
       }
-      setEditingHarvest(null);
-      setSuccessMsg(
-        bi(
-          'Cosecha actualizada correctamente en Google Sheets.',
-          'Harvest updated successfully in Google Sheets.'
-        )
-      );
-      invalidateQueries(['harvest.', 'harvestSale.', 'report.']);
-      await Promise.allSettled([loadPendingHarvests(), loadAllHarvests()]);
-    } catch (err: unknown) {
-      setEditHarvestError(
-        err instanceof Error
-          ? translateError(err.message)
-          : bi('Error al actualizar la cosecha (harvest.update).', 'Error updating harvest (harvest.update).')
-      );
-    } finally {
-      setSavingEditHarvest(false);
-    }
+    };
+
+    await submitEditHarvestPayload();
   };
 
   const handlePromptDeleteHarvest = (harvest: HarvestRecord) => {
@@ -1346,51 +1449,79 @@ export const PropertyView: React.FC<Props> = ({
     const tcNum = Number(editTc) > 0 ? Number(editTc) : (exchangeRate?.tasaBobPerUsd || 6.96);
     const lotObj = lots.find((l) => l.id === editLotId);
 
-    setSavingEdit(true);
-    try {
-      if (editingMovement.tipo === 'gasto_directo') {
-        await updateExpense(editingMovement.id, {
-          fecha: editFecha,
-          loteId: editLotId || undefined,
-          loteNombre: lotObj?.nombre || undefined,
-          itemGasto: editConcepto.trim(),
-          cantidad: cantNum,
-          unidad: editUnidad.trim(),
-          precio: precioNum,
-          moneda: editMoneda,
-          tipoCambio: tcNum,
-          total: totalCalc,
-          observacion: editObs.trim(),
-        });
-        setSuccessMsg(bi('Gasto agrícola actualizado en Google Sheets.', 'Agricultural expense updated in Google Sheets.'));
-      } else if (editingMovement.tipo === 'ingreso') {
-        await updateIncome(editingMovement.id, {
-          fecha: editFecha,
-          loteId: editLotId || undefined,
-          loteNombre: lotObj?.nombre || undefined,
-          concepto: editConcepto.trim(),
-          cantidad: cantNum,
-          unidad: editUnidad.trim(),
-          precio: precioNum,
-          moneda: editMoneda,
-          tipoCambio: tcNum,
-          total: totalCalc,
-          observacion: editObs.trim(),
-        });
-        setSuccessMsg(bi('Ingreso de cosecha actualizado en Google Sheets.', 'Harvest income updated in Google Sheets.'));
-      }
+    const matchedEditPropItem = propertyExpenseItems.find(
+      (it) => it.nombre.trim().toLowerCase() === editConcepto.trim().toLowerCase()
+    );
 
-      setEditingMovement(null);
-      onRefreshData('movements');
-    } catch (err: unknown) {
-      setErrorMsg(
-        err instanceof Error
-          ? translateError(err.message)
-          : bi('Error al actualizar el registro', 'Error updating the record')
-      );
-    } finally {
-      setSavingEdit(false);
-    }
+    const submitEditMovementPayload = async (duplicateConfirmation?: DuplicateConfirmationPayload) => {
+      setSavingEdit(true);
+      try {
+        if (editingMovement.tipo === 'gasto_directo') {
+          await updateExpense(
+            editingMovement.id,
+            {
+              fecha: editFecha,
+              modulo: 'propiedad',
+              loteId: editLotId || undefined,
+              loteNombre: lotObj?.nombre || undefined,
+              itemId: matchedEditPropItem?.id ?? '',
+              itemGasto: editConcepto.trim(),
+              cantidad: cantNum,
+              unidad: editUnidad.trim(),
+              precio: precioNum,
+              moneda: editMoneda,
+              tipoCambio: tcNum,
+              total: totalCalc,
+              observacion: editObs.trim(),
+            },
+            { duplicateConfirmation }
+          );
+          setSuccessMsg(bi('Gasto agrícola actualizado en Google Sheets.', 'Agricultural expense updated in Google Sheets.'));
+        } else if (editingMovement.tipo === 'ingreso') {
+          await updateIncome(editingMovement.id, {
+            fecha: editFecha,
+            loteId: editLotId || undefined,
+            loteNombre: lotObj?.nombre || undefined,
+            concepto: editConcepto.trim(),
+            cantidad: cantNum,
+            unidad: editUnidad.trim(),
+            precio: precioNum,
+            moneda: editMoneda,
+            tipoCambio: tcNum,
+            total: totalCalc,
+            observacion: editObs.trim(),
+          });
+          setSuccessMsg(bi('Ingreso de cosecha actualizado en Google Sheets.', 'Harvest income updated in Google Sheets.'));
+        }
+
+        setPendingDuplicate(null);
+        setDuplicateModalError(null);
+        setEditingMovement(null);
+        onRefreshData('movements');
+      } catch (err: unknown) {
+        if (isPossibleDuplicateError(err)) {
+          setDuplicateModalError(null);
+          setPendingDuplicate({
+            duplicateCheck: err.duplicateCheck,
+            onConfirmAction: submitEditMovementPayload,
+          });
+          return;
+        }
+        const translated =
+          err instanceof Error
+            ? translateError(err.message)
+            : bi('Error al actualizar el registro', 'Error updating the record');
+        if (duplicateConfirmation) {
+          setDuplicateModalError(translated);
+        } else {
+          setErrorMsg(translated);
+        }
+      } finally {
+        setSavingEdit(false);
+      }
+    };
+
+    await submitEditMovementPayload();
   };
 
   const handlePromptDeleteExp = (id: string, titulo: string) => {
@@ -4306,6 +4437,13 @@ export const PropertyView: React.FC<Props> = ({
           </div>
         );
       })()}
+      <DuplicateWarningModal
+        duplicateCheck={pendingDuplicate?.duplicateCheck || null}
+        isConfirming={confirmingDuplicate}
+        errorMsg={duplicateModalError}
+        onCancel={handleCancelPendingDuplicate}
+        onConfirm={handleConfirmPendingDuplicate}
+      />
     </div>
   );
 };

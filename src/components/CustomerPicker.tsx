@@ -160,7 +160,7 @@ export const CustomerPicker: React.FC<CustomerPickerProps> = ({
             </div>
 
             {/* List */}
-            <div className="flex-1 overflow-y-auto divide-y divide-[#EFF2EF]">
+            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-1">
               {allowPending && onSelectPending && (
                 <button
                   type="button"
@@ -168,17 +168,17 @@ export const CustomerPicker: React.FC<CustomerPickerProps> = ({
                     onSelectPending();
                     setOpen(false);
                   }}
-                  className={`w-full px-4 py-3 flex items-center justify-between gap-2 text-left transition cursor-pointer ${
+                  className={`w-full px-3 py-1.5 rounded-xl border flex items-center justify-between gap-2.5 text-left transition cursor-pointer ${
                     isPending && !selectedCustomer
-                      ? 'bg-amber-50 text-amber-900'
-                      : 'hover:bg-[#F5F7F4] text-[#26352D]'
+                      ? 'border-amber-400 bg-amber-50 text-amber-950 shadow-xs'
+                      : 'border-stone-200 bg-white hover:bg-stone-50 text-[#26352D]'
                   }`}
                 >
                   <div className="flex items-center gap-2.5 min-w-0">
                     <Clock className="h-4 w-4 shrink-0 text-amber-600" />
                     <div className="min-w-0">
                       <p className="text-sm font-bold truncate">{effectivePendingLabel}</p>
-                      <p className="text-[11px] text-[#64746B] truncate">
+                      <p className="text-[11px] text-[#64746B] truncate leading-tight">
                         {bi(
                           'Guardar sin cliente asignado para completar después',
                           'Save without customer to complete later'
@@ -217,12 +217,14 @@ export const CustomerPicker: React.FC<CustomerPickerProps> = ({
                         onSelectCustomer(c);
                         setOpen(false);
                       }}
-                      className={`w-full px-4 py-3 flex items-center justify-between gap-2 text-left transition cursor-pointer ${
-                        active ? 'bg-[#EAF5EE] text-[#1D5C3F]' : 'hover:bg-[#F5F7F4] text-[#26352D]'
+                      className={`w-full px-3 py-1.5 rounded-xl border flex items-center justify-between gap-2.5 text-left transition cursor-pointer ${
+                        active
+                          ? 'border-[#24875B] bg-[#EAF5EE] text-[#1D5C3F] ring-2 ring-[#24875B]/15 shadow-xs'
+                          : 'border-stone-200 bg-white hover:bg-stone-50 text-[#26352D]'
                       }`}
                     >
-                      <div className="min-w-0">
-                        <p className="text-sm font-semibold truncate">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-bold truncate">
                           {c.nombre}
                           {!c.activo && (
                             <span className="ml-1.5 text-[11px] font-medium text-[#7A8780]">
@@ -231,12 +233,12 @@ export const CustomerPicker: React.FC<CustomerPickerProps> = ({
                           )}
                         </p>
                         {(c.telefono || c.direccion) && (
-                          <p className="text-xs text-[#64746B] truncate">
+                          <p className="text-[11px] text-[#64746B] truncate leading-tight">
                             {[c.telefono, c.direccion].filter(Boolean).join(' · ')}
                           </p>
                         )}
                       </div>
-                      {active && <Check className="h-4 w-4 shrink-0 text-[#24875B]" />}
+                      {active && <Check className="h-4 w-4 shrink-0 text-[#24875B] ml-2" />}
                     </button>
                   );
                 })

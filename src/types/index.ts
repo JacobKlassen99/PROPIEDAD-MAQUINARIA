@@ -101,6 +101,7 @@ export interface Expense {
   maquinariaIcono?: string;
   loteId?: string;
   loteNombre?: string;
+  itemId?: string;
   itemGasto: string;
   itemIcono?: string;
   icono?: string;
@@ -642,4 +643,49 @@ export interface PaymentReceiptRecord {
   creadoPor?: string;
   creadoEn?: string;
 }
+
+// -------------------------------------------------------------
+// Duplicate Protection (30-day operational window)
+// -------------------------------------------------------------
+export type DuplicateEntityType =
+  | 'service_external'
+  | 'job_property'
+  | 'expense'
+  | 'expense_allocated'
+  | 'harvest';
+
+export interface DuplicateMatchItem {
+  id: string;
+  entityType: DuplicateEntityType;
+  fecha: string;
+  campanaId?: string;
+  campanaNombre?: string;
+  modulo?: 'MAQUINARIAS' | 'PROPIEDAD';
+  maquinariaNombre?: string;
+  implementoNombre?: string;
+  conceptoNombre?: string;
+  productoNombre?: string;
+  clienteNombre?: string;
+  clientePendiente?: boolean;
+  loteNombre?: string;
+  lotesResumen?: string;
+  cantidad?: number;
+  unidad?: string;
+  importe?: number;
+  moneda?: Currency;
+}
+
+export interface DuplicateConfirmationPayload {
+  confirmed: true;
+  fingerprint: string;
+  matchSignature: string;
+}
+
+export interface DuplicateCheckResult {
+  entityType: DuplicateEntityType;
+  fingerprint: string;
+  matchSignature: string;
+  matches: DuplicateMatchItem[];
+}
+
 

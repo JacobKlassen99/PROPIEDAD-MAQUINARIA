@@ -46,6 +46,8 @@ import {
   CobroCuenta,
   Customer,
   PaymentSettings,
+  DuplicateCheckResult,
+  DuplicateConfirmationPayload,
 } from '../types';
 import {
   createMachineryJob,
@@ -58,6 +60,7 @@ import {
   hasAdminAuthorization,
   isTechnicalId,
   isVirtualMachineOnlyImplement,
+  isPossibleDuplicateError,
   parseDecimalNumber,
   getCobroEstado,
   compareChronologicalDesc,
@@ -65,6 +68,7 @@ import {
   getBoliviaTodayIso,
   toBoliviaIsoDate,
 } from '../services/backend';
+import { DuplicateWarningModal } from '../components/DuplicateWarningModal';
 import { resolveJobDisplay } from '../services/jobDisplay';
 import { addDaysToIso } from '../services/interestEngine';
 import {
@@ -254,6 +258,19 @@ export const MachineryView: React.FC<Props> = ({
   );
   const [expObservacion, setExpObservacion] = useState('');
 
+  // Stable request-level idempotency keys (preserved across duplicate confirmation retries; regenerated on reset/success)
+  const jobIdempotencyRef = useRef<string>(`job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  const expIdempotencyRef = useRef<string>(`mexp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+
+  // Duplicate warning modal state
+  const [pendingDuplicate, setPendingDuplicate] = useState<{
+    duplicateCheck: DuplicateCheckResult;
+    onConfirmAction: (confirmation: DuplicateConfirmationPayload) => Promise<void>;
+  } | null>(null);
+  const [confirmingDuplicate, setConfirmingDuplicate] = useState(false);
+  const [duplicateModalError, setDuplicateModalError] = useState<string | null>(null);
+  const confirmingDuplicateRef = useRef(false);
+
   // Preload configured exchange rate into operation forms when available (never overwrites user edits)
   useEffect(() => {
     if (exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0) {
@@ -312,6 +329,7 @@ export const MachineryView: React.FC<Props> = ({
         : ''
     );
     setObservacion('');
+    jobIdempotencyRef.current = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     setErrorMsg(null);
   };
 
@@ -330,7 +348,32 @@ export const MachineryView: React.FC<Props> = ({
         : ''
     );
     setExpObservacion('');
+    expIdempotencyRef.current = `mexp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     setErrorMsg(null);
+  };
+
+  const handleConfirmPendingDuplicate = async () => {
+    if (!pendingDuplicate || confirmingDuplicateRef.current) return;
+    confirmingDuplicateRef.current = true;
+    setConfirmingDuplicate(true);
+    setDuplicateModalError(null);
+    const confirmation: DuplicateConfirmationPayload = {
+      confirmed: true,
+      fingerprint: pendingDuplicate.duplicateCheck.fingerprint,
+      matchSignature: pendingDuplicate.duplicateCheck.matchSignature,
+    };
+    try {
+      await pendingDuplicate.onConfirmAction(confirmation);
+    } finally {
+      confirmingDuplicateRef.current = false;
+      setConfirmingDuplicate(false);
+    }
+  };
+
+  const handleCancelPendingDuplicate = () => {
+    if (confirmingDuplicateRef.current) return;
+    setPendingDuplicate(null);
+    setDuplicateModalError(null);
   };
 
   // Editing Job State (iOS Modal)
@@ -614,6 +657,7 @@ export const MachineryView: React.FC<Props> = ({
 
   const handleJobSubmit = async (e: React.FormEvent, tipoTrabajo: 'tercero' | 'propiedad') => {
     e.preventDefault();
+    if (saving || confirmingDuplicateRef.current) return;
     setErrorMsg(null);
     setSuccessMsg(null);
 
@@ -691,64 +735,89 @@ export const MachineryView: React.FC<Props> = ({
         ? jobFechaVencimiento || (parsedPlazoDias !== null ? addDaysToIso(fecha, parsedPlazoDias) : '')
         : '';
 
-    setSaving(true);
-    try {
-      await createMachineryJob({
-        tipoTrabajo,
-        fecha,
-        campanaId: activeCampaign.id,
-        campanaNombre: activeCampaign.nombre,
-        maquinariaId: selectedMachineId,
-        maquinariaNombre: machineObj?.nombre || '',
-        trabajoTipoId: selectedJobTypeId || undefined,
-        trabajoNombre: selectedJobNombre || undefined,
-        clienteId: tipoTrabajo === 'tercero' && customerObj ? customerObj.id : undefined,
-        clientePendiente: tipoTrabajo === 'tercero' ? Boolean(!customerObj || clientePendiente) : false,
-        cliente: tipoTrabajo === 'tercero' && customerObj ? customerObj.nombre : undefined,
-        plazoDias: tipoTrabajo === 'tercero' ? (parsedPlazoDias ?? undefined) : undefined,
-        fechaVencimiento: tipoTrabajo === 'tercero' && computedDueDate ? computedDueDate : undefined,
-        aplicarInteres: tipoTrabajo === 'tercero' ? jobAplicarInteres : false,
-        tasaInteresMensual: tipoTrabajo === 'tercero' && jobAplicarInteres ? (parsedTasa ?? undefined) : undefined,
-        loteId: tipoTrabajo === 'propiedad' ? selectedLotId : undefined,
-        loteNombre: tipoTrabajo === 'propiedad' ? lotObj?.nombre : undefined,
-        cantidad: Number(cantidad),
-        unidad,
-        tarifa: Number(tarifa) || 0,
-        moneda: jobMoneda,
-        tipoCambio: tcNum,
-        total: calculatedTotal,
-        observacion: observacion.trim(),
-      });
+    const submitJobPayload = async (duplicateConfirmation?: DuplicateConfirmationPayload) => {
+      setSaving(true);
+      try {
+        await createMachineryJob(
+          {
+            tipoTrabajo,
+            fecha,
+            campanaId: activeCampaign.id,
+            campanaNombre: activeCampaign.nombre,
+            maquinariaId: selectedMachineId,
+            maquinariaNombre: machineObj?.nombre || '',
+            trabajoTipoId: selectedJobTypeId || undefined,
+            trabajoNombre: selectedJobNombre || undefined,
+            clienteId: tipoTrabajo === 'tercero' && customerObj ? customerObj.id : undefined,
+            clientePendiente: tipoTrabajo === 'tercero' ? Boolean(!customerObj || clientePendiente) : false,
+            cliente: tipoTrabajo === 'tercero' && customerObj ? customerObj.nombre : undefined,
+            plazoDias: tipoTrabajo === 'tercero' ? (parsedPlazoDias ?? undefined) : undefined,
+            fechaVencimiento: tipoTrabajo === 'tercero' && computedDueDate ? computedDueDate : undefined,
+            aplicarInteres: tipoTrabajo === 'tercero' ? jobAplicarInteres : false,
+            tasaInteresMensual: tipoTrabajo === 'tercero' && jobAplicarInteres ? (parsedTasa ?? undefined) : undefined,
+            loteId: tipoTrabajo === 'propiedad' ? selectedLotId : undefined,
+            loteNombre: tipoTrabajo === 'propiedad' ? lotObj?.nombre : undefined,
+            cantidad: Number(cantidad),
+            unidad,
+            tarifa: Number(tarifa) || 0,
+            moneda: jobMoneda,
+            tipoCambio: tcNum,
+            total: calculatedTotal,
+            observacion: observacion.trim(),
+          },
+          {
+            idempotencyKey: jobIdempotencyRef.current,
+            duplicateConfirmation,
+          }
+        );
 
-      setSuccessMsg(
-        tipoTrabajo === 'tercero'
-          ? bi(
-              'Servicio para otros guardado exitosamente (+ Ingreso Maquinarias).',
-              'External service saved successfully (+ Machinery Income).'
-            )
-          : bi(
-              'Trabajo en propiedad guardado (+ Ingreso Maquinarias y − Gasto en Lote).',
-              'Farm job saved (+ Machinery Income and − Lot Expense).'
-            )
-      );
+        setPendingDuplicate(null);
+        setDuplicateModalError(null);
+        setSuccessMsg(
+          tipoTrabajo === 'tercero'
+            ? bi(
+                'Servicio para otros guardado exitosamente (+ Ingreso Maquinarias).',
+                'External service saved successfully (+ Machinery Income).'
+              )
+            : bi(
+                'Trabajo en propiedad guardado (+ Ingreso Maquinarias y − Gasto en Lote).',
+                'Farm job saved (+ Machinery Income and − Lot Expense).'
+              )
+        );
 
-      resetNewServiceForm();
-      setCurrentScreen('main');
-      onRefreshData('jobs');
-      if (tipoTrabajo === 'tercero') {
-        invalidateQueries(['cobros.', 'ar.']);
+        resetNewServiceForm();
+        setCurrentScreen('main');
+        onRefreshData('jobs');
+        if (tipoTrabajo === 'tercero') {
+          invalidateQueries(['cobros.', 'ar.']);
+        }
+      } catch (err: unknown) {
+        if (isPossibleDuplicateError(err)) {
+          setDuplicateModalError(null);
+          setPendingDuplicate({
+            duplicateCheck: err.duplicateCheck,
+            onConfirmAction: submitJobPayload,
+          });
+          return;
+        }
+        const translated =
+          err instanceof Error ? translateError(err.message) : bi('Error al guardar el trabajo', 'Error saving job');
+        if (duplicateConfirmation) {
+          setDuplicateModalError(translated);
+        } else {
+          setErrorMsg(translated);
+        }
+      } finally {
+        setSaving(false);
       }
-    } catch (err: unknown) {
-      setErrorMsg(
-        err instanceof Error ? translateError(err.message) : bi('Error al guardar el trabajo', 'Error saving job')
-      );
-    } finally {
-      setSaving(false);
-    }
+    };
+
+    await submitJobPayload();
   };
 
   const handleExpenseSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (saving || confirmingDuplicateRef.current) return;
     setErrorMsg(null);
     setSuccessMsg(null);
 
@@ -781,50 +850,68 @@ export const MachineryView: React.FC<Props> = ({
     }
 
     const machineObj = machines.find((m) => m.id === expMachineId);
+    const matchedExpItem = machineryExpenseItems.find(
+      (it) => it.nombre.trim().toLowerCase() === expItemGasto.trim().toLowerCase()
+    );
 
-    setSaving(true);
-    try {
-      await createExpense({
-        fecha: expFecha,
-        campanaId: activeCampaign.id,
-        modulo: 'maquinarias',
-        maquinariaId: expMachineId || undefined,
-        maquinariaNombre: machineObj?.nombre || undefined,
-        itemGasto: expItemGasto,
-        cantidad: Number(expCantidad) || 1,
-        unidad: expUnidad,
-        precio: Number(expPrecio),
-        moneda: expMoneda,
-        tipoCambio: tcNum,
-        total: expCalculatedTotal,
-        observacion: expObservacion.trim(),
-      });
+    const submitExpensePayload = async (duplicateConfirmation?: DuplicateConfirmationPayload) => {
+      setSaving(true);
+      try {
+        await createExpense(
+          {
+            fecha: expFecha,
+            campanaId: activeCampaign.id,
+            modulo: 'maquinarias',
+            maquinariaId: expMachineId || undefined,
+            maquinariaNombre: machineObj?.nombre || undefined,
+            itemId: matchedExpItem?.id,
+            itemGasto: expItemGasto,
+            cantidad: Number(expCantidad) || 1,
+            unidad: expUnidad,
+            precio: Number(expPrecio),
+            moneda: expMoneda,
+            tipoCambio: tcNum,
+            total: expCalculatedTotal,
+            observacion: expObservacion.trim(),
+          },
+          {
+            idempotencyKey: expIdempotencyRef.current,
+            duplicateConfirmation,
+          }
+        );
 
-      setSuccessMsg(
-        bi('Gasto de maquinaria registrado exitosamente.', 'Machinery expense recorded successfully.')
-      );
-      setExpMachineId('');
-      setExpItemGasto('');
-      setExpCantidad(1);
-      setExpUnidad('');
-      setExpPrecio('');
-      setExpObservacion('');
-      setExpTc(
-        exchangeRate?.tasaBobPerUsd && exchangeRate.tasaBobPerUsd > 0
-          ? String(exchangeRate.tasaBobPerUsd)
-          : ''
-      );
-      setCurrentScreen('main');
-      onRefreshData('movements');
-    } catch (err: unknown) {
-      setErrorMsg(
-        err instanceof Error
-          ? translateError(err.message)
-          : bi('Error al registrar el gasto', 'Error recording expense')
-      );
-    } finally {
-      setSaving(false);
-    }
+        setPendingDuplicate(null);
+        setDuplicateModalError(null);
+        setSuccessMsg(
+          bi('Gasto de maquinaria registrado exitosamente.', 'Machinery expense recorded successfully.')
+        );
+        resetNewExpenseForm();
+        setCurrentScreen('main');
+        onRefreshData('movements');
+      } catch (err: unknown) {
+        if (isPossibleDuplicateError(err)) {
+          setDuplicateModalError(null);
+          setPendingDuplicate({
+            duplicateCheck: err.duplicateCheck,
+            onConfirmAction: submitExpensePayload,
+          });
+          return;
+        }
+        const translated =
+          err instanceof Error
+            ? translateError(err.message)
+            : bi('Error al registrar el gasto', 'Error recording expense');
+        if (duplicateConfirmation) {
+          setDuplicateModalError(translated);
+        } else {
+          setErrorMsg(translated);
+        }
+      } finally {
+        setSaving(false);
+      }
+    };
+
+    await submitExpensePayload();
   };
 
   const handleOpenEditJob = (j: MachineryJob, preloadedCuenta?: CobroCuenta | null) => {
@@ -1039,51 +1126,73 @@ export const MachineryView: React.FC<Props> = ({
       return;
     }
 
-    setSaving(true);
-    try {
-      await updateMachineryJob(editingJob.id, {
-        campanaId: targetCampanaId,
-        fecha: editFecha,
-        maquinariaId: editMachineId,
-        maquinariaNombre: machineObj?.nombre || editingJob.maquinariaNombre,
-        trabajoTipoId: editJobTypeId,
-        trabajoNombre: editJobNombre,
-        tipoTrabajo: editTipoTrabajo,
-        clienteId: editTipoTrabajo === 'tercero' && editCustomerObj ? editCustomerObj.id : '',
-        clientePendiente: editTipoTrabajo === 'tercero' ? Boolean(!editCustomerObj || editClientePendiente) : false,
-        cliente: editTipoTrabajo === 'tercero' && editCustomerObj ? editCustomerObj.nombre : '',
-        plazoDias: editTipoTrabajo === 'tercero' ? (parsedEditPlazo ?? undefined) : undefined,
-        fechaVencimiento: editTipoTrabajo === 'tercero' ? computedEditDue : '',
-        aplicarInteres: editTipoTrabajo === 'tercero' ? editAplicarInteres : false,
-        tasaInteresMensual: editTipoTrabajo === 'tercero' && editAplicarInteres ? (parsedEditTasa ?? undefined) : undefined,
-        loteId: editTipoTrabajo === 'propiedad' ? editLotId : '',
-        loteNombre: editTipoTrabajo === 'propiedad' ? lotObj?.nombre : '',
-        cantidad: cantNum,
-        unidad: editUnidad,
-        tarifa: tarifaNum,
-        moneda: editMoneda,
-        tipoCambio: tcNum,
-        total: totalNum,
-        observacion: editObservacion.trim(),
-      });
-      setSuccessMsg(
-        bi('Servicio de maquinaria actualizado exitosamente.', 'Machinery service updated successfully.')
-      );
-      setEditingJob(null);
-      setEditJobCobroCuenta(null);
-      onRefreshData('jobs');
-      if (editTipoTrabajo === 'tercero' || editingJob.tipoTrabajo === 'tercero') {
-        invalidateQueries(['cobros.', 'ar.']);
+    const submitEditJobPayload = async (duplicateConfirmation?: DuplicateConfirmationPayload) => {
+      setSaving(true);
+      try {
+        await updateMachineryJob(
+          editingJob.id,
+          {
+            campanaId: targetCampanaId,
+            fecha: editFecha,
+            maquinariaId: editMachineId,
+            maquinariaNombre: machineObj?.nombre || editingJob.maquinariaNombre,
+            trabajoTipoId: editJobTypeId,
+            trabajoNombre: editJobNombre,
+            tipoTrabajo: editTipoTrabajo,
+            clienteId: editTipoTrabajo === 'tercero' && editCustomerObj ? editCustomerObj.id : '',
+            clientePendiente: editTipoTrabajo === 'tercero' ? Boolean(!editCustomerObj || editClientePendiente) : false,
+            cliente: editTipoTrabajo === 'tercero' && editCustomerObj ? editCustomerObj.nombre : '',
+            plazoDias: editTipoTrabajo === 'tercero' ? (parsedEditPlazo ?? undefined) : undefined,
+            fechaVencimiento: editTipoTrabajo === 'tercero' ? computedEditDue : '',
+            aplicarInteres: editTipoTrabajo === 'tercero' ? editAplicarInteres : false,
+            tasaInteresMensual: editTipoTrabajo === 'tercero' && editAplicarInteres ? (parsedEditTasa ?? undefined) : undefined,
+            loteId: editTipoTrabajo === 'propiedad' ? editLotId : '',
+            loteNombre: editTipoTrabajo === 'propiedad' ? lotObj?.nombre : '',
+            cantidad: cantNum,
+            unidad: editUnidad,
+            tarifa: tarifaNum,
+            moneda: editMoneda,
+            tipoCambio: tcNum,
+            total: totalNum,
+            observacion: editObservacion.trim(),
+          },
+          { duplicateConfirmation }
+        );
+        setPendingDuplicate(null);
+        setDuplicateModalError(null);
+        setSuccessMsg(
+          bi('Servicio de maquinaria actualizado exitosamente.', 'Machinery service updated successfully.')
+        );
+        setEditingJob(null);
+        setEditJobCobroCuenta(null);
+        onRefreshData('jobs');
+        if (editTipoTrabajo === 'tercero' || editingJob.tipoTrabajo === 'tercero') {
+          invalidateQueries(['cobros.', 'ar.']);
+        }
+      } catch (err: unknown) {
+        if (isPossibleDuplicateError(err)) {
+          setDuplicateModalError(null);
+          setPendingDuplicate({
+            duplicateCheck: err.duplicateCheck,
+            onConfirmAction: submitEditJobPayload,
+          });
+          return;
+        }
+        const translated =
+          err instanceof Error
+            ? translateError(err.message)
+            : bi('Error al actualizar el servicio', 'Error updating service');
+        if (duplicateConfirmation) {
+          setDuplicateModalError(translated);
+        } else {
+          setEditJobError(translated);
+        }
+      } finally {
+        setSaving(false);
       }
-    } catch (err: unknown) {
-      setEditJobError(
-        err instanceof Error
-          ? translateError(err.message)
-          : bi('Error al actualizar el servicio', 'Error updating service')
-      );
-    } finally {
-      setSaving(false);
-    }
+    };
+
+    await submitEditJobPayload();
   };
 
   const handleConfirmDeleteJob = async () => {
@@ -1194,36 +1303,63 @@ export const MachineryView: React.FC<Props> = ({
     const precioNum = Number(editExpPrecio);
     const totalNum = cantNum * precioNum;
 
-    setSaving(true);
-    try {
-      await updateExpense(editingExpense.id, {
-        fecha: editExpFecha,
-        modulo: 'maquinarias',
-        maquinariaId: editExpMachineId || undefined,
-        maquinariaNombre: machineObj?.nombre || undefined,
-        itemGasto: editExpItemGasto,
-        cantidad: cantNum,
-        unidad: editExpUnidad,
-        precio: precioNum,
-        moneda: editExpMoneda,
-        tipoCambio: tcNum,
-        total: totalNum,
-        observacion: editExpObservacion.trim(),
-      });
-      setSuccessMsg(
-        bi('Gasto de maquinaria actualizado exitosamente.', 'Machinery expense updated successfully.')
-      );
-      setEditingExpense(null);
-      onRefreshData('movements');
-    } catch (err: unknown) {
-      setEditExpError(
-        err instanceof Error
-          ? translateError(err.message)
-          : bi('Error al actualizar el gasto', 'Error updating expense')
-      );
-    } finally {
-      setSaving(false);
-    }
+    const matchedEditExpItem = machineryExpenseItems.find(
+      (it) => it.nombre.trim().toLowerCase() === editExpItemGasto.trim().toLowerCase()
+    );
+
+    const submitEditExpensePayload = async (duplicateConfirmation?: DuplicateConfirmationPayload) => {
+      setSaving(true);
+      try {
+        await updateExpense(
+          editingExpense.id,
+          {
+            fecha: editExpFecha,
+            modulo: 'maquinarias',
+            maquinariaId: editExpMachineId || undefined,
+            maquinariaNombre: machineObj?.nombre || undefined,
+            itemId: matchedEditExpItem?.id ?? (editExpItemGasto.trim().toLowerCase() === (editingExpense.itemGasto || '').trim().toLowerCase() ? editingExpense.itemId : ''),
+            itemGasto: editExpItemGasto,
+            cantidad: cantNum,
+            unidad: editExpUnidad,
+            precio: precioNum,
+            moneda: editExpMoneda,
+            tipoCambio: tcNum,
+            total: totalNum,
+            observacion: editExpObservacion.trim(),
+          },
+          { duplicateConfirmation }
+        );
+        setPendingDuplicate(null);
+        setDuplicateModalError(null);
+        setSuccessMsg(
+          bi('Gasto de maquinaria actualizado exitosamente.', 'Machinery expense updated successfully.')
+        );
+        setEditingExpense(null);
+        onRefreshData('movements');
+      } catch (err: unknown) {
+        if (isPossibleDuplicateError(err)) {
+          setDuplicateModalError(null);
+          setPendingDuplicate({
+            duplicateCheck: err.duplicateCheck,
+            onConfirmAction: submitEditExpensePayload,
+          });
+          return;
+        }
+        const translated =
+          err instanceof Error
+            ? translateError(err.message)
+            : bi('Error al actualizar el gasto', 'Error updating expense');
+        if (duplicateConfirmation) {
+          setDuplicateModalError(translated);
+        } else {
+          setEditExpError(translated);
+        }
+      } finally {
+        setSaving(false);
+      }
+    };
+
+    await submitEditExpensePayload();
   };
 
   const externalJobs = jobs.filter((j) => j.tipoTrabajo === 'tercero');
@@ -3574,6 +3710,14 @@ export const MachineryView: React.FC<Props> = ({
           </div>
         </div>
       )}
+
+      <DuplicateWarningModal
+        duplicateCheck={pendingDuplicate?.duplicateCheck || null}
+        isConfirming={confirmingDuplicate}
+        errorMsg={duplicateModalError}
+        onCancel={handleCancelPendingDuplicate}
+        onConfirm={handleConfirmPendingDuplicate}
+      />
 
     </div>
   );

@@ -313,10 +313,50 @@ export const ICON_CATALOG: IconDefinition[] = [
     description: 'Productos para control de plagas e insectos en el cultivo',
   },
   {
+    id: 'sueldos',
+    name: 'Sueldos',
+    label: 'Sueldos',
+    category: 'gasto',
+    keywords: ['sueldos', 'sueldo', 'salarios', 'salario', 'planilla', 'jornal', 'jornales', 'personal', 'mano de obra', 'nomina', 'nómina', 'salaries', 'wages', 'payroll'],
+    description: 'Pago de sueldos, salarios, planillas y jornales del personal',
+  },
+  {
+    id: 'energia-electrica',
+    name: 'Energía eléctrica',
+    label: 'Energía eléctrica',
+    category: 'gasto',
+    keywords: ['energia', 'energía', 'electrica', 'eléctrica', 'luz', 'electricidad', 'medidor', 'cre', 'tarifa electrica', 'electricity', 'power'],
+    description: 'Consumo de energía eléctrica, medidor y suministro de luz',
+  },
+  {
+    id: 'alimentacion',
+    name: 'Alimentación',
+    label: 'Alimentación',
+    category: 'gasto',
+    keywords: ['alimentacion', 'alimentación', 'comida', 'alimentos', 'viveres', 'víveres', 'cocina', 'comedor', 'despensa', 'food', 'meals', 'groceries'],
+    description: 'Compra de víveres, cocina y alimentación del personal',
+  },
+  {
+    id: 'seguros',
+    name: 'Seguros',
+    label: 'Seguros',
+    category: 'gasto',
+    keywords: ['seguros', 'seguro', 'poliza', 'póliza', 'soat', 'cobertura', 'proteccion', 'protección', 'insurance', 'policy'],
+    description: 'Pólizas de seguros agrícolas, vehiculares y de maquinaria',
+  },
+  {
+    id: 'limpieza-terrenos',
+    name: 'Limpieza de terrenos',
+    label: 'Limpieza de terrenos',
+    category: 'gasto',
+    keywords: ['limpieza', 'terrenos', 'desbroce', 'desbrozadora', 'maleza', 'chaco', 'desmonte', 'rozado', 'limpiar', 'land clearing', 'clearing', 'brush'],
+    description: 'Desbroce, rozado y limpieza de maleza y terrenos',
+  },
+  {
     id: 'otros-gastos',
     name: 'Otros Gastos',
     category: 'gasto',
-    keywords: ['otros', 'varios', 'gastos', 'administrativo', 'comida', 'jornal'],
+    keywords: ['otros', 'varios', 'gastos', 'administrativo', 'general'],
     description: 'Gastos operativos generales de la campaña o el establecimiento',
   },
 ];
@@ -375,6 +415,11 @@ export function getIconDefinition(idOrName?: string, categoryHint?: IconCategory
   if (clean.includes('herbicida')) return findIcon('herbicida');
   if (clean.includes('insecticida')) return findIcon('insecticida');
   if (clean.includes('fungicida')) return findIcon('insecticida');
+  if (clean.includes('sueldo') || clean.includes('salario') || clean.includes('planilla') || clean.includes('jornal')) return findIcon('sueldos');
+  if (clean.includes('energia') || clean.includes('energía') || clean.includes('electric') || clean.includes('eléctric') || clean.includes('luz')) return findIcon('energia-electrica');
+  if (clean.includes('aliment') || clean.includes('comida') || clean.includes('vivere') || clean.includes('vívere')) return findIcon('alimentacion');
+  if (clean.includes('seguro') || clean.includes('poliza') || clean.includes('póliza') || clean.includes('soat')) return findIcon('seguros');
+  if (clean.includes('limpieza') || clean.includes('desbro') || clean.includes('rozado') || clean.includes('chaco')) return findIcon('limpieza-terrenos');
 
   // 5. Mapeos de maquinarias
   if (clean.includes('drone') || clean.includes('dron')) return findIcon('drone-agricola');

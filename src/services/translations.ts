@@ -728,6 +728,11 @@ export const ICON_LABELS_EN: Record<string, string> = {
   fertilizante: 'Fertilizers',
   herbicida: 'Herbicides',
   insecticida: 'Insecticides',
+  sueldos: 'Salaries',
+  'energia-electrica': 'Electricity',
+  alimentacion: 'Food',
+  seguros: 'Insurance',
+  'limpieza-terrenos': 'Land clearing',
   'otros-gastos': 'Other Expenses',
 };
 
